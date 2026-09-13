@@ -36,7 +36,7 @@ fun Application.dssModule(deps: DssDependencies) {
   installStatusPages(plainTextErrorPaths = setOf(Paths.install, deps.config.oauthRedirectPath))
   installJsonContentNegotiation()
   installRequestValidation()
-  installMonolithWebhookAuth(deps.config.dssApiKey)
+  installMonolithWebhookAuth(deps.config.monolithToDssApiKey)
 
   routing {
     diagnosticsRoutes(handlers = deps.diagnosticsHandlers)

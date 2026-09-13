@@ -1,9 +1,11 @@
 package dropnext.dss.mapper
 
 import dropnext.dss.contract.OrderLineItem
+import dropnext.dss.domain.ShopifyOrderId
 import dropnext.dss.testutil.fixture.minimalOrder
 import dropnext.dss.testutil.fixture.openFulfillmentOrder
 import dropnext.dss.testutil.fixture.orderWithFulfillmentOrders
+import dropnext.dss.testutil.helper.orderToCreateShopifyOrderRequest
 import dropnext.graphql.generated.enums.CountryCode
 import dropnext.graphql.generated.enums.FulfillmentOrderStatus
 import dropnext.graphql.generated.enums.OrderDisplayFinancialStatus
@@ -17,7 +19,9 @@ import dropnext.graphql.generated.getorderfordss.Order
 import kotlin.test.Test
 
 
-class OrderToCreateShopifyOrderRequestTest {
+class MapOrderForMonolithTest {
+
+  private val orderId = ShopifyOrderId(1001L)
 
   @Test
   fun `maps financial status to PascalCase`() {
@@ -303,17 +307,24 @@ class OrderToCreateShopifyOrderRequestTest {
     assert(req.lineItems.single().fulfillmentOrderId == 300L)
   }
 
+  /** A snapshot without a readable id used to be sent as order `0`; the id now comes from the gid the caller loaded. */
+  @Test
+  fun `the order is keyed by the id the caller names`() {
+    val mapping = mapOrderForMonolith("dropnext-staging", ShopifyOrderId(4242L), minimalOrder())
+    assert(mapping.request.shopifyOrderId == 4242L)
+  }
+
   // ---------- what is left out, and why ----------
 
   @Test
   fun `a fully mapped order reports no omissions`() {
-    assert(mapOrderForMonolith("dropnext-staging", minimalOrder()).omittedLineItems.isEmpty())
+    assert(mapOrderForMonolith("dropnext-staging", orderId, minimalOrder()).omittedLineItems.isEmpty())
   }
 
   @Test
   fun `a line without a variant is omitted as such`() {
     val order = minimalOrder().withSingleLineItem { it.copy(variant = null) }
-    val mapping = mapOrderForMonolith("dropnext-staging", order)
+    val mapping = mapOrderForMonolith("dropnext-staging", orderId, order)
     assert(mapping.request.lineItems.isEmpty())
     assert(mapping.omittedLineItems == listOf(OmittedOrderLineItem("gid://shopify/LineItem/201", OrderLineItemOmission.NO_VARIANT)))
   }
@@ -321,21 +332,21 @@ class OrderToCreateShopifyOrderRequestTest {
   @Test
   fun `a line whose variant id is not numeric is omitted as such`() {
     val order = minimalOrder().withSingleLineItem { it.copy(variant = it.variant!!.copy(legacyResourceId = "abc")) }
-    val mapping = mapOrderForMonolith("dropnext-staging", order)
+    val mapping = mapOrderForMonolith("dropnext-staging", orderId, order)
     assert(mapping.omittedLineItems.single().reason == OrderLineItemOmission.UNPARSEABLE_VARIANT_ID)
   }
 
   @Test
   fun `a line whose variant is on no fulfillment order is omitted as such`() {
     val order = minimalOrder().copy(fulfillmentOrders = FulfillmentOrderConnection(edges = emptyList()))
-    val mapping = mapOrderForMonolith("dropnext-staging", order)
+    val mapping = mapOrderForMonolith("dropnext-staging", orderId, order)
     assert(mapping.omittedLineItems.single().reason == OrderLineItemOmission.NO_FULFILLMENT_ORDER)
   }
 
   @Test
   fun `a line whose own id carries no number is omitted as such`() {
     val order = minimalOrder().withSingleLineItem { it.copy(id = "gid://shopify/LineItem/") }
-    val mapping = mapOrderForMonolith("dropnext-staging", order)
+    val mapping = mapOrderForMonolith("dropnext-staging", orderId, order)
     assert(mapping.omittedLineItems.single() == OmittedOrderLineItem("gid://shopify/LineItem/", OrderLineItemOmission.UNPARSEABLE_LINE_ITEM_ID))
   }
 

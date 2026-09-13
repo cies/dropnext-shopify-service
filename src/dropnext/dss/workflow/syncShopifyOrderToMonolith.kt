@@ -3,11 +3,13 @@ package dropnext.dss.workflow
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
 import dropnext.dss.contract.CreateShopifyOrderRequest
+import dropnext.dss.domain.ShopifyOrderId
 import dropnext.dss.lib.monolith.CreateOrderOutcome
 import dropnext.dss.lib.monolith.MonolithResult
 import dropnext.dss.lib.monolith.MonolithService
 import dropnext.dss.lib.monolith.logMonolithFailure
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlService
+import dropnext.dss.lib.shopify.legacyIdFromGid
 import dropnext.dss.mapper.OrderLineItemOmission
 import dropnext.dss.mapper.mapOrderForMonolith
 import io.github.oshai.kotlinlogging.KotlinLogging
@@ -26,6 +28,11 @@ suspend fun syncShopifyOrderToMonolith(
   orderGid: String,
   webhookTopic: String,
 ): WebhookMirrorOutcome {
+  // The gid is what the webhook named and what Shopify is asked for, so it is what the monolith keys the order by.
+  val orderId = legacyIdFromGid(orderGid)?.let(::ShopifyOrderId) ?: run {
+    log.warn { "Webhook $webhookTopic: the order gid carries no numeric id orderGid=$orderGid" }
+    return WebhookMirrorOutcome.Skipped(WebhookSkipReason.NO_RESOURCE_ID)
+  }
   val order = when (val loaded = shopify.orderForDss(orderGid)) {
     is Failure -> {
       log.error { "Webhook $webhookTopic: could not load order orderGid=$orderGid error=${loaded.reason.message}" }
@@ -34,7 +41,7 @@ suspend fun syncShopifyOrderToMonolith(
     is Success -> loaded.value
   }
   log.info { "Webhook order loaded id=${order.id} name=${order.name}" }
-  val mapping = mapOrderForMonolith(shopify.shop.subdomainOnly, order)
+  val mapping = mapOrderForMonolith(shopify.shop.subdomainOnly, orderId, order)
   val req = mapping.request
   mapping.omittedLineItems.forEach { omitted ->
     val line = "Webhook $webhookTopic: omitted line item ${omitted.lineItemId} " +

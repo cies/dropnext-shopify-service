@@ -30,7 +30,7 @@ import org.junit.jupiter.api.Test
 
 
 private val acmeShop = ShopDomain.parse("acme.myshopify.com")!!
-private val dssApiKey = "d".repeat(32)
+private val monolithToDssApiKey = "d".repeat(32)
 
 
 /**
@@ -78,8 +78,8 @@ class DiagnosticsHandlersTest {
   fun `the api status summary carries no secret`() {
     val config = testConfig(
       appClientSecret = "shpss_app_secret_value",
-      dssApiKey = dssApiKey,
-      monolithApiKey = "mono_api_key_value",
+      monolithToDssApiKey = monolithToDssApiKey,
+      dssToMonolithApiKey = "mono_api_key_value",
       shopAccessTokens = mapOf(acmeShop to ShopifyAdminToken("shpat_seeded_token")),
     )
     withDssApp(deps(config = config)) { client ->
@@ -87,7 +87,7 @@ class DiagnosticsHandlersTest {
       assert("shpss_app_secret_value" !in body)
       assert("mono_api_key_value" !in body)
       assert("shpat_seeded_token" !in body)
-      assert(dssApiKey !in body)
+      assert(monolithToDssApiKey !in body)
     }
   }
 
@@ -195,7 +195,7 @@ class DiagnosticsHandlersTest {
 
   /** The factory is given the token store, so a check finds a service only for a shop whose token resolves, as in production. */
   private fun deps(
-    config: Config = testConfig(dssApiKey = dssApiKey),
+    config: Config = testConfig(monolithToDssApiKey = monolithToDssApiKey),
     tokens: InMemoryShopTokenStore = InMemoryShopTokenStore(),
     monolith: FakeMonolithService = FakeMonolithService(),
     shopify: FakeShopifyGraphqlService? = FakeShopifyGraphqlService(),

@@ -101,12 +101,17 @@ strings; when a raw body must be checked (the plain-text OAuth errors), check th
   `shipment(...)` builders happened.
 
 ## Parallelism
-Test classes run sequentially in one fork today (`maxParallelForks = 1`, no `junit-platform.properties`). Fakes are
-per-test instances and every HTTP fake binds port 0, so a test must not assume a fixed port, shared static state, or
-an order between classes — that keeps the door open for running classes concurrently. `TestSuiteArchitectureTest`
-holds that door open: no mutable companion state, and a fake server records into a concurrent collection because its
-request thread writes what the test thread reads. A test that touches the root logger declares
-`@ResourceLock(GLOBAL_LOG_REGISTRY)`.
+Test classes run concurrently, the methods within a class sequentially (`test/resources/junit-platform.properties`,
+inside one Gradle fork). What makes that safe, and what a new test must keep true: fakes are per-test instances, every
+HTTP fake binds port 0, and nothing assumes a fixed port, shared static state or an order between classes.
+`TestSuiteArchitectureTest` checks part of it: no mutable companion state, and a fake server records into a concurrent
+collection because its request thread writes what the test thread reads. A test that reads the root logger
+(`capturingLogs`, a Logback appender, `System.setErr`) declares `@ResourceLock(GLOBAL_LOG_REGISTRY)`, which is JUnit's
+global lock: the test runs alone, because every other test writes to that logger and a `single { … in it }` over its
+lines is only right while nothing else runs. Put the lock on the methods that read the log rather than on the class
+when only a few do, so the rest of the class still overlaps with the suite. `SlowestClassesFirstOrderer`
+(`testutil/helper/`) hands the known-slow classes to the pool first and the log-reading ones last; regenerate its list
+with `./gradlew test slowestTestClasses` when the timings move.
 
 ## Fakes record uniformly
 Every fake implements `RecordingFake`: one `<method>Calls` list per recorded method and a `clear()`. `calls.size` is

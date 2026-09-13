@@ -4,6 +4,7 @@ import dropnext.dss.domain.ShopDomain
 import dropnext.dss.lib.monolith.MonolithError
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.workflow.WebhookMirrorOutcome
+import dropnext.dss.workflow.WebhookSkipReason
 import dropnext.dss.workflow.isTransient
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -31,7 +32,7 @@ data class WebhookDeliveryReport(
       is WebhookMirrorOutcome.Mirrored -> "mirrored"
       is WebhookMirrorOutcome.Skipped -> "skipped"
       is WebhookMirrorOutcome.ShopifyFailed, is WebhookMirrorOutcome.MonolithFailed,
-      is WebhookMirrorOutcome.TokenUnavailable, is WebhookMirrorOutcome.TimedOut,
+      is WebhookMirrorOutcome.TokenUnavailable, is WebhookMirrorOutcome.TimedOut, is WebhookMirrorOutcome.Overloaded,
         -> "failed"
     }
 
@@ -55,6 +56,7 @@ data class WebhookDeliveryReport(
       }
       is WebhookMirrorOutcome.TokenUnavailable -> "token_unavailable"
       is WebhookMirrorOutcome.TimedOut -> "timed_out"
+      is WebhookMirrorOutcome.Overloaded -> "overloaded"
     }
 
   /** Shopify's `extensions.code` values (`THROTTLED`, `ACCESS_DENIED`): as countable as the label, and they say which Graphql error it was. */
@@ -65,15 +67,18 @@ data class WebhookDeliveryReport(
     get() = (outcome as? WebhookMirrorOutcome.Skipped)?.reason?.name?.lowercase()
 
   /**
-   * Chosen by what the reader has to do: nothing for a mirrored or skipped delivery, wait for a
-   * transient failure (Shopify redelivers it), act for a permanent one (only a human can fix a
-   * refused token or a refused order).
+   * Chosen by what the reader has to do: nothing for a mirrored delivery or a skip that is the normal shape of things,
+   * act on a skip that repeats for every delivery of the shop until someone does (no token, no shop), wait for a
+   * transient failure (Shopify redelivers it), act for a permanent one (only a human can fix a refused token or a
+   * refused order). This is the one line a delivery leaves in the log, so its level is what an alert reads.
    */
   val logLevel: LogLevel
-    get() = when {
-      outcome is WebhookMirrorOutcome.Mirrored || outcome is WebhookMirrorOutcome.Skipped -> LogLevel.INFO
-      outcome.isTransient -> LogLevel.WARN
-      else -> LogLevel.ERROR
+    get() = when (val outcome = outcome) {
+      is WebhookMirrorOutcome.Mirrored -> LogLevel.INFO
+      is WebhookMirrorOutcome.Skipped -> outcome.reason.logLevel
+      is WebhookMirrorOutcome.ShopifyFailed, is WebhookMirrorOutcome.MonolithFailed,
+      is WebhookMirrorOutcome.TokenUnavailable, is WebhookMirrorOutcome.TimedOut, is WebhookMirrorOutcome.Overloaded,
+        -> if (outcome.isTransient) LogLevel.WARN else LogLevel.ERROR
     }
 
   enum class LogLevel { INFO, WARN, ERROR }
@@ -95,6 +100,15 @@ data class WebhookDeliveryReport(
   fun toResponse(traceId: String?): WebhookDeliveryResponse =
     WebhookDeliveryResponse(outcome = outcomeLabel, reason = skipReasonLabel, error = errorLabel, traceId = traceId)
 }
+
+/** A skip nobody has to act on is information; one that keeps happening until someone acts is an error. */
+private val WebhookSkipReason.logLevel: WebhookDeliveryReport.LogLevel
+  get() = when (this) {
+    WebhookSkipReason.NO_SHOP_DOMAIN, WebhookSkipReason.NO_ADMIN_TOKEN -> WebhookDeliveryReport.LogLevel.ERROR
+    WebhookSkipReason.NO_RESOURCE_ID -> WebhookDeliveryReport.LogLevel.WARN
+    WebhookSkipReason.PRODUCT_GONE, WebhookSkipReason.NO_MAPPABLE_LINES, WebhookSkipReason.TOPIC_NOT_MIRRORED,
+      -> WebhookDeliveryReport.LogLevel.INFO
+  }
 
 /**
  * The body of a `200` to Shopify. Shopify ignores it but stores it with the delivery, so whoever opens

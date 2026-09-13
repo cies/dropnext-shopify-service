@@ -33,6 +33,11 @@ import java.util.Base64
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Semaphore
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.parallel.ResourceLock
 
@@ -126,6 +131,22 @@ class ShopifyWebhookHandlersTest {
       assert(r.status == HttpStatusCode.OK)
       assert(monolith.createOrderCalls.isEmpty())
     }
+  }
+
+  /** The summary line is the one line a skipped delivery leaves: at error level for a shop without a token, and nothing else. */
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `a delivery for a shop without a token leaves one error line and no other`() {
+    val lines = capturingLogs {
+      withDssApp(deps(monolith = FakeMonolithService())) { client ->
+        val r = client.signedWebhook("products/create", """{"id":1,"domain":"acme.myshopify.com"}""")
+        assert(r.status == HttpStatusCode.OK)
+      }
+    }
+    val done = lines.single { "Webhook done" in it }
+    assert(done.startsWith("ERROR"))
+    assert("outcome=skipped reason=no_admin_token" in done)
+    assert(lines.none { "no Admin token" in it })
   }
 
   @Test
@@ -337,21 +358,87 @@ class ShopifyWebhookHandlersTest {
     }
   }
 
-  /** Shopify stops waiting after five seconds; work still running by then is cancelled and the delivery asked for again. */
+  /**
+   * Shopify stops waiting after five seconds. A read still running when the budget ends is cancelled however long the
+   * write grace is: nothing has changed yet, and the redelivery asks again.
+   */
   @Test
-  fun `orders_create that outlives the time budget is answered 502 so Shopify redelivers`() {
+  fun `orders_create whose Shopify read outlives the time budget is answered 502 without waiting out the write grace`() {
     val monolith = FakeMonolithService()
     val shopify = FakeShopifyGraphqlService().apply {
       orderForDssResult = Success(minimalOrder())
       orderForDssDelay = 2.seconds
     }
-    withDssApp(deps(monolith = monolith, shopify = shopify, mirrorBudget = 50.milliseconds)) { client ->
+    withDssApp(deps(monolith = monolith, shopify = shopify, mirrorBudget = 50.milliseconds, writeGrace = 5.seconds)) { client ->
       val r = client.signedWebhook(
         "orders/create",
         """{"id":1001,"admin_graphql_api_id":"gid://shopify/Order/1001","domain":"acme.myshopify.com"}""",
       )
       assert(r.status == HttpStatusCode.BadGateway)
       assert(monolith.createOrderCalls.isEmpty())
+    }
+  }
+
+  /** A write already on the wire when the budget ends may still land within Shopify's five seconds; cancelling it would discard a commit. */
+  @Test
+  fun `orders_create whose monolith write outlives the time budget but not its grace is answered 200`() {
+    val monolith = FakeMonolithService().apply { writeDelay = 1_500.milliseconds }
+    val shopify = FakeShopifyGraphqlService().apply { orderForDssResult = Success(minimalOrder()) }
+    withDssApp(deps(monolith = monolith, shopify = shopify, mirrorBudget = 1.seconds, writeGrace = 3.seconds)) { client ->
+      val r = client.signedWebhook("orders/create", """{"id":1001,"admin_graphql_api_id":"gid://shopify/Order/1001","domain":"acme.myshopify.com"}""")
+      assert(r.status == HttpStatusCode.OK)
+      assert(r.body<WebhookDeliveryResponse>().outcome == "mirrored")
+      assert(monolith.createOrderCalls.size == 1)
+    }
+  }
+
+  /** The grace bounds the wait: a write that outlives it too is cancelled, and the redelivery finds the order or creates it. */
+  @Test
+  fun `orders_create whose monolith write outlives its grace too is answered 502`() {
+    val monolith = FakeMonolithService().apply { writeDelay = 10.seconds }
+    val shopify = FakeShopifyGraphqlService().apply { orderForDssResult = Success(minimalOrder()) }
+    withDssApp(deps(monolith = monolith, shopify = shopify, mirrorBudget = 300.milliseconds, writeGrace = 300.milliseconds)) { client ->
+      val r = client.signedWebhook("orders/create", """{"id":1001,"admin_graphql_api_id":"gid://shopify/Order/1001","domain":"acme.myshopify.com"}""")
+      assert(r.status == HttpStatusCode.BadGateway)
+      assert(monolith.createOrderCalls.size == 1)
+    }
+  }
+
+  /** A delete has no read before its write, so the grace covers it from the first call. */
+  @Test
+  fun `products_delete whose monolith write outlives the time budget but not its grace is answered 200`() {
+    val monolith = FakeMonolithService().apply { writeDelay = 1_500.milliseconds }
+    withDssApp(deps(monolith = monolith, shopify = FakeShopifyGraphqlService(), mirrorBudget = 1.seconds, writeGrace = 3.seconds)) { client ->
+      val r = client.signedWebhook("products/delete", """{"id":503}""")
+      assert(r.status == HttpStatusCode.OK)
+      assert(monolith.deleteProductVariantsCalls.size == 1)
+    }
+  }
+
+  /** A delivery that finds every mirror slot taken is answered before any work, so a burst cannot queue up behind itself. */
+  @Test
+  fun `a delivery arriving while every mirror slot is taken is answered 502 without work`() {
+    val monolith = FakeMonolithService()
+    val gate = CompletableDeferred<Unit>()
+    val shopify = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Success(minimalOrder())
+      orderForDssGate = gate
+    }
+    withDssApp(deps(monolith = monolith, shopify = shopify, mirrorSlots = Semaphore(1))) { client ->
+      val body = """{"id":1001,"admin_graphql_api_id":"gid://shopify/Order/1001","domain":"acme.myshopify.com"}"""
+      coroutineScope {
+        val first = async { client.signedWebhook("orders/create", body) }
+        // The first delivery holds the one slot once it is inside its order load, waiting at the gate.
+        while (shopify.orderForDssCalls.isEmpty()) delay(10.milliseconds)
+
+        val second = client.signedWebhook("orders/create", body)
+        assert(second.status == HttpStatusCode.BadGateway)
+        assert(shopify.orderForDssCalls.size == 1)
+
+        gate.complete(Unit)
+        assert(first.await().status == HttpStatusCode.OK)
+      }
+      assert(monolith.createOrderCalls.size == 1)
     }
   }
 
@@ -456,11 +543,15 @@ class ShopifyWebhookHandlersTest {
     shopify: FakeShopifyGraphqlService? = null,
     tokenSourceUnavailable: Boolean = false,
     mirrorBudget: Duration = WEBHOOK_MIRROR_BUDGET,
+    writeGrace: Duration = WEBHOOK_WRITE_GRACE,
+    mirrorSlots: Semaphore = Semaphore(MAX_CONCURRENT_MIRRORS),
   ): DssDependencies = dssDependencies(
     config = testConfig(appClientSecret = WEBHOOK_SECRET),
     monolithService = monolith,
     shopTokens = InMemoryShopTokenStore(),
     shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = shopify, tokenSourceUnavailable = tokenSourceUnavailable),
     webhookMirrorBudget = mirrorBudget,
+    webhookWriteGrace = writeGrace,
+    webhookMirrorSlots = mirrorSlots,
   )
 }

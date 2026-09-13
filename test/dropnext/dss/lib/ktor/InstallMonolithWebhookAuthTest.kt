@@ -105,7 +105,7 @@ class InstallMonolithWebhookAuthTest {
     }
 
   private fun deps(): DssDependencies = dssDependencies(
-    config = testConfig(dssApiKey = SECRET),
+    config = testConfig(monolithToDssApiKey = SECRET),
     monolithService = FakeMonolithService(),
   )
 }

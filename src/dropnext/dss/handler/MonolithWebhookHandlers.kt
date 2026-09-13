@@ -11,12 +11,9 @@ import dropnext.dss.contract.UpdateStoreApiKeyResponse
 import dropnext.dss.domain.MonolithPersistOutcome
 import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.domain.ShopifyShopId
-import dropnext.dss.lib.ktor.DssError
 import dropnext.dss.lib.ktor.respondError
 import dropnext.dss.lib.monolith.MonolithService
-import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlService
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlServiceFactory
-import dropnext.dss.lib.shopify.token.ShopLookup
 import dropnext.dss.lib.shopify.token.ShopTokenStore
 import dropnext.dss.workflow.persistTokenToMonolith
 import dropnext.dss.workflow.syncShopifyShipmentsToFulfillments
@@ -43,7 +40,8 @@ class MonolithWebhookHandlers(
 
   suspend fun handleSyncShipments(call: ApplicationCall) {
     val request = call.receive<SyncShipmentsWithFulfillmentsRequest>()
-    val shopify = call.shopifyServiceOrRespond(request.shopifySubdomain) ?: return
+    val shop = call.shopDomainOrRespond(request.shopifySubdomain, "shopify_subdomain") ?: return
+    val shopify = call.shopifyServiceOrRespond(shopifyGraphqlServiceFactory, shop) ?: return
 
     when (val synced = syncShopifyShipmentsToFulfillments(shopify, request)) {
       is Success ->
@@ -59,7 +57,8 @@ class MonolithWebhookHandlers(
 
   suspend fun handleTrackingUpdate(call: ApplicationCall) {
     val request = call.receive<TrackingUpdateRequest>()
-    val shopify = call.shopifyServiceOrRespond(request.shopifySubdomain) ?: return
+    val shop = call.shopDomainOrRespond(request.shopifySubdomain, "shopify_subdomain") ?: return
+    val shopify = call.shopifyServiceOrRespond(shopifyGraphqlServiceFactory, shop) ?: return
 
     when (val synced = syncShopifyTrackingEvent(shopify, request)) {
       is Success ->
@@ -89,25 +88,6 @@ class MonolithWebhookHandlers(
     when (val persisted = persistTokenToMonolith(monolithService, shop, shopId, token)) {
       is MonolithPersistOutcome.Persisted -> call.respond(UpdateStoreApiKeyResponse(storeId = persisted.storeId.value))
       is MonolithPersistOutcome.Failed -> call.respondError(persisted.toDssError())
-    }
-  }
-
-  /**
-   * The shop's Graphql service, or the answer that explains why there is none: a `400` for a malformed shop, a `401`
-   * for a shop without a token, and a `502` the monolith retries when the token lookup itself did not get an answer.
-   */
-  private suspend fun ApplicationCall.shopifyServiceOrRespond(rawShop: String): ShopifyGraphqlService? {
-    val shop = shopDomainOrRespond(rawShop, "shopify_subdomain") ?: return null
-    return when (val lookup = shopifyGraphqlServiceFactory.forShop(shop)) {
-      is ShopLookup.Found -> lookup.value
-      ShopLookup.Missing -> {
-        respondError(DssError.MissingShopifyAdminToken)
-        null
-      }
-      ShopLookup.Unavailable -> {
-        respondError(DssError.ShopifyAdminTokenUnavailable)
-        null
-      }
     }
   }
 }

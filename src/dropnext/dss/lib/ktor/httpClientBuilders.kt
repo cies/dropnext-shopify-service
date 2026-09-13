@@ -1,23 +1,30 @@
 package dropnext.dss.lib.ktor
 
 import dropnext.dss.lib.json.AppJson
+import io.github.oshai.kotlinlogging.KotlinLogging
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.network.sockets.ConnectTimeoutException
 import io.ktor.client.network.sockets.SocketTimeoutException
 import io.ktor.client.plugins.HttpRequestRetry
+import io.ktor.client.plugins.HttpRequestRetryEvent
 import io.ktor.client.plugins.HttpRequestTimeoutException
+import io.ktor.client.plugins.HttpRetryEventData
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.callid.CallId
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.http.encodedPath
 import io.ktor.serialization.kotlinx.json.json
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import okhttp3.Dispatcher
 
 
+private val log = KotlinLogging.logger {}
+
 // The timeouts in this file line up with two limits set elsewhere. Shopify waits five seconds for a webhook's answer,
-// and the handler holds the work behind a delivery to four (`WEBHOOK_MIRROR_BUDGET`). The monolith waits thirty seconds
+// and the handler holds the work behind a delivery to four, plus a short grace for a monolith write already sent
+// (`WEBHOOK_MIRROR_BUDGET`, `WEBHOOK_WRITE_GRACE`). The monolith waits thirty seconds
 // (its client's read timeout) for the routes it calls; the calls those routes make have to fit inside that.
 
 /**
@@ -105,11 +112,18 @@ fun createSharedHttpClient(): HttpClient = HttpClient(OkHttp) {
  * It also forwards the request's trace id, read from the coroutine context the server's `CallId` plugin
  * fills, so the monolith's log lines for a call can be found from ours. Shopify does not get the header.
  * The OkHttp engine and connection pool are shared.
+ *
+ * Every attempt it repeats is logged before the backoff ([logRetriedMonolithFailure]): only the last attempt's
+ * failure reaches the caller, and none does when the caller's time budget cancels the wait.
+ *
+ * [maxRetries] is a parameter because the routes differ in how many attempts fit their budget: a monolith-facing
+ * route has thirty seconds, a webhook four (`WEBHOOK_MONOLITH_MAX_RETRIES`).
  */
 fun createMonolithHttpClient(
   baseHttpClient: HttpClient,
   requestTimeoutMillis: Long = MONOLITH_REQUEST_TIMEOUT_MILLIS,
   retryBaseDelayMillis: Long = MONOLITH_RETRY_BASE_DELAY_MILLIS,
+  maxRetries: Int = MONOLITH_MAX_RETRIES,
 ): HttpClient = baseHttpClient.config {
   install(HttpTimeout) {
     this.requestTimeoutMillis = requestTimeoutMillis
@@ -118,9 +132,9 @@ fun createMonolithHttpClient(
   install(HttpRequestRetry) {
     // Spelled out in full: the plugin's defaults retry server errors and exceptions, and a call to
     // `retryOnExceptionIf` alone replaces only the exception half, leaving the other in place unseen.
-    maxRetries = MONOLITH_MAX_RETRIES
-    retryOnServerErrors(MONOLITH_MAX_RETRIES)
-    retryOnExceptionIf(MONOLITH_MAX_RETRIES) { _, cause -> cause is IOException && !cause.isTimeout() }
+    this.maxRetries = maxRetries
+    retryOnServerErrors(maxRetries)
+    retryOnExceptionIf(maxRetries) { _, cause -> cause is IOException && !cause.isTimeout() }
     exponentialDelay(
       base = 2.0,
       baseDelayMs = retryBaseDelayMillis,
@@ -130,6 +144,23 @@ fun createMonolithHttpClient(
   }
   install(CallId) {
     addToHeader(TRACE_ID_HEADER)
+  }
+}.also { client ->
+  // Raised by the plugin before it waits, in the request's coroutine, so the line carries the trace id.
+  client.monitor.subscribe(HttpRequestRetryEvent) { retry -> logRetriedMonolithFailure(retry, maxRetries) }
+}
+
+/**
+ * The failure of an attempt that is about to be repeated. A webhook whose budget ends during the backoff answers
+ * `timed_out`, and this line, under the same trace id, is then the only record of what the monolith did. Only the
+ * status or the exception's message: the body cannot be read from here, and the path stands in for the URL so the
+ * query string stays out of the log.
+ */
+private fun logRetriedMonolithFailure(retry: HttpRetryEventData, maxRetries: Int) {
+  val failure = retry.response?.let { "status=${it.status.value}" } ?: "error=${retry.cause?.message ?: "unknown"}"
+  log.warn {
+    "Monolith call failed, retrying method=${retry.request.method.value} path=${retry.request.url.encodedPath} " +
+      "$failure retry=${retry.retryCount}/$maxRetries"
   }
 }
 

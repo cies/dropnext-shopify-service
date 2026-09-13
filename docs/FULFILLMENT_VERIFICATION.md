@@ -47,7 +47,7 @@ flowchart LR
 ## Prerequisites
 
 - Shopify app scopes include `write_merchant_managed_fulfillment_orders` and `read_merchant_managed_fulfillment_orders`.
-- Monolith and DSS share `DSS_API_KEY`: the monolith sends it as `Authorization: Bearer <DSS_API_KEY>` on `POST /sync-shipments-with-fulfillments`, `POST /tracking-update`, and `PUT /stores/api-key`; the matching auth guard is the `authenticate(MONOLITH_WEBHOOK_AUTH)` route block.
+- Monolith and DSS both hold `MONOLITH_TO_DSS_API_KEY`: the monolith sends it as `Authorization: Bearer <MONOLITH_TO_DSS_API_KEY>` on `POST /sync-shipments-with-fulfillments`, `POST /tracking-update`, and `PUT /stores/api-key`; the matching auth guard is the `authenticate(MONOLITH_WEBHOOK_AUTH)` route block.
 - Shopify Admin token resolvable for the shop — seed `DSS_SHOP_ACCESS_TOKENS`, complete OAuth, or have the monolith persist one via `PUT /stores/api-key` (a miss falls back to `MonolithService.getStore`).
 - `MONOLITH_BASE_URL` set on DSS for order/product webhooks (Shopify → monolith).
 

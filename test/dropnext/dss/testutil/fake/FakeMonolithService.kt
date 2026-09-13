@@ -15,6 +15,8 @@ import dropnext.dss.lib.monolith.MonolithResult
 import dropnext.dss.lib.monolith.MonolithService
 import dropnext.dss.lib.monolith.MonolithStore
 import dropnext.dss.lib.monolith.monolithError
+import kotlin.time.Duration
+import kotlinx.coroutines.delay
 
 
 /** In-memory [MonolithService] for business-logic tests (no HTTP, no mock frameworks). */
@@ -46,9 +48,13 @@ class FakeMonolithService : MonolithService, RecordingFake {
   /** What a `200` on [deleteProductVariants] reports as `deleted`: the request no longer says how many variants there are. */
   var deleteProductVariantsDeleted: Int = 1
 
+  /** How long each write (create order, upsert or delete variants) takes once recorded: a monolith still busy when a budget ends. */
+  var writeDelay: Duration = Duration.ZERO
+
 
   override suspend fun postCreateOrder(request: CreateShopifyOrderRequest): MonolithResult<CreateOrderOutcome> {
     createOrderCalls.add(request)
+    delay(writeDelay)
     return when (createOrderStatus) {
       200 -> Success(CreateOrderOutcome.Created)
       409 -> Success(CreateOrderOutcome.AlreadyExisted)
@@ -82,6 +88,7 @@ class FakeMonolithService : MonolithService, RecordingFake {
 
   override suspend fun upsertProductVariants(request: UpsertProductVariantsRequest): MonolithResult<Int> {
     upsertProductVariantsCalls.add(request)
+    delay(writeDelay)
     return when (upsertProductVariantsStatus) {
       200 -> Success(request.productVariants.size)
       else -> Failure(rejected(upsertProductVariantsStatus, """{"error":"forced fail","code":"VariantError","trace_id":"fake-upsert"}"""))
@@ -90,6 +97,7 @@ class FakeMonolithService : MonolithService, RecordingFake {
 
   override suspend fun deleteProductVariants(request: DeleteProductVariantsRequest): MonolithResult<Int> {
     deleteProductVariantsCalls.add(request)
+    delay(writeDelay)
     return when (deleteProductVariantsStatus) {
       200 -> Success(deleteProductVariantsDeleted)
       else -> Failure(rejected(deleteProductVariantsStatus, """{"error":"forced fail","code":"VariantError","trace_id":"fake-delete"}"""))
@@ -118,6 +126,7 @@ class FakeMonolithService : MonolithService, RecordingFake {
     upsertProductVariantsStatus = 200
     deleteProductVariantsStatus = 200
     deleteProductVariantsDeleted = 1
+    writeDelay = Duration.ZERO
   }
 
 }

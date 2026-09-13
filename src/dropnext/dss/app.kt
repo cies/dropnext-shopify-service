@@ -33,7 +33,7 @@ fun main() {
       port = config.serverPort
     }
     // ECS kills a task thirty seconds after its SIGTERM (Fargate's default stop timeout, which the infra keeps). In-flight
-    // requests get fifteen of those to finish: a webhook's four-second budget fits, and so does a monolith sync, which the
+    // requests get fifteen of those to finish: a webhook's budget and its write grace fit, and so does a monolith sync, which the
     // monolith stops waiting for at thirty anyway. Five more to cancel what still runs, then the Logflare appender's drain
     // of at most five seconds, and the process is gone before the kill.
     shutdownGracePeriod = 15_000
@@ -85,7 +85,7 @@ private fun logConfigSummary(config: Config) {
   val prefixNote = config.monolithApiPrefix?.let { " MONOLITH_API_PREFIX=$it" }.orEmpty()
   log.info {
     "[monolith] Outbound enabled: MONOLITH_BASE_URL=${config.monolithBaseUrl}$prefixNote " +
-      "(MONOLITH_API_KEY Bearer configured: ${config.monolithApiKey != null}, " +
+      "(DSS_TO_MONOLITH_API_KEY Bearer configured: ${config.dssToMonolithApiKey != null}, " +
       "shops with a seeded token: ${config.shopAccessTokens.size})."
   }
   log.info {

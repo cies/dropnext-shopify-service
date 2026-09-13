@@ -2,10 +2,13 @@ package dropnext.dss
 
 import dropnext.dss.config.Config
 import dropnext.dss.handler.DiagnosticsHandlers
+import dropnext.dss.handler.MAX_CONCURRENT_MIRRORS
 import dropnext.dss.handler.MonolithWebhookHandlers
 import dropnext.dss.handler.OAuthHandlers
 import dropnext.dss.handler.ShopifyWebhookHandlers
 import dropnext.dss.handler.WEBHOOK_MIRROR_BUDGET
+import dropnext.dss.handler.WEBHOOK_MONOLITH_MAX_RETRIES
+import dropnext.dss.handler.WEBHOOK_WRITE_GRACE
 import dropnext.dss.lib.ktor.createMonolithHttpClient
 import dropnext.dss.lib.ktor.createSharedHttpClient
 import dropnext.dss.lib.monolith.HttpMonolithService
@@ -21,6 +24,7 @@ import dropnext.dss.workflow.resolveShopTokenFromMonolith
 import io.github.oshai.kotlinlogging.KotlinLogging
 import io.ktor.client.HttpClient
 import kotlin.time.Duration
+import kotlinx.coroutines.sync.Semaphore
 
 
 private val log = KotlinLogging.logger {}
@@ -36,17 +40,20 @@ class DssDependencies(
   val config: Config,
   private val httpClient: HttpClient,
   private val monolithHttpClient: HttpClient,
+  private val webhookMonolithHttpClient: HttpClient,
   val diagnosticsHandlers: DiagnosticsHandlers,
   val oauthHandlers: OAuthHandlers,
   val shopifyWebhookHandlers: ShopifyWebhookHandlers,
   val monolithWebhookHandlers: MonolithWebhookHandlers,
 ) : AutoCloseable {
-  /** Closes both HTTP clients with [runCatching] so a single failure doesn't skip the others. */
+  /** Closes every HTTP client with [runCatching] so a single failure doesn't skip the others. */
   override fun close() {
     runCatching { httpClient.close() }
       .onFailure { log.warn(it) { "[shutdown] httpClient.close threw" } }
     runCatching { monolithHttpClient.close() }
       .onFailure { log.warn(it) { "[shutdown] monolithHttpClient.close threw" } }
+    runCatching { webhookMonolithHttpClient.close() }
+      .onFailure { log.warn(it) { "[shutdown] webhookMonolithHttpClient.close threw" } }
   }
 }
 
@@ -76,8 +83,26 @@ fun dssDependencies(
     httpClient = monolithHttpClient,
     baseUrl = config.monolithBaseUrl,
     apiPathPrefix = config.monolithApiPrefix,
-    apiKey = config.monolithApiKey,
+    apiKey = config.dssToMonolithApiKey,
   ),
+  /** The webhook handlers' way to the monolith: the same engine, the retries that fit a webhook's budget. */
+  webhookMonolithHttpClient: HttpClient = createMonolithHttpClient(httpClient, maxRetries = WEBHOOK_MONOLITH_MAX_RETRIES),
+  /**
+   * The monolith as the webhook handlers see it. A fake substituted for [monolithService] serves the webhooks too, so
+   * what a test records as sent does not depend on which route sent it; the production service gets a sibling over
+   * [webhookMonolithHttpClient].
+   */
+  webhookMonolithService: MonolithService =
+    if (monolithService is HttpMonolithService) {
+      HttpMonolithService(
+        httpClient = webhookMonolithHttpClient,
+        baseUrl = config.monolithBaseUrl,
+        apiPathPrefix = config.monolithApiPrefix,
+        apiKey = config.dssToMonolithApiKey,
+      )
+    } else {
+      monolithService
+    },
   shopTokens: ShopTokenStore = InMemoryShopTokenStore(config.shopAccessTokens) { shop ->
     resolveShopTokenFromMonolith(monolithService, shop)
   },
@@ -95,10 +120,13 @@ fun dssDependencies(
   ),
   shopifyHmacVerifierService: ShopifyHmacVerifierService = ShopifyHmacVerifierService(config.appClientSecret),
   webhookMirrorBudget: Duration = WEBHOOK_MIRROR_BUDGET,
+  webhookWriteGrace: Duration = WEBHOOK_WRITE_GRACE,
+  webhookMirrorSlots: Semaphore = Semaphore(MAX_CONCURRENT_MIRRORS),
 ): DssDependencies = DssDependencies(
   config = config,
   httpClient = httpClient,
   monolithHttpClient = monolithHttpClient,
+  webhookMonolithHttpClient = webhookMonolithHttpClient,
   diagnosticsHandlers = DiagnosticsHandlers(config, shopifyGraphqlServiceFactory),
   oauthHandlers = OAuthHandlers(
     config.dssBaseUrl,
@@ -110,9 +138,11 @@ fun dssDependencies(
   ),
   shopifyWebhookHandlers = ShopifyWebhookHandlers(
     shopifyGraphqlServiceFactory,
-    monolithService,
+    webhookMonolithService,
     shopifyHmacVerifierService,
     webhookMirrorBudget,
+    webhookWriteGrace,
+    webhookMirrorSlots,
   ),
   monolithWebhookHandlers = MonolithWebhookHandlers(
     shopifyGraphqlServiceFactory,

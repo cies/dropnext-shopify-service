@@ -141,7 +141,7 @@ If codegen fails, fix the schema in the monolith that serves it, refresh the cop
 The checked-in copy is byte-for-byte what a running monolith serves; refresh it from a local instance with
 
 ```sh
-curl -sS "http://127.0.0.1:8080/api/shopify-service/v1/openapi.json?api_key=$DSS_API_KEY" > src/resources/monolith-dss-openapi.json
+curl -sS "http://127.0.0.1:8080/api/shopify-service/v1/openapi.json?api_key=$DSS_TO_MONOLITH_API_KEY" > src/resources/monolith-dss-openapi.json
 ```
 
 and never hand-edit it. The generator reads the served document as is (`generateOutBoundMonolithPaths` only strips
@@ -199,14 +199,14 @@ On `products/create` and `products/update`, the app parses the webhook body for 
 * `POST /tracking-update` — accepts `TrackingUpdateRequest` (tracking status → Shopify FulfillmentEvent).
 * `PUT /stores/api-key` — accepts `UpdateStoreApiKeyRequest`; caches the Shopify Admin token in memory and forwards it to the monolith. A `502` (or a `404` for a store the monolith does not know) means the monolith did not persist it; the token stays cached either way. A blank `api_key` is a `400` before the cache is touched; `shopify_shop_id` may be `null` when unknown.
 
-The per-shop Admin token is resolved server-side via the in-memory cache (filled by OAuth, `DSS_SHOP_ACCESS_TOKENS`, or `PUT /stores/api-key`) with a fallback to monolith `GET /stores`. These routes require `Authorization: Bearer <DSS_API_KEY>`.
+The per-shop Admin token is resolved server-side via the in-memory cache (filled by OAuth, `DSS_SHOP_ACCESS_TOKENS`, or `PUT /stores/api-key`) with a fallback to monolith `GET /stores`. These routes require `Authorization: Bearer <MONOLITH_TO_DSS_API_KEY>`.
 
 
 ### Security notes (production)
 
 * Use **HTTPS** everywhere between clients, monolith, and this service;
 set `DSS_ALLOW_INSECURE_MONOLITH=true` (with `DSS_MODE=DEV`; `PROD` refuses the flag at startup) only on developer machines.
-* Set `DSS_API_KEY` so internal REST is not open on the network;
+* Set `MONOLITH_TO_DSS_API_KEY` so internal REST is not open on the network;
 the header is compared in **constant time** to reduce timing leaks.
 * **Secrets in env**: `DSS_SHOP_ACCESS_TOKENS` is as sensitive as a password —
 use a secrets manager in production, not committed `.env` files.
@@ -224,11 +224,11 @@ Unhandled server errors return a generic message; details stay in server logs on
 | `DSS_BASE_URL` | yes | Public https origin of this server (tunnel URL in dev); anything but an absolute `https://` URL is refused at startup |
 | `OAUTH_REDIRECT_PATH` | no | Default `/oauth/callback` (must match Partner redirect URL); anything but an absolute path is refused at startup |
 | `PORT` | no | Default `8080` |
-| `DSS_SHOP_ACCESS_TOKENS` | no | Comma-separated `shop.myshopify.com\|shpat_…` pairs seeding the in-memory token store (parsed in `Config.kt`) |
+| `DSS_SHOP_ACCESS_TOKENS` | no | Comma-separated `shop.myshopify.com\|shpat_…` pairs seeding the in-memory token store (parsed in `Config.kt`). An entry that is not such a pair refuses to boot. |
 | `MONOLITH_BASE_URL` | yes | **REST root URL** DSS appends segments to (`/orders`, `/stores`, `/stores/api-key`, `/product-variants`). May include a path prefix, e.g. `https://staging.dropnext.com/api/shopify-service/v1` (no trailing slash). Leave `MONOLITH_API_PREFIX` empty when the full prefix is already in this value. Anything but an absolute `https://` URL (or `http://` with `DSS_ALLOW_INSECURE_MONOLITH`) is refused at startup. |
 | `MONOLITH_API_PREFIX` | no | Inserted **after** base: `{BASE}/{PREFIX}/stores/api-key`. Example env `MONOLITH_API_PREFIX=api/v1`. Omit slashes at edges; empty (default) uses paths directly under base. |
-| `MONOLITH_API_KEY` | no | Optional Bearer token for monolith requests (`Authorization`). |
-| `DSS_API_KEY` | yes | Secret used for DSS internal REST auth (`Authorization: Bearer ...`). |
+| `DSS_TO_MONOLITH_API_KEY` | no | Bearer token sent on every monolith request (`Authorization`). The monolith checks incoming DSS calls against the variable of the same name. Letters, digits and `-._~+/` only; a placeholder value is refused at startup. |
+| `MONOLITH_TO_DSS_API_KEY` | yes | Bearer token every monolith -> DSS call must carry (`Authorization: Bearer ...`). The monolith sends the variable of the same name. Letters, digits and `-._~+/` only, at least 32 characters. |
 | `DSS_ALLOW_INSECURE_MONOLITH` | no | Set `true` only for local dev, together with `DSS_MODE=DEV`, so `MONOLITH_BASE_URL` may use `http://`. In `PROD` mode (the default) the flag itself is refused at startup, and an insecure URL without it always is. |
 | `LOGFLARE_SOURCE_NAME` | no | Logflare source to ship logs to, e.g. `dropnext.dss` (the monolith ships to `dropnext.app`). Created through the API when it does not exist yet. Shipping needs this **and** `LOGFLARE_API_KEY`; with either missing the service logs to stdout only. |
 | `LOGFLARE_API_KEY` | no | Logflare account key. Lives in AWS Secrets Manager (`dropnext/<env>/dss`), never in a repo. |
@@ -236,16 +236,14 @@ Unhandled server errors return a generic message; details stay in server logs on
 | `VERSION_TAG` | no | What `/health`, `/api` and the startup log report as the version. The Dockerfile bakes it in from the build argument `dnc` passes (the image tag), so it is not something to set by hand; unset, as in a local run, it reads `local-dev`. |
 | `DSS_MODE` | no | `DEV` or `PROD` (default), the same switch as the monolith's `MONOLITH_MODE`. `DEV` logs one line per HTTP request (method, path, status — never the query string); useful while working on a webhook locally. |
 
-Legacy compatibility: `SHOPIFY_API_KEY` and `SHOPIFY_API_SECRET` are still accepted as fallbacks when the new `SHOPIFY_APP_CLIENT_ID` / `SHOPIFY_APP_CLIENT_SECRET` vars are not set.
-
 
 ### Troubleshooting
 
-* **Startup exits quickly**: verify required vars `SHOPIFY_APP_CLIENT_ID` and `SHOPIFY_APP_CLIENT_SECRET` (or legacy `SHOPIFY_API_KEY` / `SHOPIFY_API_SECRET`), plus `SHOPIFY_SCOPES` and `DSS_BASE_URL`.
+* **Startup exits quickly**: verify required vars `SHOPIFY_APP_CLIENT_ID` and `SHOPIFY_APP_CLIENT_SECRET`, plus `SHOPIFY_SCOPES`, `DSS_BASE_URL`, `MONOLITH_BASE_URL` and `MONOLITH_TO_DSS_API_KEY`.
 * **OAuth callback mismatch in Shopify**: ensure `{DSS_BASE_URL}{OAUTH_REDIRECT_PATH}` exactly matches the Partner Dashboard redirect URL.
-* **DSS auth failures (`401`)**: a bare `401` with a `WWW-Authenticate: Bearer` header means the `Authorization: Bearer <DSS_API_KEY>` header was missing or wrong; a `401` with a JSON body means no Shopify Admin token is resolvable for the shop — seed `DSS_SHOP_ACCESS_TOKENS`, complete OAuth, or `PUT /stores/api-key`.
+* **DSS auth failures (`401`)**: a bare `401` with a `WWW-Authenticate: Bearer` header means the `Authorization: Bearer <MONOLITH_TO_DSS_API_KEY>` header was missing or wrong; a `401` with a JSON body means no Shopify Admin token is resolvable for the shop — seed `DSS_SHOP_ACCESS_TOKENS`, complete OAuth, or `PUT /stores/api-key`.
 * **`DSS_SHOP_ACCESS_TOKENS` parse issues**: use comma-separated `shop.myshopify.com|shpat_...` pairs.
-* **`[monolith] MONOLITH_BASE_URL is unset` despite being configured**: duplicate `MONOLITH_BASE_URL` / `MONOLITH_API_KEY` lines (often empty trailing blocks pasted from templates) cause **last value wins**. Remove the trailing empties so only one assignment remains; redeploy/restart.
+* **`[monolith] MONOLITH_BASE_URL is unset` despite being configured**: duplicate `MONOLITH_BASE_URL` / `DSS_TO_MONOLITH_API_KEY` lines (often empty trailing blocks pasted from templates) cause **last value wins**. Remove the trailing empties so only one assignment remains; redeploy/restart.
 * **`Monolith store api-key … status=404` with HTML `<h1>Not Found`**: DSS hit `{MONOLITH_BASE_URL}/stores/api-key` (before optional prefix). Use the REST API domain (often `api.…`), or set `MONOLITH_API_PREFIX` if routes live under a path (`api/v1`). Confirm with `curl -i -X PUT https://your-api…/stores/api-key` (+ Bearer header) outside DSS.
 * **502 Bad Gateway on `DSS_BASE_URL`**: the reverse proxy forwards to the wrong container port. The JVM binds `PORT` (see `[http] Listening …` startup line). Dockerfile sets `ENV PORT=9999`, but dashboards that add an empty `PORT=` override that with blank. Set `PORT=9999` explicitly or remove the `PORT` key so the image default wins; Traefik/nginx must target the **same** port.
 * **Insecure monolith URL rejected**: set `DSS_ALLOW_INSECURE_MONOLITH=true` and `DSS_MODE=DEV` only for local development; production stays HTTPS and refuses the flag.

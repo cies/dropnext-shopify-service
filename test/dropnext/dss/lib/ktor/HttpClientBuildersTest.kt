@@ -1,17 +1,29 @@
 package dropnext.dss.lib.ktor
 
+import dropnext.dss.lib.logging.TRACE_ID_MDC_KEY
 import dropnext.dss.testutil.fake.FakeFlakyServer
 import dropnext.dss.testutil.fake.FakeMonolithHttpServer
+import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
+import dropnext.dss.testutil.helper.capturingLogs
 import io.ktor.callid.withCallId
 import io.ktor.client.plugins.HttpRequestTimeoutException
 import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpStatusCode
+import io.ktor.server.response.respondText
+import io.ktor.server.routing.get
+import io.ktor.server.routing.routing
+import io.ktor.server.testing.testApplication
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.time.Duration.Companion.milliseconds
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.parallel.ResourceLock
 
 
 /** The shortest backoff the plugin accepts: the production one would put seconds of sleep into every retry case. */
@@ -95,6 +107,66 @@ class HttpClientBuildersTest {
       assert(upstream.requests.size == 2)
     } finally {
       client.close()
+      upstream.stop()
+    }
+  }
+
+  /** Only the last attempt's failure reaches the caller: the ones before it are on record through this line or not at all. */
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `the monolith client logs the failure of every attempt it repeats, without the query string`() {
+    val upstream = FakeMonolithHttpServer()
+    val port = upstream.start()
+    val client = createMonolithHttpClient(createSharedHttpClient(), retryBaseDelayMillis = NO_BACKOFF_MILLIS)
+    try {
+      upstream.enqueue(HttpStatusCode.InternalServerError, "")
+      upstream.enqueue(HttpStatusCode.OK, "{}")
+      val lines = capturingLogs { runBlocking { client.get("http://localhost:$port/stores?shopify_subdomain=acme") } }
+      val retryLine = lines.single { "Monolith call failed, retrying" in it }
+      assert(retryLine.startsWith("WARN "))
+      assert("method=GET path=/stores status=500" in retryLine)
+      assert("retry=1/$MONOLITH_MAX_RETRIES" in retryLine)
+      assert("acme" !in retryLine)
+    } finally {
+      client.close()
+      upstream.stop()
+    }
+  }
+
+  /**
+   * A webhook's budget can end during the backoff; by then the failure that started the wait must already be logged, under
+   * the trace id the server's plugins put in the MDC, so it sits next to the delivery's `timed_out` line.
+   */
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `the monolith client logs a failure before the backoff, so a cancelled retry keeps its cause and trace id`() {
+    val upstream = FakeMonolithHttpServer()
+    val port = upstream.start()
+    val monolithClient = createMonolithHttpClient(createSharedHttpClient(), retryBaseDelayMillis = 60_000)
+    try {
+      upstream.enqueue(HttpStatusCode.ServiceUnavailable, "")
+      val lines = capturingLogs {
+        testApplication {
+          application {
+            installCallId()
+            installCallLogging(enabled = false)
+            routing {
+              get("/probe") {
+                val upstreamResponse = withTimeoutOrNull(500.milliseconds) { monolithClient.get("http://localhost:$port/orders") }
+                call.respondText(if (upstreamResponse == null) "cancelled" else "answered")
+              }
+            }
+          }
+          val answer = client.get("/probe") { header(TRACE_ID_HEADER, "trace-retry") }.bodyAsText()
+          assert(answer == "cancelled")
+        }
+      }
+      val retryLine = lines.single { "Monolith call failed, retrying" in it }
+      assert("status=503" in retryLine)
+      assert("$TRACE_ID_MDC_KEY=trace-retry" in retryLine)
+      assert(upstream.requests.size == 1)
+    } finally {
+      monolithClient.close()
       upstream.stop()
     }
   }

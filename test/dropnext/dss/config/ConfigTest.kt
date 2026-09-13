@@ -1,8 +1,8 @@
 package dropnext.dss.config
 
-import dropnext.dss.domain.DssApiKey
+import dropnext.dss.domain.DssToMonolithApiKey
 import dropnext.dss.domain.LogflareApiKey
-import dropnext.dss.domain.MonolithApiKey
+import dropnext.dss.domain.MonolithToDssApiKey
 import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopifyAdminToken
 import kotlin.test.Test
@@ -15,7 +15,7 @@ private fun requiredEnv(): Map<String, String> = mapOf(
   "SHOPIFY_SCOPES" to "read_orders",
   "DSS_BASE_URL" to "https://dss.example.org/",
   "MONOLITH_BASE_URL" to "https://monolith.example.org",
-  "DSS_API_KEY" to "x".repeat(32),
+  "MONOLITH_TO_DSS_API_KEY" to "x".repeat(32),
 )
 
 class ConfigTest {
@@ -28,7 +28,7 @@ class ConfigTest {
     assert(config.oauthRedirectPath == "/oauth/callback")
     assert(config.serverPort == 8080)
     assert(config.monolithApiPrefix == null)
-    assert(config.monolithApiKey == null)
+    assert(config.dssToMonolithApiKey == null)
     assert(!config.allowInsecureMonolithUrl)
     assert(config.shopAccessTokens.isEmpty())
     assert(!config.logflareEnabled)
@@ -86,10 +86,10 @@ class ConfigTest {
 
   @Test
   fun `secrets are wrapped and never print`() {
-    val config = Config.from(requiredEnv() + ("MONOLITH_API_KEY" to "monolith-secret"))
+    val config = Config.from(requiredEnv() + ("DSS_TO_MONOLITH_API_KEY" to "monolith-secret"))
     assert(config.appClientSecret.value == "good-secret")
-    assert(config.dssApiKey == DssApiKey("x".repeat(32)))
-    assert(config.monolithApiKey == MonolithApiKey("monolith-secret"))
+    assert(config.monolithToDssApiKey == MonolithToDssApiKey("x".repeat(32)))
+    assert(config.dssToMonolithApiKey == DssToMonolithApiKey("monolith-secret"))
     val printed = config.toString()
     assert("good-secret" !in printed)
     assert("monolith-secret" !in printed)
@@ -102,13 +102,14 @@ class ConfigTest {
     assert(config.redirectUrl == "https://dss.example.org/oauth/callback")
   }
 
+  /** The legacy `SHOPIFY_API_KEY` / `SHOPIFY_API_SECRET` names used to be accepted as fallbacks; they no longer are. */
   @Test
-  fun `legacy variable names are accepted for the app credentials`() {
+  fun `the app credentials are read under their current names only`() {
     val env = requiredEnv() - "SHOPIFY_APP_CLIENT_ID" - "SHOPIFY_APP_CLIENT_SECRET" +
       mapOf("SHOPIFY_API_KEY" to "legacy-id", "SHOPIFY_API_SECRET" to "legacy-secret")
-    val config = Config.from(env)
-    assert(config.appClientId == "legacy-id")
-    assert(config.appClientSecret.value == "legacy-secret")
+    val failure = runCatching { Config.from(env) }.exceptionOrNull()
+    assert(failure is IllegalStateException)
+    assert("SHOPIFY_APP_CLIENT_ID" in failure!!.message.orEmpty())
   }
 
   @Test
@@ -133,15 +134,36 @@ class ConfigTest {
   }
 
   @Test
-  fun `a placeholder DSS_API_KEY is rejected`() {
-    val failure = runCatching { Config.from(requiredEnv() + ("DSS_API_KEY" to "change_this_to_a_long_random_secret")) }.exceptionOrNull()
+  fun `a placeholder MONOLITH_TO_DSS_API_KEY is rejected`() {
+    val failure = runCatching { Config.from(requiredEnv() + ("MONOLITH_TO_DSS_API_KEY" to "change_this_to_a_long_random_secret")) }.exceptionOrNull()
     assert(failure is IllegalStateException)
   }
 
   @Test
-  fun `a short DSS_API_KEY is rejected`() {
-    val failure = runCatching { Config.from(requiredEnv() + ("DSS_API_KEY" to "short")) }.exceptionOrNull()
+  fun `a short MONOLITH_TO_DSS_API_KEY is rejected`() {
+    val failure = runCatching { Config.from(requiredEnv() + ("MONOLITH_TO_DSS_API_KEY" to "short")) }.exceptionOrNull()
     assert(failure is IllegalStateException)
+  }
+
+  /** Ktor parses the header before the token is compared, so a value it cannot parse fails every call with a `400`. */
+  @Test
+  fun `a MONOLITH_TO_DSS_API_KEY outside the bearer token alphabet is rejected`() {
+    val failure = runCatching { Config.from(requiredEnv() + ("MONOLITH_TO_DSS_API_KEY" to "x".repeat(30) + "%(")) }.exceptionOrNull()
+    assert(failure is IllegalStateException)
+    assert("MONOLITH_TO_DSS_API_KEY" in failure!!.message.orEmpty())
+    assert(Config.from(requiredEnv() + ("MONOLITH_TO_DSS_API_KEY" to "a-b.c_d~e+f/" + "0".repeat(20) + "==")).monolithToDssApiKey.value.endsWith("=="))
+  }
+
+  /** The same value is read by the monolith under the same name, so the same checks apply; it is optional, so only when set. */
+  @Test
+  fun `a DSS_TO_MONOLITH_API_KEY that is a placeholder or outside the bearer token alphabet is rejected`() {
+    val placeholder = runCatching { Config.from(requiredEnv() + ("DSS_TO_MONOLITH_API_KEY" to "your_monolith_key")) }.exceptionOrNull()
+    assert(placeholder is IllegalStateException)
+    assert("DSS_TO_MONOLITH_API_KEY" in placeholder!!.message.orEmpty())
+    val unparseable = runCatching { Config.from(requiredEnv() + ("DSS_TO_MONOLITH_API_KEY" to "key with spaces")) }.exceptionOrNull()
+    assert(unparseable is IllegalStateException)
+    assert("DSS_TO_MONOLITH_API_KEY" in unparseable!!.message.orEmpty())
+    assert(Config.from(requiredEnv() + ("DSS_TO_MONOLITH_API_KEY" to "short-but-fine")).dssToMonolithApiKey == DssToMonolithApiKey("short-but-fine"))
   }
 
   @Test
@@ -229,12 +251,23 @@ class ConfigTest {
   }
 
   @Test
-  fun `shop access tokens are parsed as canonical domains and skip malformed pairs`() {
-    val env = requiredEnv() + ("DSS_SHOP_ACCESS_TOKENS" to "Acme.myshopify.com|shpat_a, other|shpat_b, broken, |nope, x|")
+  fun `shop access tokens are parsed as canonical domains, and a trailing comma is not an entry`() {
+    val env = requiredEnv() + ("DSS_SHOP_ACCESS_TOKENS" to "Acme.myshopify.com|shpat_a, other|shpat_b,")
     val tokens = Config.from(env).shopAccessTokens
     assert(tokens.size == 2)
     assert(tokens[ShopDomain.parse("acme.myshopify.com")!!] == ShopifyAdminToken("shpat_a"))
     assert(tokens[ShopDomain.parse("other.myshopify.com")!!] == ShopifyAdminToken("shpat_b"))
+  }
+
+  /** A skipped entry left that shop's webhooks unanswered with no line saying why; the message names no half of it. */
+  @Test
+  fun `a shop access token entry that is not a shop and token pair refuses to boot without printing it`() {
+    listOf("broken", "|shpat_secret", "acme.myshopify.com|", "shpat_secret|acme.myshopify.com").forEach { entry ->
+      val failure = runCatching { Config.from(requiredEnv() + ("DSS_SHOP_ACCESS_TOKENS" to "good|shpat_a, $entry")) }.exceptionOrNull()
+      assert(failure is IllegalStateException)
+      assert("DSS_SHOP_ACCESS_TOKENS: entry 2" in failure!!.message.orEmpty())
+      assert("shpat_secret" !in failure.message.orEmpty())
+    }
   }
 
   // ---------- the value normalisation every variable goes through ----------

@@ -63,6 +63,19 @@ class SyncShopifyOrderToMonolithTest {
     assert(shopify.orderForDssCalls.single() == "gid://shopify/Order/1001")
   }
 
+  /** The gid is what the monolith keys the order by; without a number in it there is nothing to load or to send. */
+  @Test
+  fun `a gid without a numeric id is skipped before Shopify is asked`() {
+    val monolith = FakeMonolithService()
+    val shopify = FakeShopifyGraphqlService().apply { orderForDssResult = Success(minimalOrder()) }
+    val result = runBlocking {
+      syncShopifyOrderToMonolith(shopify = shopify, monolith = monolith, orderGid = "gid://shopify/Order/", webhookTopic = "orders/create")
+    }
+    assert(result == WebhookMirrorOutcome.Skipped(WebhookSkipReason.NO_RESOURCE_ID))
+    assert(shopify.orderForDssCalls.isEmpty())
+    assert(monolith.createOrderCalls.isEmpty())
+  }
+
   @Test
   fun `syncShopifyOrderToMonolith reports a Shopify failure when the order is not found`() {
     // Default orderForDssResult is NotFound → workflow short-circuits and logs.

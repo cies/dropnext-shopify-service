@@ -35,7 +35,7 @@ import org.junit.jupiter.api.parallel.ResourceLock
 
 private val acmeShop = ShopDomain.parse("acme.myshopify.com")!!
 private const val APP_SECRET = "shpss_app_secret"
-private val DSS_API_KEY = "k".repeat(32)
+private val MONOLITH_TO_DSS_API_KEY = "k".repeat(32)
 private val ADMIN_TOKEN = ShopifyAdminToken("shpat_super_secret_admin_token")
 
 
@@ -96,7 +96,7 @@ class DssModuleTest {
           setBody(body)
         }
         client.put(Paths.storesApiKey) {
-          header("Authorization", "Bearer $DSS_API_KEY")
+          header("Authorization", "Bearer $MONOLITH_TO_DSS_API_KEY")
           contentType(ContentType.Application.Json)
           setBody("""{"shopify_subdomain":"acme","api_key":"${ADMIN_TOKEN.value}","shopify_shop_id":99}""")
         }
@@ -109,7 +109,7 @@ class DssModuleTest {
     assert(lines.isNotEmpty())
     assert(ADMIN_TOKEN.value !in logged)
     assert("shpat_" !in logged)
-    assert(DSS_API_KEY !in logged)
+    assert(MONOLITH_TO_DSS_API_KEY !in logged)
     assert(APP_SECRET !in logged)
     assert("Bearer " !in logged)
   }
@@ -125,7 +125,7 @@ class DssModuleTest {
     try {
       monolithServer.enqueue(HttpStatusCode.OK, """{"store_id":7}""")
       val deps = dssDependencies(
-        config = testConfig(dssApiKey = DSS_API_KEY, monolithBaseUrl = "http://localhost:$port"),
+        config = testConfig(monolithToDssApiKey = MONOLITH_TO_DSS_API_KEY, monolithBaseUrl = "http://localhost:$port"),
         httpClient = testHttpClient(),
       )
       withDssApp(deps, authenticateAsMonolith = true) { client ->
@@ -153,7 +153,7 @@ class DssModuleTest {
     try {
       monolithServer.enqueue(HttpStatusCode.OK, """{"store_id":7}""")
       val deps = dssDependencies(
-        config = testConfig(dssApiKey = DSS_API_KEY, monolithBaseUrl = "http://localhost:$port"),
+        config = testConfig(monolithToDssApiKey = MONOLITH_TO_DSS_API_KEY, monolithBaseUrl = "http://localhost:$port"),
         httpClient = testHttpClient(),
       )
       val minted = withDssAppReturning(deps) { client ->
@@ -181,7 +181,7 @@ class DssModuleTest {
   private fun deps(tokens: InMemoryShopTokenStore = InMemoryShopTokenStore()): DssDependencies =
 
     dssDependencies(
-      config = testConfig(appClientSecret = APP_SECRET, dssApiKey = DSS_API_KEY),
+      config = testConfig(appClientSecret = APP_SECRET, monolithToDssApiKey = MONOLITH_TO_DSS_API_KEY),
       monolithService = FakeMonolithService(),
       shopTokens = tokens,
       shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = FakeShopifyGraphqlService(acmeShop)),

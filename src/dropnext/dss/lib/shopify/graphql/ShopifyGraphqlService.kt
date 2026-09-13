@@ -138,8 +138,11 @@ sealed interface ShopifyError {
    */
   data class GraphqlError(override val message: String, val codes: List<String> = emptyList()) : ShopifyError {
     /**
-     * Only throttling and Shopify's internal errors pass. An error without any code is Shopify answering something
-     * broken (no data, a payload without the object it promised), which is worth another attempt.
+     * Of the coded errors only throttling and Shopify's internal errors pass. An error without any code is retried too:
+     * most of those are this service's own, for an answer without the object it promised (no data, a mutation payload
+     * without its fulfillment), and some are Shopify's, such as a variable it could not read, which no retry fixes.
+     * The two cannot be told apart here, and the costs are lopsided: a wrong retry is eight wasted redeliveries, a
+     * wrong refusal is a lost order.
      */
     override val isRetryable: Boolean get() = codes.isEmpty() || codes.any { it in RETRYABLE_GRAPHQL_ERROR_CODES }
   }

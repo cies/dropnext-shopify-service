@@ -45,6 +45,9 @@ class FakeLogflareServer : AutoCloseable {
   /** How long `/api/logs` holds a batch before answering, so a test can watch the sender while a flush is on the wire. */
   var logsStallMillis: Long = 0
 
+  /** How long `/api/sources` holds the handshake before answering: what a sender closed during it has to deal with. */
+  var sourcesStallMillis: Long = 0
+
   val endpoint: String get() = "http://127.0.0.1:${server.address.port}"
 
   val receivedEvents: List<JsonObject> get() = received.toList()
@@ -93,6 +96,7 @@ class FakeLogflareServer : AutoCloseable {
 
   private fun handleSources(exchange: HttpExchange) {
     apiKeysSeen += exchange.requestHeaders.getFirst("Authorization").orEmpty()
+    if (sourcesStallMillis > 0) Thread.sleep(sourcesStallMillis)
     if (sourcesStatusCode != 200) return exchange.respond(sourcesStatusCode, """{"error":"nope"}""")
 
     when (exchange.requestMethod) {

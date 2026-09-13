@@ -7,11 +7,12 @@ import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.domain.ShopifyAppSecret
 import dropnext.dss.lib.crypto.constantTimeEquals
 import dropnext.dss.lib.crypto.hmacSha256
+import dropnext.dss.lib.json.AppJson
 import io.ktor.client.HttpClient
-import io.ktor.client.call.body
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
@@ -19,9 +20,10 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.security.SecureRandom
 import java.time.Instant
+import java.io.IOException
 import java.util.Base64
-import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.SerialName
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.Serializable
 
 
@@ -87,6 +89,10 @@ class HttpShopifyOAuthService(
   /**
    * A refused code is a `4xx` with a JSON error body; the status is checked before the body is decoded
    * as a token, because decoding that body used to make a refusal read as a network failure.
+   *
+   * Only an [IOException] is a transport failure. Anything else thrown here is a bug, and answering it as
+   * "Shopify did not answer" would send the merchant back to Shopify for an install that fails the same way
+   * again; it propagates to `StatusPages` and its `500` instead.
    */
   override suspend fun exchangeCode(shop: ShopDomain, code: String): OAuthResult<ShopifyAdminToken> {
     val url = "https://${shop.normalizedShopifyHost}${OutBoundShopifyOAuthPaths.adminOAuthAccessToken}"
@@ -101,9 +107,7 @@ class HttpShopifyOAuthService(
         status in 400..499 -> Failure(OAuthError.CodeRejected(status))
         else -> Failure(OAuthError.Transport("Shopify answered HTTP $status"))
       }
-    } catch (e: CancellationException) {
-      throw e
-    } catch (e: Exception) {
+    } catch (e: IOException) {
       Failure(OAuthError.Transport(e.message ?: "OAuth code exchange failed"))
     }
   }
@@ -112,14 +116,14 @@ class HttpShopifyOAuthService(
    * The token out of a `2xx`. A body that does not decode is answered without the decoder's complaint: that quotes the
    * body it could not read, and this body carries the access token, which must never reach a log line.
    */
-  private suspend fun tokenFrom(response: HttpResponse): OAuthResult<ShopifyAdminToken> =
-    try {
-      Success(ShopifyAdminToken(response.body<OAuthAccessTokenResponse>().accessToken))
-    } catch (e: CancellationException) {
-      throw e
-    } catch (_: Exception) {
+  private suspend fun tokenFrom(response: HttpResponse): OAuthResult<ShopifyAdminToken> {
+    val body = response.bodyAsText()
+    return try {
+      Success(ShopifyAdminToken(AppJson.decodeFromString(OAuthAccessTokenResponse.serializer(), body).accessToken))
+    } catch (_: SerializationException) {
       Failure(OAuthError.Transport("Shopify's token response was not the expected JSON"))
     }
+  }
 
   private fun sign(payload: String): String =
     Base64.getUrlEncoder().withoutPadding().encodeToString(hmacSha256(clientSecret.value, payload))

@@ -168,7 +168,7 @@ of it. What can still be checked before the first mutation is whether the new sh
 - The live-fulfillment-by-tracking-number lookup and the shipment skip from `010`.
 - `FulfillmentQuantityLedger`'s `init`, which reads the live remaining quantity of every open line, for the
   per-variant totals of the feasibility check.
-- `RequestValidation.kt`'s `validateDuplicateTrackingNumbers` shows the validator style for the new list.
+- `validateSyncShipmentsRequest.kt`'s `validateDuplicateTrackingNumbers` shows the validator style for the new list.
 - Monolith: `db/sql/portal/supplier/shipmentSplitWrite.kt` sets `replaced_at`; `shipmentSplitRead.kt` already
   filters on it, so the column and its meaning exist.
 

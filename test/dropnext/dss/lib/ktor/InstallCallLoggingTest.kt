@@ -1,7 +1,6 @@
 package dropnext.dss.lib.ktor
 
 import ch.qos.logback.classic.Logger as LogbackLogger
-import ch.qos.logback.classic.LoggerContext
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
 import dropnext.dss.config.DssMode
@@ -11,6 +10,7 @@ import dropnext.dss.lib.logging.TRACE_ID_MDC_KEY
 import dropnext.dss.path.Paths
 import dropnext.dss.testutil.fixture.testConfig
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
+import dropnext.dss.testutil.helper.logbackContext
 import io.github.oshai.kotlinlogging.KotlinLogging
 import io.ktor.client.request.get
 import io.ktor.client.request.header
@@ -20,7 +20,6 @@ import io.ktor.server.routing.routing
 import io.ktor.server.testing.testApplication
 import kotlin.test.Test
 import org.junit.jupiter.api.parallel.ResourceLock
-import org.slf4j.LoggerFactory
 
 
 private val log = KotlinLogging.logger {}
@@ -37,7 +36,7 @@ class InstallCallLoggingTest {
 
   /** Captures everything logged anywhere while [block] runs; call logging goes through Ktor's own logger. */
   private fun <R> captureLogLines(block: (recorded: List<ILoggingEvent>) -> R): R {
-    val rootLogger = (LoggerFactory.getILoggerFactory() as LoggerContext).getLogger(LogbackLogger.ROOT_LOGGER_NAME)
+    val rootLogger = logbackContext().getLogger(LogbackLogger.ROOT_LOGGER_NAME)
     val recorder = ListAppender<ILoggingEvent>().apply { start() }
     rootLogger.addAppender(recorder)
     try {

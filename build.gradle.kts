@@ -103,7 +103,8 @@ tasks {
       outputs.upToDateWhen { false }
     }
 
-    // One fork at a time — avoids OOM when many integration tests spin up Ktor/HTTP fakes.
+    // One fork; the classes run concurrently inside it (`test/resources/junit-platform.properties`), which shares
+    // the JVM's warm-up and the Konsist parse instead of paying them per fork.
     maxParallelForks = 1
 
     // The HTML report is megabytes of small files per run for something a human opens rarely. The
@@ -169,6 +170,29 @@ dependencies {
   testRuntimeOnly(libs.junitJupiterEngine) // Needed separately when using JUnit5
   testImplementation(libs.konsist) // For architecture tests, among other features
   testImplementation(libs.ktorServerTestHost) // In-memory Ktor test engine (`testApplication { … }`)
+}
+
+// Prints the `SlowestClassesFirstOrderer` hint list from the last test run, longest first.
+tasks.register("slowestTestClasses") {
+  group = "verification"
+  description = "Prints the SlowestClassesFirstOrderer hint list from the last test run."
+  val resultsDir = layout.buildDirectory.dir("test-results/test")
+  doLast {
+    val results = resultsDir.get().asFile
+    require(results.isDirectory) { "No test results in $results: run ./gradlew test first." }
+    val attribute = { header: String, name: String ->
+      Regex("$name=\"([^\"]*)\"").find(header)?.groupValues?.get(1).orEmpty()
+    }
+    val slowest = results.listFiles { file -> file.name.startsWith("TEST-") && file.extension == "xml" }
+      .orEmpty()
+      .map { file ->
+        val header = file.readText().substringAfter("<testsuite ").substringBefore(">")
+        attribute(header, "time").toDouble() to attribute(header, "name")
+      }
+      .filter { (seconds, _) -> seconds >= 1.0 }
+      .sortedByDescending { (seconds, _) -> seconds }
+    println(slowest.joinToString("\n") { (seconds, name) -> "      \"$name\", // %.2fs".format(seconds) })
+  }
 }
 
 // Reproducible builds: every configuration's resolved dependencies get locked to `gradle/dependency-locks/`.

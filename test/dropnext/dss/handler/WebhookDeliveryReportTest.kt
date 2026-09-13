@@ -41,11 +41,21 @@ class WebhookDeliveryReportTest {
 
   @Test
   fun `a skipped delivery names its reason in both renderings`() {
-    val report = report(WebhookMirrorOutcome.Skipped(WebhookSkipReason.NO_ADMIN_TOKEN), lagMillis = null)
+    val report = report(WebhookMirrorOutcome.Skipped(WebhookSkipReason.TOPIC_NOT_MIRRORED), lagMillis = null)
     assert(report.logLevel == WebhookDeliveryReport.LogLevel.INFO)
-    assert("outcome=skipped reason=no_admin_token" in report.logLine(200))
+    assert("outcome=skipped reason=topic_not_mirrored" in report.logLine(200))
     assert("lag_ms" !in report.logLine(200))
-    assert(report.toResponse(null) == WebhookDeliveryResponse(outcome = "skipped", reason = "no_admin_token"))
+    assert(report.toResponse(null) == WebhookDeliveryResponse(outcome = "skipped", reason = "topic_not_mirrored"))
+  }
+
+  /** The summary is the one line a delivery leaves, so a skip that repeats until someone acts has to be loud there. */
+  @Test
+  fun `a skip that needs a human is an error line, one worth a look a warning, the rest information`() {
+    assert(report(WebhookMirrorOutcome.Skipped(WebhookSkipReason.NO_ADMIN_TOKEN)).logLevel == WebhookDeliveryReport.LogLevel.ERROR)
+    assert(report(WebhookMirrorOutcome.Skipped(WebhookSkipReason.NO_SHOP_DOMAIN)).logLevel == WebhookDeliveryReport.LogLevel.ERROR)
+    assert(report(WebhookMirrorOutcome.Skipped(WebhookSkipReason.NO_RESOURCE_ID)).logLevel == WebhookDeliveryReport.LogLevel.WARN)
+    assert(report(WebhookMirrorOutcome.Skipped(WebhookSkipReason.PRODUCT_GONE)).logLevel == WebhookDeliveryReport.LogLevel.INFO)
+    assert(report(WebhookMirrorOutcome.Skipped(WebhookSkipReason.NO_MAPPABLE_LINES)).logLevel == WebhookDeliveryReport.LogLevel.INFO)
   }
 
   @Test
@@ -84,6 +94,8 @@ class WebhookDeliveryReportTest {
     assert(unavailable.logLevel == WebhookDeliveryReport.LogLevel.WARN)
     assert("outcome=failed transient=true error=token_unavailable" in unavailable.logLine(502))
     assert("outcome=failed transient=true error=timed_out" in report(WebhookMirrorOutcome.TimedOut).logLine(502))
+    assert("outcome=failed transient=true error=overloaded" in report(WebhookMirrorOutcome.Overloaded).logLine(502))
+    assert(report(WebhookMirrorOutcome.Overloaded).logLevel == WebhookDeliveryReport.LogLevel.WARN)
   }
 
   @Test

@@ -4,6 +4,7 @@ import dropnext.dss.config.Config
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.api.createClientPlugin
 import java.util.concurrent.TimeUnit
 
 
@@ -28,6 +29,14 @@ fun testHttpClient(followRedirects: Boolean = true): HttpClient = HttpClient(OkH
     connectTimeoutMillis = 2_000
     socketTimeoutMillis = 5_000
   }
+}
+
+/**
+ * A client whose every request fails with [cause] before it reaches the wire, for proving that a failure which is
+ * not a transport failure propagates as the bug it is instead of being answered as a network failure.
+ */
+fun throwingHttpClient(cause: Throwable): HttpClient = HttpClient(OkHttp) {
+  install(createClientPlugin("ThrowOnRequest") { onRequest { _, _ -> throw cause } })
 }
 
 /**

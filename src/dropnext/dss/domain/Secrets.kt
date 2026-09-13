@@ -23,15 +23,19 @@ value class ShopifyAppSecret(val value: String) {
   override fun toString() = "***"
 }
 
-/** The bearer token we present to the monolith. */
+/**
+ * The bearer token we present to the monolith. Its counterpart [MonolithToDssApiKey] is a different type on
+ * purpose: the two travel in opposite directions and are rotated independently. The monolith reads the same
+ * two variable names, so the same name holds the same value on both sides.
+ */
 @JvmInline
-value class MonolithApiKey(val value: String) {
+value class DssToMonolithApiKey(val value: String) {
   override fun toString() = "***"
 }
 
-/** The bearer token the monolith presents to us. */
+/** The bearer token the monolith presents to us; see [DssToMonolithApiKey] for why it is its own type. */
 @JvmInline
-value class DssApiKey(val value: String) {
+value class MonolithToDssApiKey(val value: String) {
   override fun toString() = "***"
 }
 

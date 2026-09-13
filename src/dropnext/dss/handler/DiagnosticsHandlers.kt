@@ -8,7 +8,6 @@ import dropnext.dss.domain.WebhookTopicStatus
 import dropnext.dss.lib.ktor.DssError
 import dropnext.dss.lib.ktor.respondError
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlServiceFactory
-import dropnext.dss.lib.shopify.token.ShopLookup
 import dropnext.dss.path.Paths
 import dropnext.dss.workflow.scanShopifyWebhooks
 import io.github.oshai.kotlinlogging.KotlinLogging
@@ -37,7 +36,7 @@ class DiagnosticsHandlers(
         GET  ${Paths.index.padEnd(26)}This index
         GET  ${Paths.health.padEnd(26)}Liveness probe - JSON with status "ok" and the running version
         GET  ${Paths.api.padEnd(26)}JSON diagnostic info (config, URLs, issues)
-        GET  ${Paths.apiCheck.padEnd(20)}?shop=  Readiness for a specific shop: token resolvable, webhook subscriptions (Bearer <DSS_API_KEY> required)
+        GET  ${Paths.apiCheck.padEnd(20)}?shop=  Readiness for a specific shop: token resolvable, webhook subscriptions (Bearer <MONOLITH_TO_DSS_API_KEY> required)
         GET  ${Paths.apiRedirectUrl.padEnd(26)}Full OAuth redirect URL
 
       --- Shopify OAuth ---
@@ -47,7 +46,7 @@ class DiagnosticsHandlers(
       --- Webhooks ---
         POST ${Paths.webhooksShopify.padEnd(26)}Shopify webhook receiver (products/*, orders/*)
 
-      --- DSS Internal API (Authorization: Bearer <DSS_API_KEY> required) ---
+      --- DSS Internal API (Authorization: Bearer <MONOLITH_TO_DSS_API_KEY> required) ---
         PUT  ${Paths.storesApiKey.padEnd(40)} Set Shopify Admin token (see the checked-in monolith contract)
         POST ${Paths.syncShipmentsWithFulfillments.padEnd(40)} Monolith webhook: SyncShipmentsWithFulfillmentsRequest -> sync Shopify fulfillments
         POST ${Paths.trackingUpdate.padEnd(40)} Monolith webhook: TrackingUpdateRequest -> Shopify FulfillmentEvent
@@ -80,11 +79,7 @@ class DiagnosticsHandlers(
     val shop = call.shopDomainOrRespond(rawShop, "shop") ?: return
 
     // The factory goes through the token store, monolith lookup included, so the check answers what a webhook would find.
-    val shopify = when (val lookup = shopifyGraphqlServiceFactory.forShop(shop)) {
-      is ShopLookup.Found -> lookup.value
-      ShopLookup.Missing -> return call.respondError(DssError.MissingShopifyAdminToken)
-      ShopLookup.Unavailable -> return call.respondError(DssError.ShopifyAdminTokenUnavailable)
-    }
+    val shopify = call.shopifyServiceOrRespond(shopifyGraphqlServiceFactory, shop) ?: return
 
     val webhooks = when (val scanned = scanShopifyWebhooks(shopify, "${dssConfig.dssBaseUrl}${Paths.webhooksShopify}")) {
       is Success -> scanned.value

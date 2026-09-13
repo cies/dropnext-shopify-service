@@ -10,7 +10,7 @@ import dropnext.dss.contract.UpdateStoreApiKeyRequest
 import dropnext.dss.contract.UpdateStoreApiKeyResponse
 import dropnext.dss.contract.UpsertProductVariantsRequest
 import dropnext.dss.contract.UpsertProductVariantsResponse
-import dropnext.dss.domain.MonolithApiKey
+import dropnext.dss.domain.DssToMonolithApiKey
 import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.domain.StoreId
@@ -49,7 +49,7 @@ class HttpMonolithService(
   private val httpClient: HttpClient,
   private val baseUrl: String,
   private val apiPathPrefix: String?,
-  private val apiKey: MonolithApiKey?,
+  private val apiKey: DssToMonolithApiKey?,
 ) : MonolithService {
 
   private val prefixedBase: String = run {

@@ -2,8 +2,13 @@ package dropnext.dss.lib.shopify.token
 
 import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopifyAdminToken
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 
 
 private val acme = ShopDomain.parse("acme.myshopify.com")!!
@@ -44,6 +49,48 @@ class InMemoryShopTokenStoreTest {
     assert(store.resolve(acme) == ShopLookup.Unavailable)
     assert(store.resolve(acme) == ShopLookup.Unavailable)
     assert(fallbackCalls == 2)
+  }
+
+  /** Every deploy starts with an empty cache, and a burst of deliveries for one shop must not become a burst of monolith calls. */
+  @Test
+  fun `concurrent misses for one shop ask the fallback once`() = runBlocking {
+    val fallbackCalls = AtomicInteger()
+    val answer = CompletableDeferred<Unit>()
+    val store = InMemoryShopTokenStore {
+      fallbackCalls.incrementAndGet()
+      answer.await()
+      ShopLookup.Found(ShopifyAdminToken("shpat_once"))
+    }
+
+    val lookups = List(10) { async { store.resolve(acme) } }
+    while (fallbackCalls.get() == 0) yield()
+    answer.complete(Unit)
+
+    assert(lookups.awaitAll().all { it == ShopLookup.Found(ShopifyAdminToken("shpat_once")) })
+    assert(fallbackCalls.get() == 1)
+  }
+
+  /** A webhook that gives up on its wait, its budget having run out, must not take the lookup down with it. */
+  @Test
+  fun `a waiter cancelled during another caller's lookup takes nothing away from it`() = runBlocking {
+    val started = CompletableDeferred<Unit>()
+    val answer = CompletableDeferred<Unit>()
+    val store = InMemoryShopTokenStore {
+      started.complete(Unit)
+      answer.await()
+      ShopLookup.Found(ShopifyAdminToken("shpat_once"))
+    }
+
+    val first = async { store.resolve(acme) }
+    started.await()
+    val second = async { store.resolve(acme) }
+    yield() // The second is now queued behind the first's lookup.
+    second.cancel()
+    answer.complete(Unit)
+
+    assert(first.await() == ShopLookup.Found(ShopifyAdminToken("shpat_once")))
+    assert(second.isCancelled)
+    assert(store.cached(acme) == ShopifyAdminToken("shpat_once"))
   }
 
   @Test

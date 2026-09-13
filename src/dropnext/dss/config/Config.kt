@@ -1,8 +1,8 @@
 package dropnext.dss.config
 
-import dropnext.dss.domain.DssApiKey
+import dropnext.dss.domain.DssToMonolithApiKey
 import dropnext.dss.domain.LogflareApiKey
-import dropnext.dss.domain.MonolithApiKey
+import dropnext.dss.domain.MonolithToDssApiKey
 import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.domain.ShopifyAppSecret
@@ -23,9 +23,9 @@ data class Config(
   val serverPort: Int,
   val monolithBaseUrl: String,
   val monolithApiPrefix: String?,
-  val monolithApiKey: MonolithApiKey?,
+  val dssToMonolithApiKey: DssToMonolithApiKey?,
   val allowInsecureMonolithUrl: Boolean,
-  val dssApiKey: DssApiKey,
+  val monolithToDssApiKey: MonolithToDssApiKey,
   val shopAccessTokens: Map<ShopDomain, ShopifyAdminToken>,
   val logflareSourceName: String?,
   val logflareApiKey: LogflareApiKey?,
@@ -53,20 +53,18 @@ data class Config(
       fun value(name: String): String? = normalizeQuoted(env[name])
       fun required(name: String): String = value(name) ?: error("Set env var $name.")
 
-      val appClientId = value("SHOPIFY_APP_CLIENT_ID") ?: value("SHOPIFY_API_KEY")
-        ?: error("Set env var SHOPIFY_APP_CLIENT_ID (or SHOPIFY_API_KEY).")
-      val appClientSecret = value("SHOPIFY_APP_CLIENT_SECRET") ?: value("SHOPIFY_API_SECRET")
-        ?: error("Set env var SHOPIFY_APP_CLIENT_SECRET (or SHOPIFY_API_SECRET).")
+      val appClientId = required("SHOPIFY_APP_CLIENT_ID")
+      val appClientSecret = required("SHOPIFY_APP_CLIENT_SECRET")
       val scopes = required("SHOPIFY_SCOPES")
       val dssBaseUrl = required("DSS_BASE_URL")
       val monolithBaseUrl = required("MONOLITH_BASE_URL")
-      val dssApiKey = required("DSS_API_KEY")
+      val monolithToDssApiKey = required("MONOLITH_TO_DSS_API_KEY")
 
       if (isPlaceholder(appClientId)) {
-        error("SHOPIFY_APP_CLIENT_ID (or SHOPIFY_API_KEY) is placeholder.")
+        error("SHOPIFY_APP_CLIENT_ID is placeholder.")
       }
       if (isPlaceholder(appClientSecret)) {
-        error("SHOPIFY_APP_CLIENT_SECRET (or SHOPIFY_API_SECRET) is placeholder.")
+        error("SHOPIFY_APP_CLIENT_SECRET is placeholder.")
       }
       if (isPlaceholder(dssBaseUrl) || dssBaseUrl.contains("example.com", ignoreCase = true)) {
         error("DSS_BASE_URL is placeholder.")
@@ -74,12 +72,14 @@ data class Config(
       if (absoluteHttpUrlOrNull(dssBaseUrl)?.scheme?.equals("https", ignoreCase = true) != true) {
         error("DSS_BASE_URL must be an absolute https:// URL, was '$dssBaseUrl'.")
       }
-      if (dssApiKey.contains("change_this", ignoreCase = true)) {
-        error("DSS_API_KEY is still a placeholder value.")
+      requireUsableBearerSecret("MONOLITH_TO_DSS_API_KEY", monolithToDssApiKey)
+      // The length rule guards our own door; the monolith's is the monolith's to guard.
+      if (monolithToDssApiKey.length < 32) {
+        error("MONOLITH_TO_DSS_API_KEY must be at least 32 characters.")
       }
-      if (dssApiKey.length < 32) {
-        error("DSS_API_KEY must be at least 32 characters.")
-      }
+      val dssToMonolithApiKey = value("DSS_TO_MONOLITH_API_KEY")
+      // Optional, but once set it is sent on every monolith call: a value the monolith cannot parse fails all of them.
+      if (dssToMonolithApiKey != null) requireUsableBearerSecret("DSS_TO_MONOLITH_API_KEY", dssToMonolithApiKey)
 
       val mode = DssMode.parse(env["DSS_MODE"])
       val allowInsecureMonolithUrl = parseBool(env["DSS_ALLOW_INSECURE_MONOLITH"])
@@ -117,9 +117,9 @@ data class Config(
         serverPort = resolveServerPort(env["PORT"]),
         monolithBaseUrl = monolithBaseUrl,
         monolithApiPrefix = value("MONOLITH_API_PREFIX")?.trim { it == '/' }?.takeIf { it.isNotEmpty() },
-        monolithApiKey = value("MONOLITH_API_KEY")?.let(::MonolithApiKey),
+        dssToMonolithApiKey = dssToMonolithApiKey?.let(::DssToMonolithApiKey),
         allowInsecureMonolithUrl = allowInsecureMonolithUrl,
-        dssApiKey = DssApiKey(dssApiKey),
+        monolithToDssApiKey = MonolithToDssApiKey(monolithToDssApiKey),
         shopAccessTokens = parseShopAccessTokens(value("DSS_SHOP_ACCESS_TOKENS")),
         logflareSourceName = value("LOGFLARE_SOURCE_NAME"),
         logflareApiKey = value("LOGFLARE_API_KEY")?.let(::LogflareApiKey),
@@ -153,14 +153,20 @@ data class Config(
       }
     }
 
-    /** `DSS_SHOP_ACCESS_TOKENS`: comma-separated `shop|token` pairs; a malformed pair is skipped. */
+    /**
+     * `DSS_SHOP_ACCESS_TOKENS`: comma-separated `shop|token` pairs. An entry that does not parse fails the boot rather
+     * than being skipped: a skipped entry left that shop's webhooks unanswered with no line saying why. The message
+     * names the entry by position only, because either half of a mistyped entry may be the token.
+     */
     private fun parseShopAccessTokens(raw: String?): Map<ShopDomain, ShopifyAdminToken> =
-      raw.orEmpty().split(',').mapNotNull { segment ->
-        val part = segment.trim()
-        val separator = part.indexOf('|')
-        if (separator <= 0 || separator == part.length - 1) return@mapNotNull null
-        val shop = ShopDomain.parse(part.substring(0, separator).trim()) ?: return@mapNotNull null
-        shop to ShopifyAdminToken(part.substring(separator + 1).trim())
+      raw.orEmpty().split(',').map { it.trim() }.filter { it.isNotEmpty() }.mapIndexed { index, entry ->
+        val separator = entry.indexOf('|')
+        if (separator <= 0 || separator == entry.length - 1) {
+          error("DSS_SHOP_ACCESS_TOKENS: entry ${index + 1} is not a shop|token pair.")
+        }
+        val shop = ShopDomain.parse(entry.substring(0, separator).trim())
+          ?: error("DSS_SHOP_ACCESS_TOKENS: entry ${index + 1} does not name a Shopify domain before its '|'.")
+        shop to ShopifyAdminToken(entry.substring(separator + 1).trim())
       }.toMap()
   }
 }
@@ -175,6 +181,24 @@ private fun absoluteHttpUrlOrNull(raw: String): URI? {
   if (!scheme.equals("http", ignoreCase = true) && !scheme.equals("https", ignoreCase = true)) return null
   return uri.takeUnless { it.host.isNullOrBlank() }
 }
+
+/**
+ * The two bearer secrets are read under the same rules on both sides (see `domain/Secrets.kt`): not a value the
+ * template left behind, and parseable on the wire. A server parses the `Authorization` header before any provider
+ * compares the token, so a character outside RFC 6750's alphabet is a `400` on every call, and nothing at startup
+ * would have said so.
+ */
+private fun requireUsableBearerSecret(name: String, value: String) {
+  if (isPlaceholder(value) || value.contains("change_this", ignoreCase = true)) {
+    error("$name is still a placeholder value.")
+  }
+  if (!value.isBearerToken()) {
+    error("$name may only contain letters, digits and -._~+/ (with trailing = allowed).")
+  }
+}
+
+/** RFC 6750's `b64token`: what a `Bearer` header may carry, and all a Ktor server will parse. */
+private fun String.isBearerToken(): Boolean = Regex("[A-Za-z0-9\\-._~+/]+=*").matches(this)
 
 /** `/` alone is refused too: it is the index route. */
 private fun String.isPlainAbsolutePath(): Boolean =

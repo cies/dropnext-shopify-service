@@ -3,6 +3,7 @@ package dropnext.dss.mapper
 import dropnext.dss.contract.CreateShopifyOrderRequest
 import dropnext.dss.contract.OrderLineItem
 import dropnext.dss.contract.ShippingAddress
+import dropnext.dss.domain.ShopifyOrderId
 import dropnext.dss.domain.fulfillment.isOpenForFulfillment
 import dropnext.dss.lib.shopify.legacyIdFromGid
 
@@ -41,23 +42,22 @@ data class MonolithOrderMapping(
   val omittedLineItems: List<OmittedOrderLineItem>,
 )
 
-/** The request alone, for callers that have no use for the omissions. */
-fun orderToCreateShopifyOrderRequest(shopifySubdomain: String, order: Order): CreateShopifyOrderRequest =
-  mapOrderForMonolith(shopifySubdomain, order).request
-
 /**
  * Builds [CreateShopifyOrderRequest] from Shopify Admin Graphql [Order] (hydrated after a webhook).
  * Field names and JSON shape match the checked-in monolith contract (snake_case in wire format).
+ *
+ * The order is keyed by [orderId], which the caller read off the gid it loaded the snapshot with, rather than
+ * re-derived from the snapshot: a snapshot without a readable id used to be sent as order `0`, and a made-up id
+ * is worse than no order.
  *
  * A line item the monolith cannot take (see [OrderLineItemOmission]) is dropped rather than failing
  * the order: the rest of the order is still worth having, and the omission is reported alongside.
  */
 fun mapOrderForMonolith(
   shopifySubdomain: String,
+  orderId: ShopifyOrderId,
   order: Order,
 ): MonolithOrderMapping {
-  val orderLegacy = legacyIdFromGid(order.id) ?: order.legacyResourceId.toLongOrNull() ?: 0L
-
   val shipping = order.shippingAddress?.toDto() ?: ShippingAddress(
     firstName = null,
     lastName = null,
@@ -102,7 +102,7 @@ fun mapOrderForMonolith(
   )
   val request = CreateShopifyOrderRequest(
     shopifySubdomain = shopifySubdomain,
-    shopifyOrderId = orderLegacy,
+    shopifyOrderId = orderId.value,
     name = order.name,
     financialStatus = order.displayFinancialStatus?.toFinancialString() ?: "Unknown",
     fulfillmentStatus = order.displayFulfillmentStatus.toMonolithFulfillmentStatus(),

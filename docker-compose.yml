@@ -12,9 +12,16 @@ services:
       PORT: ${PORT:-8080}
       MONOLITH_BASE_URL: ${MONOLITH_BASE_URL:-}
       MONOLITH_API_PREFIX: ${MONOLITH_API_PREFIX:-}
-      MONOLITH_API_KEY: ${MONOLITH_API_KEY:-}
+      DSS_TO_MONOLITH_API_KEY: ${DSS_TO_MONOLITH_API_KEY:-}
     ports:
       - "${PORT:-8080}:${PORT:-8080}"
+    # The image carries no HEALTHCHECK (ECS probes through the load balancer); this one follows the port above.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:${PORT:-8080}/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 20s
+      retries: 3
     restart: unless-stopped
 
   app-local-monolith:
@@ -31,9 +38,16 @@ services:
       PORT: ${PORT:-8080}
       MONOLITH_BASE_URL: ${MONOLITH_BASE_URL:-}
       MONOLITH_API_PREFIX: ${MONOLITH_API_PREFIX:-}
-      MONOLITH_API_KEY: ${MONOLITH_API_KEY:-}
+      DSS_TO_MONOLITH_API_KEY: ${DSS_TO_MONOLITH_API_KEY:-}
       DSS_ALLOW_INSECURE_MONOLITH: "true"
       DSS_MODE: ${DSS_MODE:-DEV} # The insecure flag above is refused in PROD.
     ports:
       - "${PORT:-8080}:${PORT:-8080}"
+    # The image carries no HEALTHCHECK (ECS probes through the load balancer); this one follows the port above.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:${PORT:-8080}/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 20s
+      retries: 3
     restart: unless-stopped

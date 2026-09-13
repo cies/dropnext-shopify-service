@@ -9,6 +9,7 @@ import dropnext.dss.lib.json.AppJson
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlServer
 import dropnext.dss.testutil.helper.shopifyRewritingHttpClient
 import dropnext.dss.testutil.helper.testHttpClient
+import dropnext.dss.testutil.helper.throwingHttpClient
 import io.ktor.http.HttpStatusCode
 import java.time.Instant
 import kotlin.test.Test
@@ -166,6 +167,16 @@ class HttpShopifyOAuthServiceTest {
 
     assert((result as Failure).reason is OAuthError.Transport)
     assert("client-secret-xyz" !in result.reason.message)
+  }
+
+  /** Sending the merchant back to Shopify for a bug on our side would fail the same way again. */
+  @Test
+  fun `exchangeCode lets a failure that is not a transport failure propagate`() = runBlocking {
+    throwingHttpClient(IllegalStateException("client misconfigured")).use { broken ->
+      val service = HttpShopifyOAuthService(broken, "client-id-123", ShopifyAppSecret("s"), "read_orders", "https://dss.example.com/oauth/callback")
+      val thrown = runCatching { service.exchangeCode(shop, "abc-code") }.exceptionOrNull()
+      assert(thrown is IllegalStateException)
+    }
   }
 
   /** The decoder quotes the body it could not read, and a token response carries the token. */

@@ -699,7 +699,7 @@ class MonolithWebhookHandlersTest {
     shopTokens: InMemoryShopTokenStore = InMemoryShopTokenStore(),
     shopifyGraphqlServiceFactory: ShopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = null),
   ): DssDependencies = dssDependencies(
-    config = testConfig(dssApiKey = secret),
+    config = testConfig(monolithToDssApiKey = secret),
     monolithService = monolith,
     shopTokens = shopTokens,
     shopifyGraphqlServiceFactory = shopifyGraphqlServiceFactory,

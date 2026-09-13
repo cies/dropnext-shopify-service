@@ -2,9 +2,14 @@ package dropnext.dss
 
 import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopifyAdminToken
+import dropnext.dss.handler.WEBHOOK_MONOLITH_MAX_RETRIES
+import dropnext.dss.lib.ktor.MONOLITH_MAX_RETRIES
+import dropnext.dss.lib.ktor.createMonolithHttpClient
 import dropnext.dss.path.Paths
+import dropnext.dss.testutil.fake.FakeMonolithHttpServer
 import dropnext.dss.testutil.fake.FakeMonolithService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlServer
+import dropnext.dss.testutil.fixture.minimalOrder
 import dropnext.dss.testutil.fixture.testConfig
 import dropnext.dss.testutil.helper.base64HmacSha256
 import dropnext.dss.testutil.helper.shopifyRewritingHttpClient
@@ -16,8 +21,11 @@ import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
+import io.ktor.client.request.put
 import io.ktor.client.request.setBody
+import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.contentType
 import org.junit.jupiter.api.Test
 
 
@@ -102,6 +110,52 @@ class DependenciesTest {
     } finally {
       // The application closes the client it was given when it stops; the server is ours to stop.
       shopifyServer.stop()
+    }
+  }
+
+  /** A webhook has four seconds and a monolith-facing route thirty, so the monolith calls they make repeat differently. */
+  @Test
+  fun `a webhook repeats a failed monolith call once, a monolith-facing route three times`() {
+    val monolithServer = FakeMonolithHttpServer().apply {
+      defaultResponse = FakeMonolithHttpServer.CannedResponse(HttpStatusCode.ServiceUnavailable, """{"error":"down"}""")
+    }
+    val monolithPort = monolithServer.start()
+    val shopifyServer = FakeShopifyGraphqlServer()
+    val rewritingClient = shopifyRewritingHttpClient(shopifyServer.start())
+    try {
+      shopifyServer.stubData("GetOrderForDss", GetOrderForDss.Result(order = minimalOrder()), GetOrderForDss.Result.serializer())
+      val deps = dssDependencies(
+        config = testConfig(
+          appClientSecret = APP_SECRET,
+          monolithBaseUrl = "http://localhost:$monolithPort",
+          shopAccessTokens = mapOf(acmeShop to ShopifyAdminToken("shpat_seeded")),
+        ),
+        httpClient = rewritingClient,
+        // The production retry counts over a backoff a test need not wait out.
+        monolithHttpClient = createMonolithHttpClient(rewritingClient, retryBaseDelayMillis = 5),
+        webhookMonolithHttpClient = createMonolithHttpClient(rewritingClient, retryBaseDelayMillis = 5, maxRetries = WEBHOOK_MONOLITH_MAX_RETRIES),
+      )
+      withDssApp(deps, authenticateAsMonolith = true) { client ->
+        val body = """{"id":1001,"admin_graphql_api_id":"gid://shopify/Order/1001"}"""
+        val webhook = client.post(Paths.webhooksShopify) {
+          header("X-Shopify-Topic", "orders/create")
+          header("X-Shopify-Shop-Domain", acmeShop.normalizedShopifyHost)
+          header("X-Shopify-Hmac-Sha256", base64HmacSha256(APP_SECRET, body.toByteArray()))
+          setBody(body)
+        }
+        assert(webhook.status == HttpStatusCode.BadGateway)
+        assert(monolithServer.requests.count { it.path == "/orders" } == 1 + WEBHOOK_MONOLITH_MAX_RETRIES)
+
+        val put = client.put(Paths.storesApiKey) {
+          contentType(ContentType.Application.Json)
+          setBody("""{"shopify_subdomain":"acme","shopify_shop_id":1,"api_key":"shpat_x"}""")
+        }
+        assert(put.status == HttpStatusCode.BadGateway)
+        assert(monolithServer.requests.count { it.path == "/stores/api-key" } == 1 + MONOLITH_MAX_RETRIES)
+      }
+    } finally {
+      shopifyServer.stop()
+      monolithServer.stop()
     }
   }
 

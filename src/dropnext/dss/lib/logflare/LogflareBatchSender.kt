@@ -7,6 +7,7 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse.BodyHandlers
 import java.time.Duration as JavaDuration
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
@@ -31,8 +32,8 @@ import kotlinx.serialization.json.put
 // describe a wire contract this traffic is not part of.
 private val jsonMapper = Json
 
-/** How long [LogflareBatchSender.close] may spend draining the queue before giving up on the rest. */
-private val CLOSE_DRAIN_BUDGET: JavaDuration = JavaDuration.ofSeconds(5)
+/** How long [LogflareBatchSender.close] may spend on the handshake and the drain together before giving up on the rest. */
+private val CLOSE_DRAIN_BUDGET: Duration = 5.seconds
 
 /** Short timeouts throughout: a log shipper must never be the reason a thread is parked. */
 internal fun defaultLogflareClient(): HttpClient = HttpClient.newBuilder()
@@ -62,6 +63,8 @@ class LogflareBatchSender(
   private val flushInterval: Duration = 1.seconds,
   private val client: HttpClient = defaultLogflareClient(),
   private val reportError: (String) -> Unit,
+  /** A parameter so a test of [close] need not wait the production budget out. */
+  private val closeDrainBudget: Duration = CLOSE_DRAIN_BUDGET,
 ) {
 
   /**
@@ -74,6 +77,9 @@ class LogflareBatchSender(
   private val droppedSinceLastReport = AtomicLong()
 
   private var scheduledFlushExecutor: ScheduledExecutorService? = null
+
+  /** The source-token handshake [start] put on the flush thread, which [close] has to wait for before it can ship. */
+  private var handshake: Future<*>? = null
 
   /** Set while a requested flush waits on the executor, so a burst of appends submits one task, not one per line. */
   private val flushRequested = AtomicBoolean(false)
@@ -127,7 +133,7 @@ class LogflareBatchSender(
       Thread(runnable, "logflare-flush").apply { isDaemon = true }
     }
     scheduledFlushExecutor = executor
-    if (sourceName != null) executor.submit { if (resolveSourceToken(sourceName) == null) giveUp() }
+    if (sourceName != null) handshake = executor.submit { if (resolveSourceToken(sourceName) == null) giveUp() }
     executor.scheduleAtFixedRate(
       ::flush, flushInterval.inWholeMilliseconds, flushInterval.inWholeMilliseconds, TimeUnit.MILLISECONDS
     )
@@ -224,18 +230,25 @@ class LogflareBatchSender(
   /**
    * Stops the schedule, ships whatever is still queued, and releases the HTTP client.
    *
+   * Nothing ships without the source token, so a handshake still in flight is waited for first, with the same budget.
+   * Waited for, not looped over: [flush] returns at once while the token is empty, and a drain loop around it used to
+   * spin a core for the whole budget whenever the process stopped during the handshake (a task killed at boot by a
+   * failing health check, a rollback seconds after start, a slow Logflare), inside the shutdown hook where ECS is
+   * counting down its thirty seconds.
+   *
    * Drains in a loop because [flush] ships at most [maxBatchSize] events per call: a single call
    * would have posted 50 of a queued 10,000 and dropped the rest, at exactly the moment those lines
-   * are most worth having. Bounded by [CLOSE_DRAIN_BUDGET] because this runs from the shutdown hook,
+   * are most worth having. Bounded by [closeDrainBudget] because this runs from the shutdown hook,
    * where an unreachable Logflare must not be able to hang the JVM — 10,000 events at 50 per round
    * trip is 200 sequential HTTP calls. What could not be shipped is reported rather than lost quietly.
    */
   fun close() {
     scheduledFlushExecutor?.shutdown()
-    val deadline = System.nanoTime() + CLOSE_DRAIN_BUDGET.toNanos()
-    while (queue.isNotEmpty() && System.nanoTime() < deadline) flush()
+    val deadline = System.nanoTime() + closeDrainBudget.inWholeNanoseconds
+    runCatching { handshake?.get((deadline - System.nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS) }
+    while (queue.isNotEmpty() && sourceToken.isNotEmpty() && System.nanoTime() < deadline) flush()
     if (queue.isNotEmpty()) {
-      reportError("Logflare: ${queue.size} events still queued after ${CLOSE_DRAIN_BUDGET.toSeconds()}s at shutdown")
+      reportError("Logflare: ${queue.size} events still queued after $closeDrainBudget at shutdown")
     }
     scheduledFlushExecutor?.awaitTermination(5, TimeUnit.SECONDS)
     scheduledFlushExecutor = null

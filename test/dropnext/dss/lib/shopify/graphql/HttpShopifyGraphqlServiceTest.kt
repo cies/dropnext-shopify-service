@@ -16,6 +16,7 @@ import dropnext.dss.testutil.fixture.minimalOrder
 import dropnext.dss.testutil.fixture.sampleProduct
 import dropnext.dss.testutil.helper.shopifyGraphqlUrl
 import dropnext.dss.testutil.helper.testHttpClient
+import dropnext.dss.testutil.helper.throwingHttpClient
 import dropnext.graphql.generated.FulfillmentCancelMutation
 import dropnext.graphql.generated.FulfillmentCreateWithLineItems
 import dropnext.graphql.generated.FulfillmentEventCreateMutation
@@ -368,6 +369,16 @@ class HttpShopifyGraphqlServiceTest {
       val deadShopify = HttpShopifyGraphqlService(acme, GraphQLKtorClient(deadUrl, httpClient), ShopifyAdminToken("shpat_test"))
       val result = deadShopify.orderForDss("gid://shopify/Order/1001")
       assert((result as Failure).reason is ShopifyError.Network)
+    }
+  }
+
+  /** A bug answered as a network failure would be retried by Shopify and the monolith and never reach the 500 log line. */
+  @Test
+  fun `a failure that is not a transport failure propagates instead of reading as a Network failure`() = runBlocking {
+    throwingHttpClient(IllegalStateException("client misconfigured")).use { broken ->
+      val brokenShopify = HttpShopifyGraphqlService(acme, GraphQLKtorClient(gqlUrl, broken), ShopifyAdminToken("shpat_test"))
+      val thrown = runCatching { brokenShopify.orderForDss("gid://shopify/Order/1001") }.exceptionOrNull()
+      assert(thrown is IllegalStateException)
     }
   }
 

@@ -63,8 +63,8 @@ credentials, so the human developer starts it — see "Operational boundary".
   `ArchitectureTest` forbids reading the environment anywhere else). A variable not read there is not a variable.
 - The service is stateless: no database, no migrations. Per-shop Shopify Admin tokens live in an in-memory
   `InMemoryShopTokenStore` (the `ShopTokenStore` interface), seeded from `DSS_SHOP_ACCESS_TOKENS`, filled by the OAuth
-  install or by the monolith through `PUT /stores/api-key`, with a fallback lookup on the monolith (`GET /stores`) on a
-  miss.
+  installation or by the monolith through `PUT /stores/api-key`, with a fallback lookup on the monolith (`GET /stores`) on a miss.
+  One lookup per shop at a time, so a burst of deliveries after a restart asks the monolith once.
 
 
 # Architecture overview
@@ -129,8 +129,8 @@ credentials, so the human developer starts it — see "Operational boundary".
 2. The raw body is verified against `X-Shopify-Hmac-Sha256` with the app secret
    (`ShopifyHmacVerifierService.verifyWebhook`, constant-time compare); a mismatch is a `401`.
 3. The shop comes from `X-Shopify-Shop-Domain` (or the body) and `ShopifyGraphqlServiceFactory.forShop` resolves its
-   Admin token. No token (`ShopLookup.Missing`) → logged as an error but answered `200`, so Shopify does not keep
-   retrying a delivery we cannot act on. A token the monolith could not be asked for (`ShopLookup.Unavailable`: the
+   Admin token. No token (`ShopLookup.Missing`) → answered `200`, with the delivery's summary line at error level, so
+   Shopify does not keep retrying a delivery we cannot act on. A token the monolith could not be asked for (`ShopLookup.Unavailable`: the
    cache is empty after a restart and the monolith does not answer) → `502`, because the shop may well have one and a
    `200` would lose the delivery.
 4. Dispatch on `ShopifyWebhookTopic`, each case one workflow function:
@@ -139,31 +139,35 @@ credentials, so the human developer starts it — see "Operational boundary".
    - `products/delete`: `deleteShopifyProductFromMonolith` — the product id from the body (the only thing the
      body carries; the product can no longer be fetched), soft-delete its variants on the monolith
      (`deleteProductVariants`). Needs no Admin token, so it runs even for a shop without one.
-   - `orders/create`: `syncShopifyOrderToMonolith` — `orderForDss`, `orderToCreateShopifyOrderRequest`,
+   - `orders/create`: `syncShopifyOrderToMonolith` — `orderForDss`, `mapOrderForMonolith` (keyed by the id the webhook's gid carries),
      `postCreateOrder` (a `409` from the monolith is `CreateOrderOutcome.AlreadyExisted`, a success).
    - `orders/updated`: acknowledged, not mirrored (the `create` already carried the order).
    - Anything else: logged and acknowledged.
 5. Every workflow answers a `WebhookMirrorOutcome`, and the handler chooses the status from it (`isTransient`): `200`
    when a redelivery could not go better (mirrored, nothing to mirror, no token, a token, a request or a query that is
    refused, an answer that no longer decodes), `502` when Shopify or the monolith did not answer, throttled, answered a
-   `5xx`, or the work outlived `WEBHOOK_MIRROR_BUDGET` (four seconds, inside Shopify's five). Whether a Shopify failure
+   `5xx`, or the work outlived `WEBHOOK_MIRROR_BUDGET` (four seconds, inside Shopify's five; a monolith write already
+   sent gets `WEBHOOK_WRITE_GRACE`, 0.7 s more, before it is cancelled, so a commit that lands late is still a `200`),
+   or every mirror slot was taken when the delivery arrived (`MAX_CONCURRENT_MIRRORS`: answered before any work, so
+   a burst cannot queue up behind itself). Whether a Shopify failure
    is worth a retry is decided where it is recognised (`ShopifyError.isRetryable`, for a Graphql error from its
    `extensions.code`, since those arrive with HTTP `200`). Shopify redelivers a non-2xx, or
    no answer within five seconds, up to eight times in four hours with a growing interval, so that is the retry;
    the monolith's idempotent handling makes it safe. After repeated failures within 24 hours Shopify removes the
-   subscription, which `/api/check` then reports as `missing` ([Shopify: troubleshoot
-   webhooks](https://shopify.dev/docs/apps/build/webhooks/troubleshooting-webhooks)).
-6. Every verified delivery ends in one `WebhookDeliveryReport`: the `Webhook done …` summary line (info for mirrored
-   and skipped, warn for a transient failure, error for a permanent one) with the webhook id, the delivery lag and
-   a countable `reason=` or `error=` label, and the `200` body that says the same, which Shopify stores with the
-   delivery in the Partner Dashboard.
+   subscription, which `/api/check` then reports as `missing`
+   ([Shopify: troubleshoot webhooks](https://shopify.dev/docs/apps/build/webhooks/troubleshooting-webhooks)).
+6. Every verified delivery ends in one `WebhookDeliveryReport`: the `Webhook done …` summary line (info for a
+   mirrored delivery and for a skip that is the normal shape of things, error for a skip that repeats until someone
+   acts, such as a shop without a token, warn for a transient failure, error for a permanent one) with the webhook
+   id, the delivery lag and a countable `reason=` or `error=` label, and the `200` body that says the same, which
+   Shopify stores with the delivery in the Partner Dashboard. It is the one line a delivery leaves in the log.
 
 Deduplication of Shopify's at-least-once delivery is **not implemented**: the service runs as a single instance and
 relies on the monolith's idempotent handling.
 
 ## Monolith-facing endpoints (DSS internal REST)
 Mounted by `monolithWebhookRoutes` inside `authenticate(MONOLITH_WEBHOOK_AUTH)`: every request carries
-`Authorization: Bearer <DSS_API_KEY>`, compared in constant time by the `bearer` provider that
+`Authorization: Bearer <MONOLITH_TO_DSS_API_KEY>`, compared in constant time by the `bearer` provider that
 `lib/ktor/installMonolithWebhookAuth.kt` installs, so the handlers never check auth themselves. A missing or wrong
 token is the RFC 6750 challenge: a bare `401` with `WWW-Authenticate: Bearer realm=dss-internal`. A body that does not
 decode or does not pass the domain validators is a `400` shaped by `StatusPages` before the handler's `receive` returns
@@ -201,11 +205,14 @@ the exchange fails the install; each step reports on the page instead. Failures 
 `FakeMonolithService` (in `test/`) the recording fake.
 
 - Base URL: `MONOLITH_BASE_URL` (+ optional `MONOLITH_API_PREFIX`); the paths come from the generated `OutBoundMonolithPaths`.
-- Auth: optional `MONOLITH_API_KEY`, sent as a Bearer token.
+- Auth: optional `DSS_TO_MONOLITH_API_KEY`, sent as a Bearer token.
 - Timeouts and retries (`lib/ktor/httpClientBuilders.kt`, where each number is explained): a monolith call may take
-  5 s and is retried up to 3 times on a dropped or refused connection or a `5xx` (never on a timeout), after 0.5, 1 and
-  2 s; a Shopify call may take 10 s and is never retried, so a non-idempotent mutation is never sent twice. Both fit
-  inside the 30 s the monolith waits for the routes it calls.
+  5 s and is retried up to 3 times on a dropped or refused connection or a `5xx` (never on a timeout), after 0.5, 1, and
+  2 s, except when made for a webhook, whose four-second budget fits one retry (`WEBHOOK_MONOLITH_MAX_RETRIES`); a
+  Shopify call may take 10 s and is never retried, so a non-idempotent mutation is never sent twice. Both fit
+  inside the 30 s the monolith waits for the routes it calls. Every repeated attempt logs its failure
+  (`Monolith call failed, retrying …`) before the backoff: when a webhook's budget cuts the retries short, that line is
+  the only record of what the monolith answered.
 - `DSS_ALLOW_INSECURE_MONOLITH=true` is **dev-only** — it needs `DSS_MODE=DEV` (`PROD`, the default, refuses the flag
   at startup), and production rejects a non-HTTPS monolith URL at startup.
 - Every method returns a `MonolithResult<T>` whose `MonolithError` is `Transport` (no answer), `Rejected`
@@ -338,11 +345,11 @@ Shared with the monolith, so a line from either service reads the same way in Lo
 - **Inbound Shopify webhooks** are authenticated by the `X-Shopify-Hmac-Sha256` body signature
   (`ShopifyHmacVerifierService.verifyWebhook`, constant-time compare); the OAuth callback by its query-string HMAC
   plus our signed `state`.
-- **Inbound monolith calls** are authenticated by `Authorization: Bearer <DSS_API_KEY>`, compared in constant time
+- **Inbound monolith calls** are authenticated by `Authorization: Bearer <MONOLITH_TO_DSS_API_KEY>`, compared in constant time
   by the `bearer` provider behind `authenticate(MONOLITH_WEBHOOK_AUTH)` — a new monolith-facing route goes inside
   that block.
 - **Outbound to the monolith** is HTTPS-only in production (`DSS_ALLOW_INSECURE_MONOLITH` is the dev escape hatch);
-  `MONOLITH_API_KEY` travels in the `Authorization` header, never in a URL.
+  `DSS_TO_MONOLITH_API_KEY` travels in the `Authorization` header, never in a URL.
 - **Nothing secret in the logs**: no Admin tokens (`shpat_…`), no `Authorization` headers, no request or response
   bodies. The HTTP clients deliberately do not install Ktor's `Logging` plugin — keep it that way. `installCallLogging`
   and the unhandled-exception line in `installStatusPages` log the path and never the URI, because the OAuth callback
@@ -395,7 +402,7 @@ exercises the behaviour:
   `TestSuiteArchitectureTest`, the way `ArchitectureTest` checks `src/`.
 
 The full rules — the fake catalogue, how to spin up the app in a test, `runBlocking` for suspend code, where tests
-live and the `test/` ↔ `src/` mirroring rule — are in `.claude/rules/tests.md`.
+live, and the `test/` ↔ `src/` mirroring rule — are in `.claude/rules/tests.md`.
 
 
 # Code style
@@ -403,7 +410,7 @@ live and the `test/` ↔ `src/` mirroring rule — are in `.claude/rules/tests.m
 - **Use `val` over `var`** wherever possible
 - **Expression bodies** for short (one or two lines long) single-expression functions
 - **Kotlin-style** over Java-style code
-- **No `lateinit`** in production code; favour immutable `val` modelling
+- **No `lateinit`** in production code; favor immutable `val` modelling
 - **Generic error messages in production** never leak internal state to users (in development be more verbose)
 - **2 returns between the import block and the first statement**
 - **Prefer the kotlinesque `headerNames.forEach { headerName -> ... }` over `for (headerName in headerNames) { ... }`**
@@ -437,7 +444,7 @@ Files and types:
 - **Outcome types**: one call answers a result4k `Result` (`ShopifyResult<T>`, `MonolithResult<T>`); a summary of
   many is a `*Report` (`WebhookRegistrationReport`, `ShopInstallReport`); what a view renders is an `*Outcome`
   (`MonolithPersistOutcome`). Errors are the sealed `ShopifyError`, `MonolithError` and `OAuthError`, nothing else.
-- **Secrets and ids** are value classes in `domain/` (`ShopifyAdminToken`, `DssApiKey`, `ShopifyOrderId`, …); a
+- **Secrets and ids** are value classes in `domain/` (`ShopifyAdminToken`, `MonolithToDssApiKey`, `ShopifyOrderId`, …); a
   `String` token or a `Long` id only exists on the contract DTOs and is wrapped at the handler boundary.
 - **Paths**: inbound constants live in `Paths`; outbound path objects are `OutBound<Target>…Paths`.
 - **Tests**: `<SourceFile>Test.kt` in the mirrored package (see `.claude/rules/tests.md`).
@@ -460,7 +467,7 @@ Files and types:
 - Only `lib/shopify/` runs operations (the `ShopifyGraphqlService` methods, each answering a typed `ShopifyResult`);
   everything else programs against that interface. The interface answers the `Order` and `Product` snapshots and
   takes two generated enums, so the layers that walk those may import generated types: `domain/fulfillment/`, the
-  mappers and `workflow/` (`ArchitectureTest.graphqlGeneratedAllowList`). Handlers, routing and presentation may not.
+  mappers and `workflow/` (`ArchitectureTest.graphqlGeneratedAllowList`). Handlers, routing, and presentation may not.
 - Bumping the Shopify API version touches several places that must agree; the procedure and the response-handling
   conventions are in `.claude/rules/graphql.md`.
 

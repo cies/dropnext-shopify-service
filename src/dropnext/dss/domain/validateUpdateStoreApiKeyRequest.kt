@@ -1,7 +1,6 @@
 package dropnext.dss.domain
 
 import dropnext.dss.contract.UpdateStoreApiKeyRequest
-import dropnext.dss.domain.fulfillment.RequestValidation
 
 
 /**
@@ -16,5 +15,5 @@ fun validateUpdateStoreApiKeyRequest(request: UpdateStoreApiKeyRequest): Request
   // Null means "not known"; zero was the old way of saying that and now marks a caller that was not updated.
   val shopId = request.shopifyShopId
   if (shopId != null && shopId <= 0L) errors += "invalid shopify_shop_id: must be positive or null"
-  return if (errors.isEmpty()) RequestValidation.Valid else RequestValidation.Invalid(errors)
+  return errors.toRequestValidation()
 }

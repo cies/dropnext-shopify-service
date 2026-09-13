@@ -7,14 +7,14 @@ import dropnext.dss.contract.ProductStatus
 import dropnext.dss.contract.ProductVariantItem
 import dropnext.dss.contract.UpdateStoreApiKeyRequest
 import dropnext.dss.contract.UpsertProductVariantsRequest
-import dropnext.dss.domain.MonolithApiKey
+import dropnext.dss.domain.DssToMonolithApiKey
 import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.domain.StoreId
 import dropnext.dss.lib.json.MonolithJson
 import dropnext.dss.lib.ktor.createMonolithHttpClient
 
-import dropnext.dss.mapper.orderToCreateShopifyOrderRequest
+import dropnext.dss.testutil.helper.orderToCreateShopifyOrderRequest
 import dropnext.dss.testutil.fake.FakeFlakyServer
 import dropnext.dss.testutil.fake.FakeMonolithHttpServer
 import dropnext.dss.testutil.fixture.minimalOrder
@@ -56,7 +56,7 @@ class HttpMonolithServiceTest {
 
   private fun service(
     apiPrefix: String? = null,
-    apiKey: MonolithApiKey? = null,
+    apiKey: DssToMonolithApiKey? = null,
   ): HttpMonolithService =
     HttpMonolithService(
       httpClient = httpClient,
@@ -331,11 +331,11 @@ class HttpMonolithServiceTest {
 
   @Test
   fun `apiKey header behavior — null, blank, and non-blank`() = runBlocking {
-    val cases = listOf<Pair<MonolithApiKey?, String?>>(
+    val cases = listOf<Pair<DssToMonolithApiKey?, String?>>(
       null to null,
-      MonolithApiKey("") to null,
-      MonolithApiKey("   ") to null,
-      MonolithApiKey("key-abc") to "Bearer key-abc",
+      DssToMonolithApiKey("") to null,
+      DssToMonolithApiKey("   ") to null,
+      DssToMonolithApiKey("key-abc") to "Bearer key-abc",
     )
     cases.forEach { (apiKey, expected) ->
       server.clear()

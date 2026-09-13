@@ -2,11 +2,13 @@ package dropnext.dss.lib.logflare
 
 import dropnext.dss.domain.LogflareApiKey
 import dropnext.dss.testutil.fake.FakeLogflareServer
+import java.lang.management.ManagementFactory
 import java.util.concurrent.ConcurrentLinkedQueue
 import kotlin.test.Test
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -31,6 +33,7 @@ class LogflareBatchSenderTest {
     maxBatchSize: Int = 50,
     maxQueuedEvents: Int = 10_000,
     flushInterval: Duration = 50.milliseconds,
+    closeDrainBudget: Duration = 5.seconds,
   ) = LogflareBatchSender(
     endpoint = server.endpoint,
     apiKey = LogflareApiKey("test-logflare-key"),
@@ -38,6 +41,7 @@ class LogflareBatchSenderTest {
     maxQueuedEvents = maxQueuedEvents,
     flushInterval = flushInterval,
     reportError = { errors += it },
+    closeDrainBudget = closeDrainBudget,
   )
 
   private fun entry(message: String): JsonObject = buildJsonObject { put("message", message) }
@@ -172,6 +176,44 @@ class LogflareBatchSenderTest {
     }
   }
 
+  /**
+   * `flush` returns at once while the token is empty, so a drain loop around it spun a core for the whole budget
+   * whenever the process stopped during the handshake. The closing thread's CPU time is what tells a wait from a spin.
+   */
+  @Test
+  fun `closing during a stalled handshake waits for it, bounded by the budget, without spinning`() {
+    FakeLogflareServer().use { server ->
+      server.sourcesStallMillis = 800
+      val sender = senderFor(server, flushInterval = 1.minutes, closeDrainBudget = 300.milliseconds)
+      sender.start("dropnext-test")
+      sender.enqueue(entry("too early"))
+      val threads = ManagementFactory.getThreadMXBean()
+      val cpuBefore = threads.currentThreadCpuTime
+
+      sender.close()
+
+      val cpuMillis = (threads.currentThreadCpuTime - cpuBefore) / 1_000_000
+      assert(cpuMillis < 150)
+      assert(errors.any { "1 events still queued" in it })
+      assert(server.receivedEvents.isEmpty())
+    }
+  }
+
+  @Test
+  fun `closing waits for a handshake that finishes inside the budget and then ships what queued`() {
+    FakeLogflareServer().use { server ->
+      server.sourcesStallMillis = 200
+      val sender = senderFor(server, flushInterval = 1.minutes)
+      sender.start("dropnext-test")
+      sender.enqueue(entry("after the handshake"))
+
+      sender.close()
+
+      assert(messagesOf(server) == listOf("after the handshake"))
+      assert(sender.queuedEventCount == 0)
+    }
+  }
+
   @Test
   fun `closing drains more than one batch`() {
     FakeLogflareServer().use { server ->
@@ -217,7 +259,9 @@ class LogflareBatchSenderTest {
   fun `a burst of flush requests during a stalled flush submits one task`() {
     FakeLogflareServer().use { server ->
       server.logsStallMillis = 1_000
-      val sender = senderFor(server, maxBatchSize = 1, flushInterval = 1.minutes)
+      // A batch of fifty, so the drain at the end is six round trips and not three hundred: with the classes running
+      // concurrently, three hundred did not always fit in the five seconds `close` gives them.
+      val sender = senderFor(server, maxBatchSize = 50, flushInterval = 1.minutes)
       sender.resolveSourceToken("dropnext-test")
       sender.start()
       sender.enqueue(entry("first"))

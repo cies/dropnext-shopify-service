@@ -3,6 +3,8 @@ package dropnext.dss.lib.shopify.token
 import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopifyAdminToken
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 
 /**
@@ -20,15 +22,25 @@ class InMemoryShopTokenStore(
 ) : ShopTokenStore {
   private val tokens: ConcurrentHashMap<ShopDomain, ShopifyAdminToken> = ConcurrentHashMap(initial)
 
+  /** One per shop that ever missed: a mutex is a few words, and the set of shops is small. */
+  private val lookups = ConcurrentHashMap<ShopDomain, Mutex>()
+
   override suspend fun resolve(shop: ShopDomain): ShopLookup<ShopifyAdminToken> {
     tokens[shop]?.let { return ShopLookup.Found(it) }
-    return when (val fetched = fallback(shop)) {
-      // `putIfAbsent`, not `put`: a `remember` that landed while the fallback was in flight (an OAuth
-      // callback, a `PUT /stores/api-key`) is newer than what the monolith answered and must win.
-      is ShopLookup.Found -> ShopLookup.Found(tokens.putIfAbsent(shop, fetched.value) ?: fetched.value)
-      // Neither is cached: the shop may be installed a minute from now, and a monolith that did not answer this
-      // request may answer the next one.
-      ShopLookup.Missing, ShopLookup.Unavailable -> fetched
+    // One lookup per shop at a time: a burst of deliveries for a shop this instance does not know yet (every deploy
+    // starts with an empty cache) asks the monolith once, and the rest find the answer cached when their turn comes.
+    // A mutex rather than one shared job, so a caller that is cancelled while it waits (a webhook past its budget)
+    // takes nothing away from the others.
+    return lookups.computeIfAbsent(shop) { Mutex() }.withLock {
+      tokens[shop]?.let { return ShopLookup.Found(it) }
+      when (val fetched = fallback(shop)) {
+        // `putIfAbsent`, not `put`: a `remember` that landed while the fallback was in flight (an OAuth
+        // callback, a `PUT /stores/api-key`) is newer than what the monolith answered and must win.
+        is ShopLookup.Found -> ShopLookup.Found(tokens.putIfAbsent(shop, fetched.value) ?: fetched.value)
+        // Neither is cached: the shop may be installed a minute from now, and a monolith that did not answer this
+        // request may answer the next one.
+        ShopLookup.Missing, ShopLookup.Unavailable -> fetched
+      }
     }
   }
 

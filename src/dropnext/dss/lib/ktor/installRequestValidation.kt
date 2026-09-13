@@ -3,8 +3,8 @@ package dropnext.dss.lib.ktor
 import dropnext.dss.contract.SyncShipmentsWithFulfillmentsRequest
 import dropnext.dss.contract.TrackingUpdateRequest
 import dropnext.dss.contract.UpdateStoreApiKeyRequest
-import dropnext.dss.domain.fulfillment.RequestValidation as DomainRequestValidation
-import dropnext.dss.domain.fulfillment.validate
+import dropnext.dss.domain.RequestValidation as DomainRequestValidation
+import dropnext.dss.domain.fulfillment.validateSyncShipmentsRequest
 import dropnext.dss.domain.fulfillment.validateTrackingUpdateRequest
 import dropnext.dss.domain.validateUpdateStoreApiKeyRequest
 import io.ktor.server.application.Application
@@ -20,7 +20,7 @@ import io.ktor.server.plugins.requestvalidation.ValidationResult
  */
 fun Application.installRequestValidation() {
   install(RequestValidation) {
-    validate<SyncShipmentsWithFulfillmentsRequest> { it.validate().toValidationResult() }
+    validate<SyncShipmentsWithFulfillmentsRequest> { validateSyncShipmentsRequest(it).toValidationResult() }
     validate<TrackingUpdateRequest> { validateTrackingUpdateRequest(it).toValidationResult() }
     validate<UpdateStoreApiKeyRequest> { validateUpdateStoreApiKeyRequest(it).toValidationResult() }
   }

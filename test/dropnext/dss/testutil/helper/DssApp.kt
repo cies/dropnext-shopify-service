@@ -33,7 +33,7 @@ fun withDssApp(
     followRedirects = false
     install(ClientContentNegotiation) { json(AppJson) }
     if (authenticateAsMonolith) {
-      defaultRequest { header("Authorization", "Bearer ${deps.config.dssApiKey.value}") }
+      defaultRequest { header("Authorization", "Bearer ${deps.config.monolithToDssApiKey.value}") }
     }
   }
   block(client)

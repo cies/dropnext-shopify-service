@@ -1,11 +1,11 @@
 package dropnext.dss.lib.logflare
 
 import ch.qos.logback.classic.Logger as LogbackLogger
-import ch.qos.logback.classic.LoggerContext
 import dropnext.dss.domain.LogflareApiKey
 import dropnext.dss.lib.logging.TRACE_ID_MDC_KEY
 import dropnext.dss.testutil.fake.FakeLogflareServer
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
+import dropnext.dss.testutil.helper.logbackContext
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import kotlin.test.Test
@@ -14,7 +14,6 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.parallel.ResourceLock
-import org.slf4j.LoggerFactory
 import org.slf4j.MDC
 
 
@@ -26,7 +25,7 @@ import org.slf4j.MDC
  */
 class LogflareAppenderTest {
 
-  private val loggerContext = LoggerFactory.getILoggerFactory() as LoggerContext
+  private val loggerContext = logbackContext()
 
   /** Logs [emit] through an appender pointed at [server], on a logger of its own so no other test sees it. */
   private fun shippedBy(server: FakeLogflareServer, emit: (LogbackLogger) -> Unit): List<JsonObject> {

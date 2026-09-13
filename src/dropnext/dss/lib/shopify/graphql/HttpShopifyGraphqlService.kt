@@ -36,7 +36,7 @@ import dropnext.graphql.generated.inputs.FulfillmentTrackingInput
 import io.ktor.client.plugins.ResponseException
 import io.ktor.client.request.header
 import io.ktor.http.HttpStatusCode
-import kotlinx.coroutines.CancellationException
+import java.io.IOException
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -185,12 +185,15 @@ class HttpShopifyGraphqlService(
    *
    * The status is caught as an exception because the Graphql client runs with `expectSuccess`. Its
    * message would carry the response body, so only the status survives.
+   *
+   * Only an [IOException] is a network failure: a refused or reset connection, an unknown host and every Ktor timeout
+   * are one. Anything else thrown here is a bug, and a bug answered as a network failure would be retried by Shopify
+   * eight times and by the monolith into its dead-letter queue while never reaching the unhandled-error line, so it
+   * propagates to `StatusPages` and its `500` instead.
    */
   private suspend fun <T : Any> execute(request: GraphQLClientRequest<T>): ShopifyResult<T> {
     val response = try {
       gqlClient.execute(request) { header("X-Shopify-Access-Token", accessToken.value) }
-    } catch (e: CancellationException) {
-      throw e
     } catch (e: ResponseException) {
       val status = e.response.status.value
       if (e.response.status != HttpStatusCode.Unauthorized) return Failure(ShopifyError.HttpError(status))
@@ -198,7 +201,7 @@ class HttpShopifyGraphqlService(
       return Failure(ShopifyError.TokenRejected(status))
     } catch (e: SerializationException) {
       return Failure(ShopifyError.Undecodable(e.message ?: "not the expected JSON"))
-    } catch (e: Exception) {
+    } catch (e: IOException) {
       return Failure(ShopifyError.Network(e.message ?: "network error"))
     }
 

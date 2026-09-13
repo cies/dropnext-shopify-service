@@ -19,6 +19,7 @@ import dropnext.graphql.generated.enums.FulfillmentEventStatus
 import dropnext.graphql.generated.enums.WebhookSubscriptionTopic
 import dropnext.graphql.generated.getorderfordss.Order
 import kotlin.time.Duration
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 
 
@@ -52,6 +53,9 @@ class FakeShopifyGraphqlService(
 
   /** How long `orderForDss` takes to answer: what makes a webhook outlive its time budget. */
   var orderForDssDelay: Duration = Duration.ZERO
+
+  /** When set, `orderForDss` waits for it after recording the call, so a test can hold a delivery provably mid-flight. */
+  var orderForDssGate: CompletableDeferred<Unit>? = null
   val orderForDssCalls: MutableList<String> = mutableListOf()
 
   var cancelFulfillmentResult: ShopifyResult<Unit> = Success(Unit)
@@ -94,6 +98,7 @@ class FakeShopifyGraphqlService(
   override suspend fun orderForDss(orderGid: String): ShopifyResult<Order> {
     orderForDssCalls.add(orderGid)
     delay(orderForDssDelay)
+    orderForDssGate?.await()
     if (orderForDssResultQueue.isNotEmpty()) {
       return orderForDssResultQueue.removeAt(0)
     }
@@ -153,6 +158,7 @@ class FakeShopifyGraphqlService(
     orderForDssCalls.clear()
     orderForDssResultQueue.clear()
     orderForDssDelay = Duration.ZERO
+    orderForDssGate = null
     cancelFulfillmentCalls.clear()
     createFulfillmentCalls.clear()
     createFulfillmentResultQueue.clear()

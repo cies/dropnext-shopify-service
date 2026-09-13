@@ -83,12 +83,14 @@ RUN jlink \
 # major, so every build picks up the latest patch level; Amazon publishes no newer major yet.
 # The image could be slimmed down considerably with Google's `java-base-debian12` distroless
 # base (~30MB, made for jlinked runtimes), at the cost of no shell (breaks ECS Exec) and no
-# curl for the HEALTHCHECK.
+# curl for the health check `docker-compose.yml` runs.
 # This tag only exists on Amazon ECR Public — Docker Hub has `amazonlinux:2023` (full,
 # ~150MB) and `amazonlinux:minimal` (rolling), but not the pinned `2023-minimal` combo.
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal AS runtime
 
-# curl-minimal: the HEALTHCHECK probe.
+# curl-minimal: the health check `docker-compose.yml` runs inside the container, and a first tool under ECS Exec.
+#   The image declares no HEALTHCHECK of its own: ECS ignores one and probes `/health` through the load balancer
+#   (the infra's `app-dss-stack`), and a check baked into the image cannot follow the port `PORT` makes the app bind.
 # findutils: provides `xargs`, required by the SSM agent that ECS Exec injects
 #   when `enableExecuteCommand` is set on the task. Without it, exec sessions fail
 #   with "xargs is not available (exit 1)".
@@ -119,8 +121,5 @@ ENV VERSION_TAG=${VERSION_TAG} \
 USER dropnext
 WORKDIR /app
 EXPOSE 9999
-
-HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
-  CMD curl -fsS http://127.0.0.1:9999/health || exit 1
 
 ENTRYPOINT ["/app/bin/dropnext-shopify-service"]
