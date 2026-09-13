@@ -1,4 +1,4 @@
-package dropnext.dss.lib.logging
+package dropnext.dss.lib.slf4j
 
 import org.slf4j.MDC
 

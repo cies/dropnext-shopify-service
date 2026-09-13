@@ -3,7 +3,8 @@ package dropnext.dss.handler
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
 import dropnext.dss.DssDependencies
-import dropnext.dss.config.Config
+import dropnext.dss.boot.config.Config
+import dropnext.dss.boot.warmup.WarmUp
 import dropnext.dss.contract.ApiError
 import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopifyAdminToken
@@ -23,6 +24,9 @@ import io.ktor.client.call.body
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpStatusCode
+import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -58,6 +62,20 @@ class DiagnosticsHandlersTest {
     val body = r.bodyAsText()
     assert("\"status\":\"ok\"" in body)
     assert("\"version\":\"test-version\"" in body)
+  }
+
+  /** The same shape with another status and a `503`, so the load balancer's `200` matcher keeps a warming task out of rotation. */
+  @Test
+  fun `health answers 503 warming_up until the warm-up is done`() {
+    val gate = CompletableDeferred<Unit>()
+    withDssApp(deps(), warmUp = WarmUp(5.seconds) { gate.await() }) { client ->
+      val r = client.get(Paths.health)
+      assert(r.status == HttpStatusCode.ServiceUnavailable)
+      val body = r.body<JsonObject>()
+      assert(body["status"]!!.jsonPrimitive.content == "warming_up")
+      assert(body["version"]!!.jsonPrimitive.content == "test-version")
+      gate.complete(Unit)
+    }
   }
 
   @Test

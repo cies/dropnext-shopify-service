@@ -1,7 +1,7 @@
 package dropnext.dss.testutil.fixture
 
-import dropnext.dss.config.Config
-import dropnext.dss.config.DssMode
+import dropnext.dss.boot.config.Config
+import dropnext.dss.boot.config.DssMode
 import dropnext.dss.domain.DssToMonolithApiKey
 import dropnext.dss.domain.MonolithToDssApiKey
 import dropnext.dss.domain.ShopDomain

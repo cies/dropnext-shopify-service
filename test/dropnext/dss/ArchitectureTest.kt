@@ -54,7 +54,9 @@ class ArchitectureTest {
   @Test
   fun `the project's packages have correct dependencies on each other`() {
     srcScope.assertArchitecture {
-      val config = Layer("config", "dropnext.dss.config..")
+      val boot = Layer("boot", "dropnext.dss.boot..")
+      val bootConfig = Layer("boot/config", "dropnext.dss.boot.config..")
+      val bootWarmup = Layer("boot/warmup", "dropnext.dss.boot.warmup..")
       val domain = Layer("domain", "dropnext.dss.domain..")
       val handler = Layer("handler", "dropnext.dss.handler..")
       val mapper = Layer("mapper", "dropnext.dss.mapper..")
@@ -71,7 +73,7 @@ class ArchitectureTest {
       val libLogging = Layer("lib/logging", "dropnext.dss.lib.logging..")
       val libLogflare = Layer("lib/logflare", "dropnext.dss.lib.logflare..")
 
-      val applicationLayers = setOf(config, handler, mapper, path, presentation, routing, workflow)
+      val applicationLayers = setOf(boot, handler, mapper, path, presentation, routing, workflow)
 
       domain.doesNotDependOn(applicationLayers + lib)
       lib.doesNotDependOn(applicationLayers)
@@ -85,12 +87,20 @@ class ArchitectureTest {
       // on its own thread, with its own HTTP client, so that logging a failure cannot re-enter the
       // code that failed. `app.kt` is what knows both it and `Config`.
       libLogflare.doesNotDependOn(libShopify, libMonolith, libKtor, libJson, libCrypto, libLogging)
-      config.doesNotDependOn(handler, mapper, presentation, routing, workflow, libMonolith, libKtor, libShopify)
-      mapper.doesNotDependOn(config, handler, path, presentation, routing, workflow, libMonolith, libKtor)
-      path.doesNotDependOn(config, handler, mapper, presentation, routing, workflow, lib)
-      workflow.doesNotDependOn(config, handler, path, presentation, routing) // never the HTTP or view layers
-      routing.doesNotDependOn(mapper, presentation, workflow)              // routing wires handlers, not views
-      presentation.doesNotDependOn(config, handler, mapper, path, routing, workflow, lib) // data in, HTML out
+      // What the process is started with and what it does before taking traffic: not the application itself,
+      // so the handlers may read it but it wires nothing of theirs. The warm-up drives the real clients and the
+      // routes, so it may reach every `lib` package and `path`. The config is read before any of `lib` is built
+      // (`main` attaches the log shipper and builds the clients from it), so it reaches none of it. The two halves
+      // know nothing of each other: `dssDependencies` hands the warm-up the few values it needs, so a test runs
+      // the warm-up without a `Config`, and the config never learns what the process does with it.
+      boot.doesNotDependOn(handler, mapper, presentation, routing, workflow)
+      bootConfig.doesNotDependOn(bootWarmup, lib)
+      bootWarmup.doesNotDependOn(bootConfig)
+      mapper.doesNotDependOn(boot, handler, path, presentation, routing, workflow, libMonolith, libKtor)
+      path.doesNotDependOn(boot, handler, mapper, presentation, routing, workflow, lib)
+      workflow.doesNotDependOn(boot, handler, path, presentation, routing) // never the HTTP or view layers
+      routing.doesNotDependOn(boot, mapper, presentation, workflow)        // routing wires handlers, not views
+      presentation.doesNotDependOn(boot, handler, mapper, path, routing, workflow, lib) // data in, HTML out
     }
   }
 
@@ -104,7 +114,7 @@ class ArchitectureTest {
     "com.expediagroup.",
     "io.github.oshai.",   // a domain function returns its answer, it does not narrate it
     "dropnext.dss.lib.",
-    "dropnext.dss.config.",
+    "dropnext.dss.boot.",
     "dropnext.dss.handler.",
     "dropnext.dss.mapper.",
     "dropnext.dss.path.",
@@ -128,6 +138,92 @@ class ArchitectureTest {
         }
         forbidden.isNotEmpty()
       }
+  }
+
+  /**
+   * What `boot/config` may not import. `Config` is read before anything else exists, so it is a function of the
+   * environment map and nothing more: it reports what is wrong by failing the boot, not by logging (a line logged
+   * before `main` attaches the Logflare appender reaches stdout only), and it starts no coroutine and sees no Ktor
+   * type, which keeps `ConfigTest` a pure unit test. The layer rule above keeps `lib` out of it.
+   */
+  private val forbiddenImportsInBootConfig = listOf(
+    "io.ktor.",
+    "kotlinx.coroutines.",
+    "io.github.oshai.",
+    "org.slf4j.",
+    "ch.qos.logback.",
+  )
+
+  @Test
+  fun `boot_config reads the environment without a framework or a logger`() {
+    srcScope
+      .files
+      .filter { "/dropnext/dss/boot/config/" in normalizedPath(it.path) }
+      .assertFalse { file ->
+        val forbidden = file.imports.map { it.name }.filter { name -> forbiddenImportsInBootConfig.any { name.startsWith(it) } }
+        if (forbidden.isNotEmpty()) {
+          println(
+            "ERROR: Config file ${file.path} imports $forbidden. Fail the boot with an error instead of logging, " +
+              "and build whatever needs a framework from the `Config` in `dssDependencies` or `main`."
+          )
+        }
+        forbidden.isNotEmpty()
+      }
+  }
+
+  /**
+   * The Ktor server imports `boot/warmup` may have: the application and the lifecycle events the warm-up waits for.
+   * The warm-up reaches the request pipeline over loopback, through a real client, because that is what warms it: the
+   * CIO parser, `CallId`, `CallLogging`, `StatusPages`, the bearer provider and the HMAC all run once. Calling a route
+   * or a handler directly would skip every one of them (the layer rule above forbids importing ours), and so would
+   * handling an `ApplicationCall` itself.
+   */
+  private val allowedKtorServerImportsInBootWarmup = listOf(
+    "io.ktor.server.application.Application",
+    "io.ktor.server.application.ApplicationStarted",
+    "io.ktor.server.application.ServerReady",
+  )
+
+  @Test
+  fun `boot_warmup sees no more of the Ktor server than the application lifecycle`() {
+    srcScope
+      .files
+      .filter { "/dropnext/dss/boot/warmup/" in normalizedPath(it.path) }
+      .assertFalse { file ->
+        val forbidden = file.imports
+          .map { it.name }
+          .filter { it.startsWith("io.ktor.server.") }
+          .filterNot { it in allowedKtorServerImportsInBootWarmup }
+        if (forbidden.isNotEmpty()) {
+          println(
+            "ERROR: Warm-up file ${file.path} imports Ktor server types: $forbidden. Warm the pipeline through " +
+              "`WarmUpLoopbackService` over loopback; a lifecycle event goes in allowedKtorServerImportsInBootWarmup."
+          )
+        }
+        forbidden.isNotEmpty()
+      }
+  }
+
+  /**
+   * `/health` answers `503` until `Readiness.markReady()`, and that `503` is what keeps a cold task out of the load
+   * balancer's rotation while the task it replaces keeps serving. `startWarmUp` marks it in a `finally`, once the
+   * warm-up has paid the one-time cost of the first request. Any other caller opens the gate before that, and the new
+   * task's first webhook times out again without anything else failing.
+   */
+  @Test
+  fun `only startWarmUp marks the service ready`() {
+    val markReadyCall = Regex("""(?<!fun )\bmarkReady\s*\(""")
+    val offenders = srcFiles
+      .filterNot { it.path.endsWith("/src/dropnext/dss/boot/warmup/WarmUp.kt") }
+      .filter { markReadyCall.containsMatchIn(it.code) }
+      .map { it.path }
+    if (offenders.isNotEmpty()) {
+      println(
+        "ERROR: These files mark the service ready:\n" + offenders.joinToString("\n") { "  - $it" } +
+          "\nOnly `startWarmUp` may, when the warm-up has ended; put the work that must precede traffic in the `WarmUp`."
+      )
+    }
+    assert(offenders.isEmpty())
   }
 
   /** Reflection-related imports that are always forbidden in production code. */
@@ -357,8 +453,9 @@ class ArchitectureTest {
   }
 
   /**
-   * The process environment is read in exactly one place, `Config.fromEnv`, so the README's
-   * variable table and the code cannot disagree about which variables exist.
+   * The process environment is read in exactly one place, `Config.fromEnv` in `boot/config/`, so the README's
+   * variable table and the code cannot disagree about which variables exist. A file merely named `Config`
+   * elsewhere does not qualify.
    */
   @Test
   fun `only Config reads the process environment`() {
@@ -366,7 +463,7 @@ class ArchitectureTest {
     val offenders = srcScope
       .files
       .filter { environmentRead in it.text.withoutComments() }
-      .filterNot { it.name == "Config" }
+      .filterNot { normalizedPath(it.path).endsWith("/dropnext/dss/boot/config/Config.kt") }
       .map { it.path }
     if (offenders.isNotEmpty()) {
       println(

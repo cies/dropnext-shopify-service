@@ -49,6 +49,15 @@ class ShopifyHmacVerifierServiceTest {
     assert(!signatures.verifyWebhook("!!!not base64!!!", body))
   }
 
+  /** The delivery the warm-up sends itself is signed here and checked by [verifyWebhook]: a change to either side must not part them. */
+  @Test
+  fun `signWebhook produces the signature Shopify would, and verifyWebhook accepts it`() {
+    val body = """{"id":0,"admin_graphql_api_id":"gid://shopify/Order/0"}""".toByteArray(StandardCharsets.UTF_8)
+    val signature = signatures.signWebhook(body)
+    assert(signature == base64HmacSha256(secret, body))
+    assert(signatures.verifyWebhook(signature, body))
+  }
+
   @Test
   fun `verifyOAuthCallback accepts a correctly-signed query`() {
     val params = parametersOf(

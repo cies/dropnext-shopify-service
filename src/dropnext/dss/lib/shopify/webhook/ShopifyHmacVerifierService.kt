@@ -30,6 +30,13 @@ class ShopifyHmacVerifierService(private val clientSecret: ShopifyAppSecret) {
     return constantTimeEquals(hmacSha256(clientSecret.value, message), providedBytes)
   }
 
+  /**
+   * The mirror image of [verifyWebhook]: the `X-Shopify-Hmac-Sha256` Shopify would put on [rawBody]. For the delivery
+   * the warm-up sends the service itself, which has to pass the check above like any other.
+   */
+  fun signWebhook(rawBody: ByteArray): String =
+    Base64.getEncoder().encodeToString(hmacSha256(clientSecret.value, rawBody))
+
   fun verifyWebhook(hmacHeader: String?, rawBody: ByteArray): Boolean {
     if (hmacHeader.isNullOrBlank()) return false
     val decoded = try {

@@ -1,6 +1,6 @@
 package dropnext.dss.lib.ktor
 
-import dropnext.dss.lib.logging.TRACE_ID_MDC_KEY
+import dropnext.dss.lib.slf4j.TRACE_ID_MDC_KEY
 import io.ktor.server.application.Application
 import io.ktor.server.application.install
 import io.ktor.server.plugins.callid.callIdMdc

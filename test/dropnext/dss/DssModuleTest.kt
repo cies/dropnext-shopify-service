@@ -1,5 +1,6 @@
 package dropnext.dss
 
+import dropnext.dss.boot.warmup.WarmUp
 import dropnext.dss.contract.UpdateStoreApiKeyRequest
 import dropnext.dss.contract.UpdateStoreApiKeyResponse
 import dropnext.dss.domain.ShopDomain
@@ -13,8 +14,8 @@ import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlServiceFactory
 import dropnext.dss.testutil.fixture.testConfig
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
-import dropnext.dss.testutil.helper.capturingLogs
 import dropnext.dss.testutil.helper.base64HmacSha256
+import dropnext.dss.testutil.helper.capturingLogs
 import dropnext.dss.testutil.helper.testHttpClient
 import dropnext.dss.testutil.helper.withDssApp
 import io.ktor.client.call.body
@@ -28,7 +29,15 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import java.nio.charset.StandardCharsets
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.parallel.ResourceLock
 
@@ -167,6 +176,65 @@ class DssModuleTest {
     } finally {
       monolithServer.stop()
     }
+  }
+
+  /**
+   * The readiness gate the load balancer relies on: `/health` is a `503` while the warm-up runs, so a task that is
+   * still cold stays out of rotation, and a `200` from the moment it ends.
+   */
+  @Test
+  fun `health answers 503 while the warm-up runs and 200 once it is done`() {
+    val gate = CompletableDeferred<Unit>()
+    val deps = deps()
+    withDssApp(deps, warmUp = WarmUp(5.seconds) { gate.await() }) { client ->
+      val warming = client.get(Paths.health)
+      assert(warming.status == HttpStatusCode.ServiceUnavailable)
+      assert(warming.body<JsonObject>()["status"]!!.jsonPrimitive.content == "warming_up")
+      gate.complete(Unit)
+      awaitReady(deps)
+      val ready = client.get(Paths.health)
+      assert(ready.status == HttpStatusCode.OK)
+      assert(ready.body<JsonObject>()["status"]!!.jsonPrimitive.content == "ok")
+    }
+  }
+
+  /** A warm-up that hangs must not keep a task out of rotation: the budget opens the gate, and the warm-up is cancelled. */
+  @Test
+  fun `a warm-up that outlives its budget opens the gate when the budget ends`() {
+    val deps = deps()
+    withDssApp(deps, warmUp = WarmUp(200.milliseconds) { awaitCancellation() }) { client ->
+      startApplication()
+      awaitReady(deps)
+      assert(client.get(Paths.health).status == HttpStatusCode.OK)
+    }
+  }
+
+  @Test
+  fun `a warm-up that throws opens the gate`() {
+    val deps = deps()
+    withDssApp(deps, warmUp = WarmUp(5.seconds) { error("a bug in the warm-up") }) { client ->
+      startApplication()
+      awaitReady(deps)
+      assert(client.get(Paths.health).status == HttpStatusCode.OK)
+    }
+  }
+
+  /** Only `/health` is gated: a request that reaches a warming task is served. */
+  @Test
+  fun `every other route is served while the warm-up runs`() {
+    val gate = CompletableDeferred<Unit>()
+    withDssApp(deps(), warmUp = WarmUp(5.seconds) { gate.await() }) { client ->
+      assert(client.get(Paths.api).status == HttpStatusCode.OK)
+      gate.complete(Unit)
+    }
+  }
+
+  /**
+   * The gate is opened by a coroutine the module launched; a test that asserts the open state has to let it run. The
+   * test engine starts the application on the first request, so a test that polls before making one starts it itself.
+   */
+  private suspend fun awaitReady(deps: DssDependencies) = withTimeout(5.seconds) {
+    while (!deps.readiness.isReady) delay(5)
   }
 
   /** [withDssApp] answers `Unit`; this variant hands the block's answer back, for a value the test needs after the app stopped. */

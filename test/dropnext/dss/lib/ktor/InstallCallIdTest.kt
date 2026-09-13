@@ -1,6 +1,6 @@
 package dropnext.dss.lib.ktor
 
-import dropnext.dss.lib.logging.currentTraceId
+import dropnext.dss.lib.slf4j.currentTraceId
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.statement.bodyAsText

@@ -1,6 +1,12 @@
 package dropnext.dss
 
-import dropnext.dss.config.Config
+import dropnext.dss.boot.config.Config
+import dropnext.dss.boot.warmup.HttpWarmUpLoopbackService
+import dropnext.dss.boot.warmup.Readiness
+import dropnext.dss.boot.warmup.WARM_UP_BUDGET
+import dropnext.dss.boot.warmup.WarmUp
+import dropnext.dss.boot.warmup.WarmUpLoopbackService
+import dropnext.dss.boot.warmup.warmUpBeforeTakingTraffic
 import dropnext.dss.handler.DiagnosticsHandlers
 import dropnext.dss.handler.MAX_CONCURRENT_MIRRORS
 import dropnext.dss.handler.MonolithWebhookHandlers
@@ -24,6 +30,7 @@ import dropnext.dss.workflow.resolveShopTokenFromMonolith
 import io.github.oshai.kotlinlogging.KotlinLogging
 import io.ktor.client.HttpClient
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.sync.Semaphore
 
 
@@ -45,6 +52,10 @@ class DssDependencies(
   val oauthHandlers: OAuthHandlers,
   val shopifyWebhookHandlers: ShopifyWebhookHandlers,
   val monolithWebhookHandlers: MonolithWebhookHandlers,
+  /** What `/health` reads; [dssModule] marks it once the warm-up is done, whatever the outcome. */
+  val readiness: Readiness,
+  /** The production warm-up over this graph's own clients; `main` hands it to [dssModule], the tests hand in none. */
+  val warmUp: WarmUp,
 ) : AutoCloseable {
   /** Closes every HTTP client with [runCatching] so a single failure doesn't skip the others. */
   override fun close() {
@@ -122,12 +133,20 @@ fun dssDependencies(
   webhookMirrorBudget: Duration = WEBHOOK_MIRROR_BUDGET,
   webhookWriteGrace: Duration = WEBHOOK_WRITE_GRACE,
   webhookMirrorSlots: Semaphore = Semaphore(MAX_CONCURRENT_MIRRORS),
+  readiness: Readiness = Readiness(),
+  /** The requests the warm-up sends the service itself: the shared client, to the port the server binds. */
+  warmUpLoopback: WarmUpLoopbackService = HttpWarmUpLoopbackService(
+    httpClient = httpClient,
+    port = config.serverPort,
+    monolithToDssApiKey = config.monolithToDssApiKey,
+    hmacVerifier = shopifyHmacVerifierService,
+  ),
 ): DssDependencies = DssDependencies(
   config = config,
   httpClient = httpClient,
   monolithHttpClient = monolithHttpClient,
   webhookMonolithHttpClient = webhookMonolithHttpClient,
-  diagnosticsHandlers = DiagnosticsHandlers(config, shopifyGraphqlServiceFactory),
+  diagnosticsHandlers = DiagnosticsHandlers(config, shopifyGraphqlServiceFactory, readiness),
   oauthHandlers = OAuthHandlers(
     config.dssBaseUrl,
     oauthClient,
@@ -149,4 +168,18 @@ fun dssDependencies(
     monolithService,
     shopTokens,
   ),
+  readiness = readiness,
+  // The workflow keeps its own deadline and reports the steps it had to cut short or skip; the module's bound, a
+  // second later, is the backstop for a step that ignores its cancellation. The monolith is asked through the
+  // webhook service (one retry), so a monolith that is down costs the first step ~10.5 s and the rest still runs.
+  warmUp = WarmUp(budget = WARM_UP_BUDGET + 1.seconds) { serverBound ->
+    warmUpBeforeTakingTraffic(
+      monolith = webhookMonolithService,
+      shopifyGraphqlServiceFactory = shopifyGraphqlServiceFactory,
+      loopback = warmUpLoopback,
+      seededShop = config.shopAccessTokens.keys.firstOrNull(),
+      serverBound = serverBound,
+      budget = WARM_UP_BUDGET,
+    )
+  },
 )

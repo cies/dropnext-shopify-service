@@ -1,6 +1,6 @@
 package dropnext.dss.testutil.fake
 
-import dropnext.dss.config.Config
+import dropnext.dss.boot.config.Config
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.cio.CIO

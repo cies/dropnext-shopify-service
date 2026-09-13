@@ -1,6 +1,6 @@
 package dropnext.dss.lib.ktor
 
-import dropnext.dss.lib.logging.TRACE_ID_MDC_KEY
+import dropnext.dss.lib.slf4j.TRACE_ID_MDC_KEY
 import dropnext.dss.testutil.fake.FakeFlakyServer
 import dropnext.dss.testutil.fake.FakeMonolithHttpServer
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY

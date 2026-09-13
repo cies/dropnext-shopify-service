@@ -8,7 +8,7 @@ import dropnext.dss.lib.ktor.DssError
 import dropnext.dss.lib.ktor.MAX_CONCURRENT_REQUESTS_PER_HOST
 import dropnext.dss.lib.ktor.respondError
 import dropnext.dss.lib.ktor.toHttpStatus
-import dropnext.dss.lib.logging.currentTraceId
+import dropnext.dss.lib.slf4j.currentTraceId
 import dropnext.dss.lib.monolith.CreateOrderOutcome
 import dropnext.dss.lib.monolith.MonolithResult
 import dropnext.dss.lib.monolith.MonolithService

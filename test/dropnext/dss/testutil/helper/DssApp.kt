@@ -1,6 +1,7 @@
 package dropnext.dss.testutil.helper
 
 import dropnext.dss.DssDependencies
+import dropnext.dss.boot.warmup.WarmUp
 import dropnext.dss.dssModule
 import dropnext.dss.lib.json.AppJson
 import io.ktor.client.HttpClient
@@ -22,13 +23,17 @@ import io.ktor.server.testing.testApplication
  *
  * [authenticateAsMonolith] adds the `Authorization: Bearer` header the monolith-facing routes
  * require. The Shopify webhook and OAuth routes sit outside that guard and leave it off.
+ *
+ * [warmUp] is none unless a test says otherwise: the production warm-up calls the monolith and Shopify on its own,
+ * and a fake's recorded calls or a fake server's answer queue would count them.
  */
 fun withDssApp(
   deps: DssDependencies,
   authenticateAsMonolith: Boolean = false,
+  warmUp: WarmUp = WarmUp.NONE,
   block: suspend ApplicationTestBuilder.(HttpClient) -> Unit,
 ) = testApplication {
-  application { dssModule(deps) }
+  application { dssModule(deps, warmUp) }
   val client = createClient {
     followRedirects = false
     install(ClientContentNegotiation) { json(AppJson) }

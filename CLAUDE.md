@@ -59,7 +59,7 @@ credentials, so the human developer starts it — see "Operational boundary".
   and `DSS_BASE_URL` (a public HTTPS origin, e.g. an [ngrok](https://ngrok.com/) tunnel: Shopify requires HTTPS for
   OAuth and webhook callbacks).
 - The full env-var table is in [README.md](./README.md) ("Environment variables"); `Config.from(env)` in
-  `config/Config.kt` is the one place that reads it (`main` layers the local `.env` file over the process environment,
+  `boot/config/Config.kt` is the one place that reads it (`main` layers the local `.env` file over the process environment,
   `ArchitectureTest` forbids reading the environment anywhere else). A variable not read there is not a variable.
 - The service is stateless: no database, no migrations. Per-shop Shopify Admin tokens live in an in-memory
   `InMemoryShopTokenStore` (the `ShopTokenStore` interface), seeded from `DSS_SHOP_ACCESS_TOKENS`, filled by the OAuth
@@ -96,9 +96,11 @@ credentials, so the human developer starts it — see "Operational boundary".
 ```
 /src/dropnext/dss                # Application code (Kotlin)
 ├── app.kt                       # `main`: reads `Config` (env + `.env`), builds the dependency graph, starts the server with `dssModule`; Ktor's own shutdown hook stops it
-├── dssModule.kt                 # `Application.dssModule(deps)`: the one composition root — plugins and every route family; `main` and the tests both install it
+├── dssModule.kt                 # `Application.dssModule(deps, warmUp)`: the one composition root — plugins, the warm-up trigger and every route family; `main` and the tests both install it
 ├── dependencies.kt              # `DssDependencies` + `dssDependencies(config, …)`: the whole object graph, built once; tests override collaborators (see "Dependency wiring")
-├── config/                      # `Config.from(env)` (one flat data class holding every env var, secrets wrapped) and the `.env` reader
+├── boot/                        # What the process is started with and what it does before taking traffic; not the application itself, so it wires nothing of the handlers
+│   ├── config/                  # `Config.from(env)` (one flat data class holding every env var, secrets wrapped) and the `.env` reader
+│   └── warmup/                  # The warm-up before taking traffic: the workflow, its report, the `Readiness` flag `/health` reads, `WarmUp` + `startWarmUp` (the Ktor trigger), and the loopback client it sends itself requests with
 ├── domain/                      # The vocabulary every layer shares, depending on nothing of ours: `ShopDomain`, the ids and secrets (value classes), the reports the install page renders
 │   └── fulfillment/             # Pure logic over an order snapshot: the fulfillment-order matcher and quantity ledger, request validation
 ├── handler/                     # Ktor handlers, one `*Handlers` class per route family: receive the (already decoded and validated) request, resolve the shop, call a workflow, map its answer (`toDssError`) onto the response
@@ -180,7 +182,9 @@ decode or does not pass the domain validators is a `400` shaped by `StatusPages`
 | `PUT /stores/api-key` | `UpdateStoreApiKeyRequest` | Caches the shop's Admin token in memory and forwards it to the monolith; answers `502` (or `404` for a store the monolith does not know) when the monolith did not persist it, with the token still cached. A blank `api_key` or a non-positive `shopify_shop_id` is a `400` before the cache is touched; `shopify_shop_id` is `null` when unknown. |
 
 The other inbound routes are the OAuth pair (`/install`, `/oauth/callback`) and the diagnostics endpoints (`/`,
-`/health`, `/api`, `/api/check`, `/api/redirect-url`); all of them are constants in `path/Paths.kt`. `/api/check?shop=`
+`/health`, `/api`, `/api/check`, `/api/redirect-url`); all of them are constants in `path/Paths.kt`. `/health` answers
+`503` with `status=warming_up` until the warm-up is done (see "Warm-up and readiness") and `200` with `status=ok`
+after; it is the one route the readiness gate touches. `/api/check?shop=`
 is the one diagnostics route behind the bearer auth: it answers whether the shop's token resolves and, from a
 read-only `scanShopifyWebhooks`, one row per handled webhook topic (`active` or `missing` at our callback URL, plus
 stale subscriptions pointing elsewhere), so "is this shop still subscribed" can be asked without a reinstall.
@@ -251,14 +255,41 @@ There is no request context and no service locator; everything reaches a handler
 - Workflows are top-level functions that take the services they need as parameters; they never see Ktor server types
   (`ArchitectureTest` checks), so they are testable with the in-memory fakes alone.
 
+## Warm-up and readiness
+At a quarter vCPU the first outbound HTTPS call of the JVM costs seconds, more than a webhook's budget, so a fresh task
+used to fail its first `orders/create`. `warmUpBeforeTakingTraffic` (`boot/warmup/`) pays that before the task takes
+traffic, in two parts that each end in one log line: the **outbound** part (one `getStore` through the webhook monolith
+service, one `shopIdentity` for the first seeded shop when there is one) needs only the dependency graph and starts on
+Ktor's `ApplicationStarted`; the **inbound** part waits for `ServerReady` (the socket is bound) and sends the service
+two requests over `127.0.0.1` through `HttpWarmUpLoopbackService` (`boot/warmup/`): `GET /api/check` with the monolith's
+bearer, and a self-signed `orders/updated` delivery with webhook id `warm-up`, so every plugin and the HMAC have run
+once. Nothing is seeded in production, so both parts name `WARM_UP_PLACEHOLDER_SHOP` there, which the monolith answers
+`404` for. The warm-up changes nothing and never throws for an upstream failure; a step it cannot run is `skipped`
+with a reason, a step that goes wrong is `failed` with a countable label.
+
+- `Readiness` (`boot/warmup/`) is the flag `/health` reads; `startWarmUp` (same package, called by `dssModule`) marks it in a `finally` when the `WarmUp` returns,
+  throws or outlives its budget (`WARM_UP_BUDGET`, 20 s, plus a second's backstop), and when the application stops
+  underneath it. So a task is ready at the latest ~21 s after start, whatever the monolith did. Nothing else marks it
+  (`ArchitectureTest` checks): a gate opened early sends a still-cold task its first webhook.
+- The warm-up runs outside any request, so it mints its own trace id (`warmup-…`), sends it as `X-Trace-Id` on both
+  loopback requests and runs under `MDCContext` (`kotlinx-coroutines-slf4j`, the same element Ktor's `callIdMdc`
+  uses), so every line it causes, the clients' retry and failure lines included, carries it.
+- `dssModule(deps, warmUp)` takes the warm-up explicitly: `main` passes `deps.warmUp`, the production one over the
+  graph's own clients; `withDssApp` passes `WarmUp.NONE` unless a test hands in another, because the production
+  warm-up's outbound calls would show up in every fake's recorded calls. The test engine raises `ApplicationStarted`
+  but never `ServerReady`, and starts the application on the first request.
+
 
 # Internal dependency policy
 See `test/dropnext/dss/ArchitectureTest.kt` for a formal specification, using the Konsist library, of the rules
-regarding what packages a package may import from: `domain` depends on nothing of ours, `lib` never on an
+regarding what packages a package may import from: `domain` depends on nothing of ours, `boot` is imported only by
+`handler` and the root package and depends on no application package (its `config` and `warmup` halves not on each
+other, `boot/config` on no `lib` package), `lib` never on an
 application package and its sub-packages never on each other (only on `lib/json`, `lib/crypto`, `lib/logging`),
 `workflow` never on the HTTP or view layers, `presentation` on nothing but `domain`. Plus the other rules it keeps: no
-reflection, no wildcard imports, no ad-hoc `Json {}` or `HttpClient(...)`, only `Config` reads the environment,
-secrets redact and never serialize, Graphql-generated types only inside `lib/shopify/`, the translation boundaries
+reflection, no wildcard imports, no ad-hoc `Json {}` or `HttpClient(...)`, only `Config` in `boot/config/` reads the
+environment and that package imports no framework or logger, only `startWarmUp` marks the service ready, `boot/warmup`
+sees no more of the Ktor server than the application lifecycle, secrets redact and never serialize, Graphql-generated types only inside `lib/shopify/`, the translation boundaries
 and `workflow/`, no hand-written contract DTOs or `OutBoundMonolithPaths` and the file naming rule. The `test/` →
 `src/` mirroring rule lives in `TestSuiteArchitectureTest` and is checked in one direction only: every test file must
 have a source counterpart; a source file without a test is not caught. Add a rule there before introducing a new
@@ -329,7 +360,8 @@ Shared with the monolith, so a line from either service reads the same way in Lo
 - **One logger per file**: `private val log = KotlinLogging.logger {}`, lambda-style calls (`log.info { … }`,
   `log.warn(e) { … }`), never a `LoggerFactory.getLogger` outside the Logflare wiring in `app.kt`.
 - **`domain` does not log**: a domain function returns its answer, it does not narrate it (`ArchitectureTest` forbids
-  the import). Workflows and handlers log; `lib` logs only its own failures.
+  the import). Neither does `boot/config`: it is read before the Logflare appender is attached, so it fails the boot
+  instead. Workflows and handlers log; `lib` logs only its own failures.
 - **Messages are prose with `key=value` detail**, e.g. `Webhook verified topic=orders/create shop=acme.myshopify.com`;
   the trace id is never interpolated, the MDC carries it.
 - **Levels**: `error` for what needs a human (a bug, an upstream down), `warn` for a refused request or a failed
@@ -396,8 +428,9 @@ exercises the behaviour:
   rather than inlining a generated-type literal in every test.
 - **Every `MonolithService` and `ShopifyGraphqlService` method needs a wire-level test** whose case does not rely on
   an empty response (so the deserialization is exercised); `TestSuiteArchitectureTest` enforces it.
-- **A request → response test goes through `withDssApp(deps)`**, which mounts the production `dssModule`. A test that
-  spins up its own server proves only that its own wiring works.
+- **A request → response test goes through `withDssApp(deps)`**, which mounts the production `dssModule` with no
+  warm-up; pass `warmUp = WarmUp(budget) { … }` to test the readiness gate. A test that spins up its own server
+  proves only that its own wiring works.
 - The suite's own conventions — how a fake records, what a test may own, one status per assert — are checked by
   `TestSuiteArchitectureTest`, the way `ArchitectureTest` checks `src/`.
 

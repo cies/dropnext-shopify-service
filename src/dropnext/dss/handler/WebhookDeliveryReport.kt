@@ -1,8 +1,9 @@
 package dropnext.dss.handler
 
 import dropnext.dss.domain.ShopDomain
-import dropnext.dss.lib.monolith.MonolithError
+import dropnext.dss.lib.monolith.errorLabel
 import dropnext.dss.lib.shopify.graphql.ShopifyError
+import dropnext.dss.lib.shopify.graphql.errorLabel
 import dropnext.dss.workflow.WebhookMirrorOutcome
 import dropnext.dss.workflow.WebhookSkipReason
 import dropnext.dss.workflow.isTransient
@@ -40,20 +41,8 @@ data class WebhookDeliveryReport(
   val errorLabel: String?
     get() = when (val outcome = outcome) {
       is WebhookMirrorOutcome.Mirrored, is WebhookMirrorOutcome.Skipped -> null
-      is WebhookMirrorOutcome.ShopifyFailed -> when (val error = outcome.error) {
-        is ShopifyError.Network -> "shopify_network"
-        is ShopifyError.HttpError -> "shopify_http_${error.httpStatus}"
-        is ShopifyError.TokenRejected -> "shopify_token_rejected"
-        is ShopifyError.GraphqlError -> "shopify_graphql"
-        is ShopifyError.UserError -> "shopify_user_error"
-        is ShopifyError.NotFound -> "shopify_not_found"
-        is ShopifyError.Undecodable -> "shopify_undecodable"
-      }
-      is WebhookMirrorOutcome.MonolithFailed -> when (val error = outcome.error) {
-        is MonolithError.Transport -> "monolith_transport"
-        is MonolithError.Rejected -> "monolith_${error.status}"
-        is MonolithError.Undecodable -> "monolith_undecodable"
-      }
+      is WebhookMirrorOutcome.ShopifyFailed -> outcome.error.errorLabel
+      is WebhookMirrorOutcome.MonolithFailed -> outcome.error.errorLabel
       is WebhookMirrorOutcome.TokenUnavailable -> "token_unavailable"
       is WebhookMirrorOutcome.TimedOut -> "timed_out"
       is WebhookMirrorOutcome.Overloaded -> "overloaded"

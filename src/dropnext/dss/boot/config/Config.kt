@@ -1,4 +1,4 @@
-package dropnext.dss.config
+package dropnext.dss.boot.config
 
 import dropnext.dss.domain.DssToMonolithApiKey
 import dropnext.dss.domain.LogflareApiKey

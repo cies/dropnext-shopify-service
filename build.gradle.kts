@@ -163,6 +163,7 @@ dependencies {
   // Logging
   implementation(libs.kotlinLogging)  // Kotlinesque wrapper over SLF4J
   implementation(libs.slf4jApi)       // facade API (also used directly for MDC)
+  implementation(libs.kotlinxCoroutinesSlf4j) // `MDCContext`: the MDC across suspensions outside a request (the warm-up); Ktor's call logging already ships it
   implementation(libs.logbackClassic) // Logback backend (configured via src/resources/logback.xml)
 
   // Test dependencies (see also the `power-assert` plugin definition, makes errors more actionable)

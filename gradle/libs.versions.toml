@@ -6,7 +6,7 @@
 # > it declares the requested version or a rich version. That version is not necessarily the version that
 # > is selected during conflict resolution.
 # In other words: if you really want to narrow versions down (which is a good idea), you need to use `strictly`
-# for individual dependencies, or version locking for the project as a whole:
+# for individual dependencies or version locking for the project as a whole:
 # https://docs.gradle.org/current/userguide/dependency_locking.html
 
 
@@ -36,6 +36,10 @@ slf4jVersion = "2.0.18"
 
 # Latest, see: https://mvnrepository.com/artifact/io.github.oshai/kotlin-logging-jvm
 kotlinLoggingVersion = "8.0.02"
+
+# The coroutines version Ktor 3.4.1 resolves; must stay equal to it, or two coroutines runtimes end up on the classpath.
+# Latest, see: https://github.com/Kotlin/kotlinx.coroutines/releases
+kotlinxCoroutinesVersion = "1.10.2"
 
 # Latest, see: https://mvnrepository.com/artifact/org.junit.jupiter/junit-jupiter-engine
 junitVersion = "6.0.3"
@@ -85,6 +89,7 @@ result4k = { group = "dev.forkhandles", name = "result4k", version.ref = "result
 # Logging
 kotlinLogging = { group = "io.github.oshai", name = "kotlin-logging-jvm", version.ref = "kotlinLoggingVersion" }
 slf4jApi = { group = "org.slf4j", name = "slf4j-api", version.ref = "slf4jVersion" }
+kotlinxCoroutinesSlf4j = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-slf4j", version.ref = "kotlinxCoroutinesVersion" }
 logbackClassic = { group = "ch.qos.logback", name = "logback-classic", version.ref = "logbackVersion" }
 
 # Test dependencies

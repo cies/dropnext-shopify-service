@@ -3,7 +3,7 @@ package dropnext.dss.handler
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
 import dropnext.dss.DssDependencies
-import dropnext.dss.config.Config
+import dropnext.dss.boot.config.Config
 import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.domain.ShopifyShopId

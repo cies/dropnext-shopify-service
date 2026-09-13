@@ -328,4 +328,5 @@ private val OUTBOUND_INTERFACES = mapOf(
   "MonolithService" to "HttpMonolithServiceTest",
   "ShopifyGraphqlService" to "HttpShopifyGraphqlServiceTest",
   "ShopifyOAuthService" to "HttpShopifyOAuthServiceTest",
+  "WarmUpLoopbackService" to "HttpWarmUpLoopbackServiceTest",
 )

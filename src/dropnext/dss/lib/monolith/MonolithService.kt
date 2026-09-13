@@ -56,6 +56,14 @@ sealed interface MonolithError {
   }
 }
 
+/** A short, countable name for the failure, for a `key=value` log field; the counterpart of `ShopifyError.errorLabel`. */
+val MonolithError.errorLabel: String
+  get() = when (this) {
+    is MonolithError.Transport -> "monolith_transport"
+    is MonolithError.Rejected -> "monolith_$status"
+    is MonolithError.Undecodable -> "monolith_undecodable"
+  }
+
 enum class CreateOrderOutcome { Created, AlreadyExisted }
 
 data class MonolithStore(

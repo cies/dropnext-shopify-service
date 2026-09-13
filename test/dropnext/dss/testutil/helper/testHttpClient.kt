@@ -1,6 +1,6 @@
 package dropnext.dss.testutil.helper
 
-import dropnext.dss.config.Config
+import dropnext.dss.boot.config.Config
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpTimeout

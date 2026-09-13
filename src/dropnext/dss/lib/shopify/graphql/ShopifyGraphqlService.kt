@@ -169,6 +169,21 @@ sealed interface ShopifyError {
   }
 }
 
+/**
+ * A short, countable name for the failure, for a `key=value` log field that alerts and dashboards can group on; never
+ * the message, which may be long or bulky. One place, so a webhook's summary line and the warm-up's count the same.
+ */
+val ShopifyError.errorLabel: String
+  get() = when (this) {
+    is ShopifyError.Network -> "shopify_network"
+    is ShopifyError.HttpError -> "shopify_http_$httpStatus"
+    is ShopifyError.TokenRejected -> "shopify_token_rejected"
+    is ShopifyError.GraphqlError -> "shopify_graphql"
+    is ShopifyError.UserError -> "shopify_user_error"
+    is ShopifyError.NotFound -> "shopify_not_found"
+    is ShopifyError.Undecodable -> "shopify_undecodable"
+  }
+
 /** The `extensions.code` values Shopify documents as passing conditions: its rate limit and its own internal error. */
 private val RETRYABLE_GRAPHQL_ERROR_CODES = setOf("THROTTLED", "INTERNAL_SERVER_ERROR")
 

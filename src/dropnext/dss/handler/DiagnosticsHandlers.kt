@@ -2,7 +2,8 @@ package dropnext.dss.handler
 
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
-import dropnext.dss.config.Config
+import dropnext.dss.boot.config.Config
+import dropnext.dss.boot.warmup.Readiness
 import dropnext.dss.domain.WebhookRegistrationReport
 import dropnext.dss.domain.WebhookTopicStatus
 import dropnext.dss.lib.ktor.DssError
@@ -26,6 +27,7 @@ private val log = KotlinLogging.logger {}
 class DiagnosticsHandlers(
   private val dssConfig: Config,
   private val shopifyGraphqlServiceFactory: ShopifyGraphqlServiceFactory,
+  private val readiness: Readiness,
 ) {
   suspend fun handleIndex(call: ApplicationCall) {
     call.respondText(
@@ -34,7 +36,7 @@ class DiagnosticsHandlers(
 
       --- Infrastructure / diagnostics ---
         GET  ${Paths.index.padEnd(26)}This index
-        GET  ${Paths.health.padEnd(26)}Liveness probe - JSON with status "ok" and the running version
+        GET  ${Paths.health.padEnd(26)}Health probe - JSON with status "ok" and the running version; 503 with status "warming_up" until the warm-up is done
         GET  ${Paths.api.padEnd(26)}JSON diagnostic info (config, URLs, issues)
         GET  ${Paths.apiCheck.padEnd(20)}?shop=  Readiness for a specific shop: token resolvable, webhook subscriptions (Bearer <MONOLITH_TO_DSS_API_KEY> required)
         GET  ${Paths.apiRedirectUrl.padEnd(26)}Full OAuth redirect URL
@@ -98,8 +100,15 @@ class DiagnosticsHandlers(
     )
   }
 
-  /** The same shape as the monolith's `/health`, so one probe reads both services. */
+  /**
+   * The same shape as the monolith's `/health`, so one probe reads both services. A `503` until the warm-up is done:
+   * the load balancer's matcher is `200`, so a task that is still cold stays out of rotation, and the task it replaces
+   * keeps serving meanwhile. Only this route is gated; a request that reaches a warming task is served.
+   */
   suspend fun handleHealth(call: ApplicationCall) {
+    if (!readiness.isReady) {
+      return call.respond(HttpStatusCode.ServiceUnavailable, HealthResponse(status = "warming_up", version = dssConfig.versionTag))
+    }
     call.respond(HealthResponse(status = "ok", version = dssConfig.versionTag))
   }
 

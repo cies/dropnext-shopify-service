@@ -2,9 +2,9 @@ package dropnext.dss
 
 import ch.qos.logback.classic.Logger as LogbackLogger
 import ch.qos.logback.classic.LoggerContext
-import dropnext.dss.config.Config
-import dropnext.dss.config.DssMode
-import dropnext.dss.config.readDotEnvFile
+import dropnext.dss.boot.config.Config
+import dropnext.dss.boot.config.DssMode
+import dropnext.dss.boot.config.readDotEnvFile
 import dropnext.dss.lib.logflare.LogflareAppender
 import io.github.oshai.kotlinlogging.KotlinLogging
 import io.ktor.server.application.ApplicationStopped
@@ -39,7 +39,8 @@ fun main() {
     shutdownGracePeriod = 15_000
     shutdownTimeout = 20_000
   }) {
-    dssModule(dssDependencies(config))
+    val deps = dssDependencies(config)
+    dssModule(deps, warmUp = deps.warmUp)
     // Subscribed after the module's own close, so the shutdown lines still ship: handlers run in subscription order.
     monitor.subscribe(ApplicationStopped) {
       log.info { "[shutdown] complete" }

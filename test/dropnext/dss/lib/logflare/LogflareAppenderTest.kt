@@ -2,7 +2,7 @@ package dropnext.dss.lib.logflare
 
 import ch.qos.logback.classic.Logger as LogbackLogger
 import dropnext.dss.domain.LogflareApiKey
-import dropnext.dss.lib.logging.TRACE_ID_MDC_KEY
+import dropnext.dss.lib.slf4j.TRACE_ID_MDC_KEY
 import dropnext.dss.testutil.fake.FakeLogflareServer
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
 import dropnext.dss.testutil.helper.logbackContext

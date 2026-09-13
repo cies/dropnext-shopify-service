@@ -1,7 +1,7 @@
 package dropnext.dss.lib.ktor
 
 import dropnext.dss.contract.ApiError
-import dropnext.dss.lib.logging.currentTraceId
+import dropnext.dss.lib.slf4j.currentTraceId
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.response.respond

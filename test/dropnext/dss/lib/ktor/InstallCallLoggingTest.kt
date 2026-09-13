@@ -3,10 +3,11 @@ package dropnext.dss.lib.ktor
 import ch.qos.logback.classic.Logger as LogbackLogger
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.read.ListAppender
-import dropnext.dss.config.DssMode
+import dropnext.dss.boot.config.DssMode
+import dropnext.dss.boot.warmup.WarmUp
 import dropnext.dss.dssDependencies
 import dropnext.dss.dssModule
-import dropnext.dss.lib.logging.TRACE_ID_MDC_KEY
+import dropnext.dss.lib.slf4j.TRACE_ID_MDC_KEY
 import dropnext.dss.path.Paths
 import dropnext.dss.testutil.fixture.testConfig
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
@@ -116,7 +117,7 @@ class InstallCallLoggingTest {
     captureLogLines { recorded ->
       val deps = dssDependencies(testConfig(mode = DssMode.PROD))
       testApplication {
-        application { dssModule(deps) }
+        application { dssModule(deps, WarmUp.NONE) }
         client.get(Paths.health)
       }
 
@@ -129,7 +130,7 @@ class InstallCallLoggingTest {
     captureLogLines { recorded ->
       val deps = dssDependencies(testConfig(mode = DssMode.DEV))
       testApplication {
-        application { dssModule(deps) }
+        application { dssModule(deps, WarmUp.NONE) }
         client.get(Paths.health)
       }
 

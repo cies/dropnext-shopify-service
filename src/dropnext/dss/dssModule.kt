@@ -1,6 +1,8 @@
 package dropnext.dss
 
-import dropnext.dss.config.DssMode
+import dropnext.dss.boot.config.DssMode
+import dropnext.dss.boot.warmup.WarmUp
+import dropnext.dss.boot.warmup.startWarmUp
 import dropnext.dss.lib.ktor.installCallId
 import dropnext.dss.lib.ktor.installCallLogging
 import dropnext.dss.lib.ktor.installJsonContentNegotiation
@@ -22,13 +24,15 @@ import io.ktor.server.routing.routing
  * The whole Ktor application: plugins, then every route family.
  *
  * The one-composition root, so a request → response test under
- * `testApplication { application { dssModule(deps) } }`
- * runs the exact stack production runs (same auth guard, same error shaping, same trace ids).
+ * `testApplication { application { dssModule(deps, WarmUp.NONE) } }`
+ * runs the exact stack production runs (same auth guard, same error shaping, same trace ids). [warmUp] is what
+ * `/health` waits for before it says the task may take traffic: the graph's own in production, none under test.
  */
-fun Application.dssModule(deps: DssDependencies) {
+fun Application.dssModule(deps: DssDependencies, warmUp: WarmUp) {
   // The graph's HTTP clients live as long as the application: `main`'s server stop and `testApplication`'s
   // teardown both end here.
   monitor.subscribe(ApplicationStopped) { deps.close() }
+  startWarmUp(deps.readiness, warmUp)
 
   installCallId()
   installCallLogging(enabled = deps.config.mode == DssMode.DEV)

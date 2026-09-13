@@ -67,7 +67,7 @@ All Kotlin lives under `src/dropnext/dss/` (we set `srcDir("src")` in Gradle to 
 | [`lib/shopify/`](src/dropnext/dss/lib/shopify) | Shopify protocol primitives: GID helpers, `ShopifyOAuthService`, `ShopifyHmacVerifierService`, `ShopifyGraphqlService` (typed results) + its factory, the `ShopTokenStore`, webhook shop/id/topic parsers. |
 | [`lib/monolith/`](src/dropnext/dss/lib/monolith) | Outbound monolith client: `MonolithService` interface answering `MonolithResult`, `HttpMonolithService` impl, error body parsing, structured failure logging. |
 | [`lib/json/`](src/dropnext/dss/lib/json) | Shared `kotlinx.serialization` configs: `AppJson` (inbound) and `MonolithJson` (outbound). |
-| [`lib/crypto/`](src/dropnext/dss/lib/crypto), [`lib/logging/`](src/dropnext/dss/lib/logging) | The one HMAC-SHA256 and constant-time compare; the MDC trace-id key. |
+| [`lib/crypto/`](src/dropnext/dss/lib/crypto), [`lib/logging/`](src/dropnext/dss/lib/slf4j) | The one HMAC-SHA256 and constant-time compare; the MDC trace-id key. |
 | [`lib/ktor/`](src/dropnext/dss/lib/ktor) | Ktor server glue: one `install*` function per plugin (`CallId` for the trace id, `CallLogging` with `callIdMdc`, `StatusPages`, JSON, `RequestValidation`, the `bearer` auth for the monolith), `DssError` helpers, shared HTTP client builders. |
 | `src/resources/` | `.graphql` queries (compile-time-typed by the Gradle plugin), `logback.xml`. |
 | `src/graphql-schema/` | Committed Shopify Admin schema (regenerated via `./gradlew graphqlIntrospectSchema`). |
@@ -177,6 +177,16 @@ point the IDE plugin at the committed `src/graphql-schema/schema.graphql`.
 * **Listen address**: binds `0.0.0.0` so it works in containers and typical PaaS hosting.
 * **Access tokens**: the server is **stateless** — it does not persist Admin API tokens.
 After OAuth, the success page shows how to set `DSS_SHOP_ACCESS_TOKENS` so a future cold start can re-resolve the token without OAuth. Webhooks and internal REST routes resolve the per-shop Admin token through the in-memory cache (filled by OAuth, `DSS_SHOP_ACCESS_TOKENS`, or `PUT /stores/api-key`), falling back to a monolith `GET /stores` lookup.
+* **Warm-up and readiness**: a freshly started task pays the JVM's one-time costs before it says it can take traffic,
+  because at a quarter vCPU the first outbound HTTPS call alone takes longer than a webhook's whole budget. It makes one
+  store lookup on the monolith, one identity query to Shopify for the first shop in `DSS_SHOP_ACCESS_TOKENS` (skipped
+  when none is seeded), and, once its socket is bound, two requests to itself over `127.0.0.1`: `GET /api/check` and a
+  self-signed `orders/updated` delivery with webhook id `warm-up`, so the inbound pipeline has run once end to end.
+  `/health` answers `503 {"status":"warming_up"}` meanwhile and `200 {"status":"ok"}` after, at the latest about
+  twenty seconds after start whatever the upstreams did; the load balancer's `200` matcher keeps the task out of
+  rotation until then while the task it replaces keeps serving. Two log lines, `Warm-up outbound done …` and
+  `Warm-up inbound done …`, say what each step came to (info, or warn when a step failed). The warm-up changes
+  nothing: no token is cached or dropped, the scan behind the check is read-only, the delivery is acknowledged without work.
 
 
 ### Webhooks registered on install
