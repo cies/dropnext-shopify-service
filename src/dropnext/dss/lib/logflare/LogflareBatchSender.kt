@@ -6,6 +6,7 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse.BodyHandlers
 import java.time.Duration as JavaDuration
+import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.LinkedBlockingQueue
@@ -34,6 +35,13 @@ private val jsonMapper = Json
 
 /** How long [LogflareBatchSender.close] may spend on the handshake and the drain together before giving up on the rest. */
 private val CLOSE_DRAIN_BUDGET: Duration = 5.seconds
+
+/**
+ * A UUID that is a pure function of the source name, so every boot posts under the same one.
+ * Version 3 (`nameUUIDFromBytes`) rather than random, because the point is that it can be recomputed.
+ */
+internal fun derivedSourceToken(sourceName: String): String =
+  UUID.nameUUIDFromBytes("logflare-source:$sourceName".toByteArray()).toString()
 
 /** Short timeouts throughout: a log shipper must never be the reason a thread is parked. */
 internal fun defaultLogflareClient(): HttpClient = HttpClient.newBuilder()
@@ -84,20 +92,21 @@ class LogflareBatchSender(
   /** Set while a requested flush waits on the executor, so a burst of appends submits one task, not one per line. */
   private val flushRequested = AtomicBoolean(false)
 
+  /** The token batches post under; empty until the handshake settled on one, which keeps [flush] from posting to `?source=`. */
+  @Volatile
   var sourceToken: String = ""
+    private set
+
+  /** True when the handshake could not list the sources and made the token up; a test's way of telling the two paths apart. */
+  @Volatile
+  var shipsUnderDerivedToken: Boolean = false
     private set
 
   val queuedEventCount: Int get() = queue.size
 
   /**
-   * Set when the handshake failed: without a token every batch would post to `?source=` and be
-   * lost, so the sender goes quiet rather than pretending to ship.
-   */
-  private val givenUp = AtomicBoolean(false)
-
-  /**
    * Looks up the source token by name, creating the source when Logflare does not have it yet.
-   * Null when neither worked, which is the signal for the caller not to ship at all.
+   * Null when neither worked; [handshake] then falls back to a token of its own making.
    */
   fun resolveSourceToken(sourceName: String): String? {
     val sources = fetchJson("$endpoint/api/sources") ?: return null
@@ -120,6 +129,28 @@ class LogflareBatchSender(
   }
 
   /**
+   * Makes the token up when Logflare would not hand one out, and creates the source under it.
+   *
+   * The Logflare inside a local `supabase start` answers `GET /api/sources` with a 500 on its
+   * Postgres backend, which used to silence the shipper for the life of the process. Shipping by
+   * `?source_name=` instead is not an option: a name Logflare is asked about before the source
+   * exists is cached as missing for an hour, and creating the source without a token of our own
+   * makes a duplicate on every boot, after which the name resolves to nothing at all. A token
+   * derived from the name is stable across boots, the create call is a no-op once the source
+   * exists (`422`, the token is unique), and the batches post under a token, the one lookup that
+   * is never poisoned. The create response is ignored on purpose: locally it is a 500 from the
+   * same bug even though the row was written.
+   */
+  private fun handshake(sourceName: String) {
+    if (resolveSourceToken(sourceName) != null) return
+    val token = derivedSourceToken(sourceName)
+    val created = createSourceQuietly(sourceName, token)
+    reportError("Logflare: could not resolve a token for source '$sourceName', shipping under derived token $token (create answered $created)")
+    sourceToken = token
+    shipsUnderDerivedToken = true
+  }
+
+  /**
    * Begins the periodic flush.
    *
    * Pass [sourceName] to have the token handshake run on the flush thread, before the first flush:
@@ -133,17 +164,10 @@ class LogflareBatchSender(
       Thread(runnable, "logflare-flush").apply { isDaemon = true }
     }
     scheduledFlushExecutor = executor
-    if (sourceName != null) handshake = executor.submit { if (resolveSourceToken(sourceName) == null) giveUp() }
+    if (sourceName != null) handshake = executor.submit { handshake(sourceName) }
     executor.scheduleAtFixedRate(
       ::flush, flushInterval.inWholeMilliseconds, flushInterval.inWholeMilliseconds, TimeUnit.MILLISECONDS
     )
-  }
-
-  /** Drops what is queued and stops accepting more: there is no token to ship it under. */
-  private fun giveUp() {
-    givenUp.set(true)
-    queue.clear()
-    droppedSinceLastReport.set(0)
   }
 
   /**
@@ -160,7 +184,6 @@ class LogflareBatchSender(
    * than they arrived. The scheduled flush already runs every [flushInterval].
    */
   fun enqueue(entry: JsonObject) {
-    if (givenUp.get()) return
     if (queue.offer(entry)) return
     droppedSinceLastReport.incrementAndGet()
   }
@@ -192,7 +215,7 @@ class LogflareBatchSender(
   @Synchronized
   fun flush() {
     // Before the handshake completes there is nothing to post under, and the events stay queued.
-    if (sourceToken.isEmpty()) return
+    val token = sourceToken.ifEmpty { return }
 
     reportDroppedEvents()
 
@@ -204,7 +227,7 @@ class LogflareBatchSender(
     if (events.isEmpty()) return
 
     val body = jsonMapper.encodeToString(buildJsonObject { put("batch", JsonArray(events)) })
-    val request = requestTo("$endpoint/api/logs?source=$sourceToken")
+    val request = requestTo("$endpoint/api/logs?source=$token")
       .header("X-API-KEY", apiKey.value)
       .header("Content-Type", "application/json")
       .POST(HttpRequest.BodyPublishers.ofString(body))
@@ -230,8 +253,8 @@ class LogflareBatchSender(
   /**
    * Stops the schedule, ships whatever is still queued, and releases the HTTP client.
    *
-   * Nothing ships without the source token, so a handshake still in flight is waited for first, with the same budget.
-   * Waited for, not looped over: [flush] returns at once while the token is empty, and a drain loop around it used to
+   * Nothing ships before the handshake has settled on a token or a name, so one still in flight is waited for first,
+   * with the same budget. Waited for, not looped over: [flush] returns at once until then, and a drain loop around it used to
    * spin a core for the whole budget whenever the process stopped during the handshake (a task killed at boot by a
    * failing health check, a rollback seconds after start, a slow Logflare), inside the shutdown hook where ECS is
    * counting down its thirty seconds.
@@ -258,6 +281,21 @@ class LogflareBatchSender(
   private fun requestTo(url: String): HttpRequest.Builder = HttpRequest.newBuilder()
     .uri(URI.create(url))
     .timeout(JavaDuration.ofSeconds(5))
+
+  /** Answers what the create call got — a status, or the failure's message — for the fallback's report line, and nothing else. */
+  private fun createSourceQuietly(sourceName: String, token: String): String {
+    val body = jsonMapper.encodeToString(buildJsonObject { put("name", sourceName); put("token", token) })
+    val request = requestTo("$endpoint/api/sources")
+      .header("Authorization", "Bearer ${apiKey.value}")
+      .header("Content-Type", "application/json")
+      .POST(HttpRequest.BodyPublishers.ofString(body))
+      .build()
+    return try {
+      client.send(request, BodyHandlers.discarding()).statusCode().toString()
+    } catch (e: Exception) {
+      e.message ?: e.javaClass.simpleName
+    }
+  }
 
   private fun fetchJson(url: String): JsonElement? =
     executeForJson(url, requestTo(url).header("Authorization", "Bearer ${apiKey.value}").GET().build())

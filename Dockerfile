@@ -82,20 +82,16 @@ RUN jlink \
 # for installing the few extras we need. `2023-minimal` is a rolling tag within the AL2023
 # major, so every build picks up the latest patch level; Amazon publishes no newer major yet.
 # The image could be slimmed down considerably with Google's `java-base-debian12` distroless
-# base (~30MB, made for jlinked runtimes), at the cost of no shell (breaks ECS Exec) and no
-# curl for the health check `docker-compose.yml` runs.
+# base (~30MB, made for jlinked runtimes), at the cost of no shell (breaks ECS Exec).
 # This tag only exists on Amazon ECR Public — Docker Hub has `amazonlinux:2023` (full,
 # ~150MB) and `amazonlinux:minimal` (rolling), but not the pinned `2023-minimal` combo.
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023-minimal AS runtime
 
-# curl-minimal: the health check `docker-compose.yml` runs inside the container, and a first tool under ECS Exec.
-#   The image declares no HEALTHCHECK of its own: ECS ignores one and probes `/health` through the load balancer
-#   (the infra's `app-dss-stack`), and a check baked into the image cannot follow the port `PORT` makes the app bind.
 # findutils: provides `xargs`, required by the SSM agent that ECS Exec injects
 #   when `enableExecuteCommand` is set on the task. Without it, exec sessions fail
 #   with "xargs is not available (exit 1)".
 # shadow-utils: useradd. Removed after creating the user to keep the image lean.
-RUN microdnf install -y --setopt=install_weak_deps=0 curl-minimal findutils shadow-utils \
+RUN microdnf install -y --setopt=install_weak_deps=0 findutils shadow-utils \
   && useradd -r -u 1000 -d /app -s /sbin/nologin dropnext \
   && microdnf remove -y shadow-utils \
   && microdnf clean all \

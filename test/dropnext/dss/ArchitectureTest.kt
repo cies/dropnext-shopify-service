@@ -12,13 +12,12 @@ import org.junit.jupiter.api.Test
 
 
 /**
- * The conventions of `src/` that can be checked mechanically: the dependencies our packages may
- * have on each other, the reflection ban, the secret contract, and the boundaries `CLAUDE.md`
- * states in prose. Every rule prints the offending file **and** the fix, because Konsist's own
- * failure message names the file and nothing else.
+ * These tests try to pin our conventions of `src/` that can be checked mechanically:
+ * the dependencies our packages may have on each other, the reflection ban, the secret contract,
+ * and the boundaries `CLAUDE.md` states in prose.
  *
- * A rule that greps for code reads the file's `code` (comments blanked out), never its raw text: a
- * comment explaining why a file avoids a construct must not be read as the construct itself.
+ * A rule that greps for code reads the file's `code` (so not the comments), never its raw text:
+ * a comment explaining why a file avoids a construct must not be read as the construct itself.
  */
 class ArchitectureTest {
 
@@ -32,7 +31,7 @@ class ArchitectureTest {
    *
    * The [srcFiles] data is for mere text search, and straight copies disk files to memory instead.
    *
-   * Both live in the companion so they are built once per test JVM, whatever lifecycle JUnit gives the class,
+   * Both live in the companion, so they are built once per test JVM, whatever lifecycle JUnit gives the class,
    * and shared by every rule and every class that needs them. Mirrors the monolith's `ArchitectureTest`.
    */
   companion object {

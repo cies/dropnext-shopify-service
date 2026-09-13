@@ -20,7 +20,8 @@ import kotlinx.serialization.json.put
  *
  * This half is the field-for-field mapping of a logging event to JSON; [LogflareBatchSender] holds
  * the queue, the schedule and the shipping. Configuration properties:
- * - `sourceName`: the Logflare source, created through the API when it does not exist yet.
+ * - `sourceName`: the Logflare source, created through the API when it does not exist yet; when that
+ *   API hands out no token (the Logflare inside a local `supabase start`), created under one derived from the name.
  * - `apiKey`: the account key both the handshake and every batch authenticate with.
  * - `maxBatchSize`: how many events one flush may post.
  * - `maxQueuedEvents`: how many may wait before further ones are dropped.

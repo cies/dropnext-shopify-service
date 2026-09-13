@@ -83,8 +83,8 @@ class LogflareBatchSenderTest {
 
       val token = sender.resolveSourceToken("dropnext-test")
 
-      // Null is what tells the appender not to start at all — a started appender with no token
-      // would post every batch to `?source=` and lose the lot.
+      // Null is what makes the handshake fall back to a token of its own; until then the token stays
+      // empty so nothing posts to `?source=` and loses the lot.
       assert(token == null)
       assert(sender.sourceToken == "")
       assert(errors.any { "500" in it })
@@ -122,27 +122,48 @@ class LogflareBatchSenderTest {
       sender.close()
       assert(messagesOf(server) == listOf("logged before the handshake finished"))
       assert(sender.sourceToken == "token-for-dropnext-test")
+      assert(server.receivedIngestQueries == listOf("source=token-for-dropnext-test"))
+      assert(!sender.shipsUnderDerivedToken)
     }
   }
 
+  /**
+   * The Logflare inside a local `supabase start` answers the source list with a 500, and the sender
+   * used to go quiet for the life of the process. Shipping by name is no way out (a name looked up
+   * before the source exists stays "missing" in Logflare's cache for an hour), so the sender brings
+   * its own token: creates the source under it, whatever the answer, and posts under it.
+   */
   @Test
-  fun `a failed handshake drops events instead of posting them without a source`() {
+  fun `a failed handshake creates the source under a derived token and ships under it`() {
     FakeLogflareServer().use { server ->
       server.sourcesStatusCode = 500
       val sender = senderFor(server)
 
-      sender.start("dropnext-test")
-      // Give the flush thread its handshake attempt and a flush cycle or two.
-      assert(server.awaitNoBatch())
-      sender.enqueue(entry("nowhere to go"))
-      sender.close()
+      sender.start("dropnext.test")
+      sender.enqueue(entry("still has somewhere to go"))
 
-      // Posting to `?source=` would lose the batch anyway, and holding it would grow the heap for
-      // as long as the process runs.
-      assert(messagesOf(server).isEmpty())
-      assert(sender.queuedEventCount == 0)
+      assert(server.awaitBatch())
+      sender.close()
+      val token = derivedSourceToken("dropnext.test")
+      assert(messagesOf(server) == listOf("still has somewhere to go"))
+      assert(server.createdSourceNames == listOf("dropnext.test"))
+      assert(server.createdSourceTokens == listOf(token))
+      assert(server.receivedIngestQueries == listOf("source=$token"))
+      assert(sender.sourceToken == token)
+      assert(sender.shipsUnderDerivedToken)
+      // Both the failure and the fallback are reported, or the console shows a handshake error
+      // above lines that did arrive in Logflare and nobody can tell why.
       assert(errors.any { "500" in it })
+      assert(errors.any { "derived token $token" in it })
     }
+  }
+
+  @Test
+  fun `the derived token is a pure function of the source name`() {
+    // Two boots must post under one source, so the token cannot carry anything but the name.
+    assert(derivedSourceToken("dropnext.app") == derivedSourceToken("dropnext.app"))
+    assert(derivedSourceToken("dropnext.app") != derivedSourceToken("dropnext.dss"))
+    assert(runCatching { java.util.UUID.fromString(derivedSourceToken("dropnext.app")) }.isSuccess)
   }
 
   @Test

@@ -35,6 +35,9 @@ class FakeLogflareServer : AutoCloseable {
 
   private val apiKeysSeen = ConcurrentLinkedQueue<String>()
 
+  /** The query string of every `/api/logs` post: which token the sender shipped under. */
+  private val ingestQueries = ConcurrentLinkedQueue<String>()
+
   /** Set before `start()` to make the source handshake fail, or the batch endpoint reject. */
   var sourcesStatusCode: Int = 200
   var logsStatusCode: Int = 200
@@ -54,8 +57,14 @@ class FakeLogflareServer : AutoCloseable {
 
   val receivedApiKeys: List<String> get() = apiKeysSeen.toList()
 
+  val receivedIngestQueries: List<String> get() = ingestQueries.toList()
+
   val createdSourceNames: List<String>
     get() = sourceRequestBodies.map { Json.parseToJsonElement(it).jsonObject["name"]!!.jsonPrimitive.content }
+
+  /** The token each create carried, or null: the fallback brings its own, the normal handshake lets Logflare mint one. */
+  val createdSourceTokens: List<String?>
+    get() = sourceRequestBodies.map { Json.parseToJsonElement(it).jsonObject["token"]?.jsonPrimitive?.content }
 
   private val batchArrived = AtomicReference(CountDownLatch(1))
 
@@ -97,25 +106,25 @@ class FakeLogflareServer : AutoCloseable {
   private fun handleSources(exchange: HttpExchange) {
     apiKeysSeen += exchange.requestHeaders.getFirst("Authorization").orEmpty()
     if (sourcesStallMillis > 0) Thread.sleep(sourcesStallMillis)
+    // Recorded before the forced status: the local Logflare writes the row and then answers 500,
+    // and a test of the fallback wants to see what was posted.
+    val postedBody = if (exchange.requestMethod == "GET") null else exchange.requestBody.readBytes().decodeToString()
+    postedBody?.let { sourceRequestBodies += it }
     if (sourcesStatusCode != 200) return exchange.respond(sourcesStatusCode, """{"error":"nope"}""")
 
-    when (exchange.requestMethod) {
-      "GET" -> {
-        val known = knownSourceName
-        val body = if (known == null) "[]" else """[{"name":"$known","token":"token-for-$known"}]"""
-        exchange.respond(200, body)
-      }
-      else -> {
-        val body = exchange.requestBody.readBytes().decodeToString()
-        sourceRequestBodies += body
-        val name = Json.parseToJsonElement(body).jsonObject["name"]!!.jsonPrimitive.content
-        exchange.respond(200, """{"name":"$name","token":"token-for-$name"}""")
-      }
+    if (postedBody == null) {
+      val known = knownSourceName
+      val body = if (known == null) "[]" else """[{"name":"$known","token":"token-for-$known"}]"""
+      exchange.respond(200, body)
+    } else {
+      val name = Json.parseToJsonElement(postedBody).jsonObject["name"]!!.jsonPrimitive.content
+      exchange.respond(200, """{"name":"$name","token":"token-for-$name"}""")
     }
   }
 
   private fun handleLogs(exchange: HttpExchange) {
     apiKeysSeen += exchange.requestHeaders.getFirst("X-API-KEY").orEmpty()
+    ingestQueries += exchange.requestURI.rawQuery.orEmpty()
     batchStarted.get().countDown()
     if (logsStallMillis > 0) Thread.sleep(logsStallMillis)
     val body = exchange.requestBody.readBytes().decodeToString()
