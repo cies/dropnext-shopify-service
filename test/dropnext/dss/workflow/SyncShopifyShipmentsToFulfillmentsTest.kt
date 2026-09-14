@@ -115,7 +115,6 @@ class SyncShopifyShipmentsToFulfillmentsTest {
     val line = lines.single { "sync-shipments " in it }
     assert(line.startsWith("INFO "))
     assert("orderId=1001" in line)
-    assert("shop=acme" in line)
     assert("canceled=0" in line)
     assert("created=2" in line)
     assert("skippedShipments=0" in line)

@@ -37,22 +37,24 @@ suspend fun installShop(
   val identity = when (val loaded = shopify.shopIdentity()) {
     is Success -> loaded.value
     is Failure -> {
-      log.warn { "Shop identity lookup failed shop=${shopify.shop.normalizedShopifyHost}: ${loaded.reason.message}" }
+      log.warn { "Shop identity lookup failed: ${loaded.reason.message}" }
       null
     }
   }
   val domain = identity?.domain ?: shopify.shop
   tokens.remember(domain, token)
-  log.info { "OAuth token cached in memory for shop=${domain.normalizedShopifyHost}" }
+  // The MDC names the shop Shopify redirected for; the canonical domain is worth naming only where it differs.
+  val canonical = domain.normalizedShopifyHost.takeIf { it != shopify.shop.normalizedShopifyHost }
+  log.info { "OAuth token cached in memory" + canonical?.let { " canonical_shop=$it" }.orEmpty() }
 
   val monolithPersist = persistTokenToMonolith(monolith, domain, identity?.shopId, token)
 
   val productCount = when (val counted = shopify.productCount()) {
     is Success -> counted.value.also {
-      log.info { "Product count after OAuth: shop=${domain.normalizedShopifyHost} products=${it.count} exact=${it.isExact}" }
+      log.info { "Product count after OAuth: products=${it.count} exact=${it.isExact}" }
     }
     is Failure -> {
-      log.warn { "Product count after OAuth failed shop=${domain.normalizedShopifyHost}: ${counted.reason.message}" }
+      log.warn { "Product count after OAuth failed: ${counted.reason.message}" }
       null
     }
   }
@@ -83,12 +85,12 @@ suspend fun persistTokenToMonolith(
   )
   return when (val result = monolith.putStoreApiKey(request)) {
     is Success -> {
-      log.info { "Monolith store api-key updated storeId=${result.value} shop=${shop.normalizedShopifyHost}" }
+      log.info { "Monolith store api-key updated storeId=${result.value}" }
       MonolithPersistOutcome.Persisted(storeId = result.value)
     }
 
     is Failure -> {
-      logMonolithFailure("putStoreApiKey", result.reason, "shop=${shop.normalizedShopifyHost}")
+      logMonolithFailure("putStoreApiKey", result.reason)
       when (val error = result.reason) {
         is MonolithError.Rejected -> MonolithPersistOutcome.Failed(httpStatus = error.status, detail = error.body.message)
         is MonolithError.Undecodable -> MonolithPersistOutcome.Failed(httpStatus = error.status, detail = error.message)

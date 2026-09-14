@@ -44,7 +44,7 @@ class ArchitectureTest {
    * Our packages form a stack whose arrows point one way only. The two that carry the most weight:
    *
    * - `lib` may not reach into application code, and its packages may not reach into each other
-   *   (only into the generic `lib/json`, `lib/crypto`, `lib/logging`). It is the part of this repo
+   *   (only into the generic `lib/json`, `lib/crypto`, `lib/slf4j`). It is the part of this repo
    *   that could be lifted out into a library of its own.
    * - `domain` and `contract` are the vocabulary everything shares; they depend on nothing of ours.
    *
@@ -70,7 +70,7 @@ class ArchitectureTest {
       val libKtor = Layer("lib/ktor", "dropnext.dss.lib.ktor..")
       val libJson = Layer("lib/json", "dropnext.dss.lib.json..")
       val libCrypto = Layer("lib/crypto", "dropnext.dss.lib.crypto..")
-      val libLogging = Layer("lib/logging", "dropnext.dss.lib.logging..")
+      val libSlf4j = Layer("lib/slf4j", "dropnext.dss.lib.slf4j..")
       val libLogflare = Layer("lib/logflare", "dropnext.dss.lib.logflare..")
 
       val applicationLayers = setOf(boot, handler, mapper, path, presentation, routing, workflow)
@@ -80,13 +80,13 @@ class ArchitectureTest {
       libShopify.doesNotDependOn(libMonolith, libKtor)
       libMonolith.doesNotDependOn(libShopify, libKtor)
       libKtor.doesNotDependOn(libShopify, libMonolith)
-      libJson.doesNotDependOn(domain, libShopify, libMonolith, libKtor, libCrypto, libLogging)
-      libCrypto.doesNotDependOn(domain, libShopify, libMonolith, libKtor, libJson, libLogging)
-      libLogging.doesNotDependOn(domain, libShopify, libMonolith, libKtor, libJson, libCrypto)
+      libJson.doesNotDependOn(domain, libShopify, libMonolith, libKtor, libCrypto, libSlf4j)
+      libCrypto.doesNotDependOn(domain, libShopify, libMonolith, libKtor, libJson, libSlf4j)
+      libSlf4j.doesNotDependOn(domain, libShopify, libMonolith, libKtor, libJson, libCrypto)
       // The log shipper may name the secret it authenticates with, and nothing else of ours: it runs
       // on its own thread, with its own HTTP client, so that logging a failure cannot re-enter the
       // code that failed. `app.kt` is what knows both it and `Config`.
-      libLogflare.doesNotDependOn(libShopify, libMonolith, libKtor, libJson, libCrypto, libLogging)
+      libLogflare.doesNotDependOn(libShopify, libMonolith, libKtor, libJson, libCrypto, libSlf4j)
       // What the process is started with and what it does before taking traffic: not the application itself,
       // so the handlers may read it but it wires nothing of theirs. The warm-up drives the real clients and the
       // routes, so it may reach every `lib` package and `path`. The config is read before any of `lib` is built
@@ -214,7 +214,7 @@ class ArchitectureTest {
   fun `only startWarmUp marks the service ready`() {
     val markReadyCall = Regex("""(?<!fun )\bmarkReady\s*\(""")
     val offenders = srcFiles
-      .filterNot { it.path.endsWith("/src/dropnext/dss/boot/warmup/WarmUp.kt") }
+      .filterNot { it.path.endsWith("/src/dropnext/dss/boot/warmup/startWarmUp.kt") }
       .filter { markReadyCall.containsMatchIn(it.code) }
       .map { it.path }
     if (offenders.isNotEmpty()) {
@@ -421,6 +421,30 @@ class ArchitectureTest {
           )
         }
         constructs
+      }
+  }
+
+  /**
+   * The MDC is thread-local and a suspended coroutine resumes on whatever thread is free: a plain `MDC.put` covers the
+   * lines up to the first suspension and then leaks into whatever the thread runs next. `lib/slf4j` holds the keys and
+   * `withMdcEntries`, which gets that right; everything else goes through them, `MDCContext` included, so there is one
+   * way to add to the MDC.
+   */
+  @Test
+  fun `only lib_slf4j touches the MDC directly`() {
+    val mdcImports = setOf("org.slf4j.MDC", "kotlinx.coroutines.slf4j.MDCContext")
+    srcScope
+      .files
+      .filterNot { file -> pathContainsAllowListEntry(file.path, listOf("/dropnext/dss/lib/slf4j/")) }
+      .assertFalse { file ->
+        val offending = file.imports.map { it.name }.filter { it in mdcImports }
+        if (offending.isNotEmpty()) {
+          println(
+            "ERROR: File ${file.path} imports ${offending.joinToString()}. " +
+              "Use `withMdcEntries` or `currentTraceId` from dropnext.dss.lib.slf4j instead."
+          )
+        }
+        offending.isNotEmpty()
       }
   }
 

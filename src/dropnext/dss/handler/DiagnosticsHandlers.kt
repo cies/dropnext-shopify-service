@@ -9,6 +9,8 @@ import dropnext.dss.domain.WebhookTopicStatus
 import dropnext.dss.lib.ktor.DssError
 import dropnext.dss.lib.ktor.respondError
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlServiceFactory
+import dropnext.dss.lib.slf4j.SHOP_MDC_KEY
+import dropnext.dss.lib.slf4j.withMdcEntries
 import dropnext.dss.path.Paths
 import dropnext.dss.workflow.scanShopifyWebhooks
 import io.github.oshai.kotlinlogging.KotlinLogging
@@ -79,25 +81,26 @@ class DiagnosticsHandlers(
   suspend fun handleApiCheck(call: ApplicationCall) {
     val rawShop = call.request.queryParameters.getOrFail("shop")
     val shop = call.shopDomainOrRespond(rawShop, "shop") ?: return
+    withMdcEntries(SHOP_MDC_KEY to shop.normalizedShopifyHost) {
+      // The factory goes through the token store, monolith lookup included, so the check answers what a webhook would find.
+      val shopify = call.shopifyServiceOrRespond(shopifyGraphqlServiceFactory, shop) ?: return@withMdcEntries
 
-    // The factory goes through the token store, monolith lookup included, so the check answers what a webhook would find.
-    val shopify = call.shopifyServiceOrRespond(shopifyGraphqlServiceFactory, shop) ?: return
-
-    val webhooks = when (val scanned = scanShopifyWebhooks(shopify, "${dssConfig.dssBaseUrl}${Paths.webhooksShopify}")) {
-      is Success -> scanned.value
-      is Failure -> {
-        log.warn { "api check: webhook subscriptions query failed shop=${shop.normalizedShopifyHost} error=${scanned.reason.message}" }
-        return call.respondError(DssError.UpstreamFailure("could not list the shop's webhook subscriptions"))
+      val webhooks = when (val scanned = scanShopifyWebhooks(shopify, "${dssConfig.dssBaseUrl}${Paths.webhooksShopify}")) {
+        is Success -> scanned.value
+        is Failure -> {
+          log.warn { "api check: webhook subscriptions query failed error=${scanned.reason.message}" }
+          return@withMdcEntries call.respondError(DssError.UpstreamFailure("could not list the shop's webhook subscriptions"))
+        }
       }
-    }
 
-    call.respond(
-      ApiCheckResponse(
-        shop = shop.normalizedShopifyHost,
-        checks = ApiCheckDetails(hasTokenMappedForShop = true),
-        webhooks = webhooks.toApiCheckWebhooks(),
-      ),
-    )
+      call.respond(
+        ApiCheckResponse(
+          shop = shop.normalizedShopifyHost,
+          checks = ApiCheckDetails(hasTokenMappedForShop = true),
+          webhooks = webhooks.toApiCheckWebhooks(),
+        ),
+      )
+    }
   }
 
   /**

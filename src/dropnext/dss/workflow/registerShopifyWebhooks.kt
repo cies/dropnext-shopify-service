@@ -55,12 +55,11 @@ suspend fun registerShopifyWebhooks(
   shopify: ShopifyGraphqlService,
   callbackUrl: String,
 ): WebhookRegistrationReport {
-  val shop = shopify.shop.normalizedShopifyHost
   val scanned = when (val scan = scanShopifyWebhooks(shopify, callbackUrl)) {
     is Success -> scan.value
     is Failure -> {
       // Without the scan every topic is registered; Shopify refuses the ones that exist, which the report then shows.
-      log.warn { "Webhook subscriptions query failed shop=$shop error=${scan.reason.message}, registering every topic" }
+      log.warn { "Webhook subscriptions query failed error=${scan.reason.message}, registering every topic" }
       WebhookRegistrationReport(registrableTopics.map { WebhookTopicRegistration(it.subscriptionTopic!!.name, WebhookTopicStatus.Missing) })
     }
   }
@@ -80,13 +79,13 @@ suspend fun registerShopifyWebhooks(
   )
 
   report.failures.forEach { row ->
-    log.warn { "Webhook registration failed shop=$shop topic=${row.topic} error=${(row.status as WebhookTopicStatus.Failed).error}" }
+    log.warn { "Webhook registration failed topic=${row.topic} error=${(row.status as WebhookTopicStatus.Failed).error}" }
   }
   report.topics.forEach { row ->
-    row.stale.forEach { log.warn { "Webhook subscription stale shop=$shop topic=${row.topic} uri=${it.uri} id=${it.id}" } }
+    row.stale.forEach { log.warn { "Webhook subscription stale topic=${row.topic} uri=${it.uri} id=${it.id}" } }
   }
   log.info {
-    "Webhooks registered shop=$shop active=${report.activeCount} added=${report.addedCount} " +
+    "Webhooks registered active=${report.activeCount} added=${report.addedCount} " +
       "failed=${report.failures.size} stale=${report.staleCount}"
   }
   return report

@@ -21,6 +21,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -28,9 +29,11 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 
-// Everything here encodes and parses `JsonObject` trees, where none of the settings a serializer
-// configuration carries would apply, so this borrows neither `AppJson` nor `MonolithJson`: both
-// describe a wire contract this traffic is not part of.
+/**
+ * Everything here encodes and parses `JsonObject` trees, where none of the settings a serializer
+ * configuration carries would apply, so this borrows neither `AppJson` nor `MonolithJson`:
+ * both describe a wire contract this traffic is not part of.
+ */
 private val jsonMapper = Json
 
 /** How long [LogflareBatchSender.close] may spend on the handshake and the drain together before giving up on the rest. */
@@ -50,7 +53,7 @@ internal fun defaultLogflareClient(): HttpClient = HttpClient.newBuilder()
 
 /**
  * Everything in [LogflareAppender] that is not Logback: the source-token handshake, the bounded
- * queue, the batch flush and the flush schedule.
+ * queue, the batch flush, and the flush schedule.
  *
  * The split is the monolith's, kept so a fix found on either side ports to the other: there, the
  * appender's base class is unreachable from tests because `logback-classic` is off that project's
@@ -70,10 +73,18 @@ class LogflareBatchSender(
   private val maxQueuedEvents: Int = 10_000,
   private val flushInterval: Duration = 1.seconds,
   private val client: HttpClient = defaultLogflareClient(),
+  /**
+   * Fields every shipped event carries in its `metadata`, such as which service and which deploy
+   * printed it: constant for the life of the process, so the MDC (scoped to a unit of work and
+   * cleared after it) is the wrong place for them. A key the event itself carries wins.
+   */
+  constantFields: Map<String, String> = emptyMap(),
   private val reportError: (String) -> Unit,
   /** A parameter so a test of [close] need not wait the production budget out. */
   private val closeDrainBudget: Duration = CLOSE_DRAIN_BUDGET,
 ) {
+
+  private val constantMetadata: Map<String, JsonElement> = constantFields.mapValues { (_, value) -> JsonPrimitive(value) }
 
   /**
    * Bounded, and that is the point: an unbounded queue turns a Logflare outage into heap growth
@@ -129,17 +140,19 @@ class LogflareBatchSender(
   }
 
   /**
-   * Makes the token up when Logflare would not hand one out, and creates the source under it.
+   * Makes the token up when Logflare would not hand one out and creates the source under it.
    *
    * The Logflare inside a local `supabase start` answers `GET /api/sources` with a 500 on its
-   * Postgres backend, which used to silence the shipper for the life of the process. Shipping by
-   * `?source_name=` instead is not an option: a name Logflare is asked about before the source
-   * exists is cached as missing for an hour, and creating the source without a token of our own
-   * makes a duplicate on every boot, after which the name resolves to nothing at all. A token
-   * derived from the name is stable across boots, the create call is a no-op once the source
-   * exists (`422`, the token is unique), and the batches post under a token, the one lookup that
-   * is never poisoned. The create response is ignored on purpose: locally it is a 500 from the
-   * same bug even though the row was written.
+   * Postgres backend, which used to silence the shipper for the life of the process.
+   * Shipping by `?source_name=` instead is not an option:
+   * a name Logflare is asked about before the source exists is cached as missing for an hour,
+   * and creating the source without a token of our own makes a duplicate on every boot,
+   * after which the name resolves to nothing at all.
+   * A token derived from the name is stable across boots, the create-call is a no-op once the source exists
+   * (`422`, the token is unique), and the batches post under a token, the one lookup that is never poisoned.
+   *
+   * The create-response is ignored on purpose:
+   * locally it is a 500 from the same bug even though the row was written.
    */
   private fun handshake(sourceName: String) {
     if (resolveSourceToken(sourceName) != null) return
@@ -155,9 +168,9 @@ class LogflareBatchSender(
    *
    * Pass [sourceName] to have the token handshake run on the flush thread, before the first flush:
    * it is one or two blocking HTTP calls to Logflare, and doing them on the calling thread would put
-   * them in front of everything else the process still has to boot. Logging works from this call on
-   * — events queue while the handshake is in flight. Callers that resolved the token themselves
-   * (the tests do) leave it null.
+   * them in front of everything else the process still has to boot.
+   * Logging works from this call onward: events queue while the handshake is in flight.
+   * Callers that resolved the token themselves (the tests do) leave it null.
    */
   fun start(sourceName: String? = null) {
     val executor = Executors.newSingleThreadScheduledExecutor { runnable ->
@@ -184,8 +197,14 @@ class LogflareBatchSender(
    * than they arrived. The scheduled flush already runs every [flushInterval].
    */
   fun enqueue(entry: JsonObject) {
-    if (queue.offer(entry)) return
+    if (queue.offer(entry.withConstantMetadata())) return
     droppedSinceLastReport.incrementAndGet()
+  }
+
+  private fun JsonObject.withConstantMetadata(): JsonObject {
+    if (constantMetadata.isEmpty()) return this
+    val ownMetadata = this["metadata"] as? JsonObject ?: JsonObject(emptyMap())
+    return JsonObject(this + ("metadata" to JsonObject(constantMetadata + ownMetadata)))
   }
 
   /**

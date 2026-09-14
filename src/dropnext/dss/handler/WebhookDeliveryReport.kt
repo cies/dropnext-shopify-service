@@ -1,6 +1,5 @@
 package dropnext.dss.handler
 
-import dropnext.dss.domain.ShopDomain
 import dropnext.dss.lib.monolith.errorLabel
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.lib.shopify.graphql.errorLabel
@@ -19,7 +18,6 @@ import kotlinx.serialization.Serializable
  */
 data class WebhookDeliveryReport(
   val topic: String,
-  val shop: ShopDomain?,
   /** Shopify's `X-Shopify-Webhook-Id`: the same id on two lines is a redelivery, the only visibility into Shopify's retries. */
   val webhookId: String?,
   /** Receipt time minus Shopify's `X-Shopify-Triggered-At`, when the header parsed. */
@@ -75,7 +73,6 @@ data class WebhookDeliveryReport(
   /** The one summary line per delivery, in the `key=value` style Logflare queries are written against. */
   fun logLine(answeredStatus: Int): String = buildString {
     append("Webhook done topic=").append(topic)
-    append(" shop=").append(shop?.normalizedShopifyHost ?: "-")
     append(" webhook_id=").append(webhookId ?: "-")
     append(" outcome=").append(outcomeLabel)
     skipReasonLabel?.let { append(" reason=").append(it) }

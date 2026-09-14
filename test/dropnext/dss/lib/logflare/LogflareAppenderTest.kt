@@ -28,8 +28,15 @@ class LogflareAppenderTest {
   private val loggerContext = logbackContext()
 
   /** Logs [emit] through an appender pointed at [server], on a logger of its own so no other test sees it. */
-  private fun shippedBy(server: FakeLogflareServer, emit: (LogbackLogger) -> Unit): List<JsonObject> {
+  private fun shippedBy(
+    server: FakeLogflareServer,
+    service: String = "",
+    version: String = "",
+    emit: (LogbackLogger) -> Unit,
+  ): List<JsonObject> {
     val appender = LogflareAppender().apply {
+      this.service = service
+      this.version = version
       sourceName = "dss-test"
       apiKey = LogflareApiKey("test-logflare-key")
       endpoint = server.endpoint
@@ -71,6 +78,42 @@ class LogflareAppenderTest {
       assert(metadata["logger"]!!.jsonPrimitive.content == "dropnext.dss.test.logflare")
       // The whole point: correlating a DSS line with the monolith line it caused.
       assert(metadata[TRACE_ID_MDC_KEY]!!.jsonPrimitive.content == "trace-abc-123")
+    }
+  }
+
+  /** Two services ship to one Logflare, and which one and which deploy wrote a line is what a query across them asks first. */
+  @Test
+  fun `ships the service and the version on every event, next to the trace id`() {
+    FakeLogflareServer().use { server ->
+      server.knownSourceName = "dss-test"
+
+      val events = shippedBy(server, service = "dss", version = "v1") { logger ->
+        MDC.put(TRACE_ID_MDC_KEY, "trace-abc-123")
+        try {
+          logger.info("webhook accepted")
+        } finally {
+          MDC.remove(TRACE_ID_MDC_KEY)
+        }
+      }
+
+      val metadata = events.single()["metadata"]!!.jsonObject
+      assert(metadata["service"]!!.jsonPrimitive.content == "dss")
+      assert(metadata["version"]!!.jsonPrimitive.content == "v1")
+      assert(metadata[TRACE_ID_MDC_KEY]!!.jsonPrimitive.content == "trace-abc-123")
+    }
+  }
+
+  /** Blank is unset, and an unset field is absent rather than an empty string a query would match. */
+  @Test
+  fun `ships neither field when the service and the version are left blank`() {
+    FakeLogflareServer().use { server ->
+      server.knownSourceName = "dss-test"
+
+      val events = shippedBy(server) { logger -> logger.info("unlabelled") }
+
+      val metadata = events.single()["metadata"]!!.jsonObject
+      assert("service" !in metadata)
+      assert("version" !in metadata)
     }
   }
 

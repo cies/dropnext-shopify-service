@@ -1,8 +1,10 @@
 <configuration>
   <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
     <encoder>
-      <!-- The monolith's pattern plus the trace id. No thread name: under coroutines it is a pool worker's. -->
-      <pattern>%d{HH:mm:ss.SSS} [%-5level] %logger{36} - trace_id=%X{trace_id} %msg%n</pattern>
+      <!-- The monolith prints the same pattern. `%X` prints every MDC entry that is set (key=value pairs,
+           comma-separated, in no fixed order), so one pattern fits both services' keys and a new key needs no edit
+           here. No thread name: under coroutines it is a pool worker's. -->
+      <pattern>%d{HH:mm:ss.SSS} [%-5level] %logger{36} - %msg | %X%n</pattern>
     </encoder>
   </appender>
 

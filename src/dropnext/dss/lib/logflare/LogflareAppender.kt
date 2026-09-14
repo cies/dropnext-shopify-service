@@ -19,23 +19,28 @@ import kotlinx.serialization.json.put
  * map, which is what makes a webhook readable across the two services.
  *
  * This half is the field-for-field mapping of a logging event to JSON; [LogflareBatchSender] holds
- * the queue, the schedule and the shipping. Configuration properties:
+ * the queue, the schedule, and the shipping. Configuration properties:
  * - `sourceName`: the Logflare source, created through the API when it does not exist yet; when that
  *   API hands out no token (the Logflare inside a local `supabase start`), created under one derived from the name.
  * - `apiKey`: the account key both the handshake and every batch authenticate with.
+ * - `service`, `version`: shipped as fields of those names on every event; left out when blank.
  * - `maxBatchSize`: how many events one flush may post.
  * - `maxQueuedEvents`: how many may wait before further ones are dropped.
  * - `flushInterval`: how often the batch is flushed.
  *
  * Attached from `main` rather than `logback.xml`, because the configuration it needs is read from
- * the environment after Logback has already initialised. Written in a Java shape — mutable
- * properties, `start()`/`stop()` — because that is the shape Logback constructs and drives.
+ * the environment after Logback has already initialized.
+ *
+ * Written in a Java shape (e.g.: mutable properties, `start()`/`stop()`)
+ * because that is the shape Logback constructs and drives.
  */
 class LogflareAppender : UnsynchronizedAppenderBase<ILoggingEvent>() {
 
   var sourceName: String = ""
   var apiKey: LogflareApiKey = LogflareApiKey("")
   var endpoint: String = "https://api.logflare.app"
+  var service: String = ""
+  var version: String = ""
   var maxBatchSize: Int = 50
   var maxQueuedEvents: Int = 10_000
   var flushInterval: Duration = 1.seconds
@@ -54,10 +59,11 @@ class LogflareAppender : UnsynchronizedAppenderBase<ILoggingEvent>() {
       maxBatchSize = maxBatchSize,
       maxQueuedEvents = maxQueuedEvents,
       flushInterval = flushInterval,
+      constantFields = mapOf("service" to service, "version" to version).filterValues { it.isNotBlank() },
       // Not `addError`: Logback's status manager only reaches registered listeners and `logback.xml`
-      // registers none, so a dropped batch or a refused flush would be recorded nowhere. Standard
-      // error is what the console appender shares and what the container captures. Never SLF4J:
-      // the appender would be shipping its own complaints.
+      // registers none, so a dropped batch or a refused flush would be recorded nowhere.
+      // Standard-error is what the console appender shares and what the container captures.
+      // Never uses SLF4J: the appender would be shipping its own complaints.
       reportError = ::reportToStandardError,
     )
     this.sender = sender
@@ -88,7 +94,7 @@ private fun reportToStandardError(message: String) {
   System.err.println("[logflare] $message")
 }
 
-/** One logging event as the Logflare batch API wants it: a message, a timestamp and a metadata bag. */
+/** One logging event as the Logflare batch API wants it: a message, a timestamp, and a metadata bag. */
 private fun entryOf(event: ILoggingEvent): JsonObject {
   val metadata = buildJsonObject {
     put("level", event.level.toString())

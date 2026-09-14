@@ -36,7 +36,7 @@ suspend fun syncShopifyShipmentsToFulfillments(
     val canceled = mutations.count { it is ShopifyMutation.FulfillmentCancel }
     val skippedShipments = payload.shipments.size - mutations.count { it is ShopifyMutation.FulfillmentCreate }
     log.info {
-      "sync-shipments orderId=$shopifyOrderId shop=${shopifyGqlService.shop.subdomainOnly} " +
+      "sync-shipments orderId=$shopifyOrderId " +
         "canceled=$canceled created=${effected.value.size} skippedShipments=$skippedShipments " +
         "fulfillmentIds=${effected.value.map { it.value }}"
     }

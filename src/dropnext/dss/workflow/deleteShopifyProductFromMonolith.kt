@@ -28,11 +28,11 @@ suspend fun deleteShopifyProductFromMonolith(
   )
   return when (val result = monolith.deleteProductVariants(request)) {
     is Success -> {
-      log.info { "Monolith delete variants ok: ${result.value} deleted productId=$productId shop=${shop.normalizedShopifyHost}" }
+      log.info { "Monolith delete variants ok: ${result.value} deleted productId=$productId" }
       WebhookMirrorOutcome.Mirrored
     }
     is Failure -> {
-      logMonolithFailure("deleteProductVariants", result.reason, "productId=$productId shop=${shop.normalizedShopifyHost}")
+      logMonolithFailure("deleteProductVariants", result.reason, "productId=$productId")
       WebhookMirrorOutcome.MonolithFailed(result.reason)
     }
   }

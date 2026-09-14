@@ -65,6 +65,9 @@ private fun attachLogflareAppender(config: Config): LogflareAppender? {
     this.sourceName = sourceName
     this.apiKey = apiKey
     config.logflareEndpoint?.let { this.endpoint = it }
+    // The runtime name every infra identifier uses (`dropnext-<env>-dss`), which is what an operator types.
+    service = "dss"
+    version = config.versionTag
     context = LoggerFactory.getILoggerFactory() as LoggerContext
   }
   appender.start()

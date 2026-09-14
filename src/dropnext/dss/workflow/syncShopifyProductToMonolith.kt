@@ -42,11 +42,11 @@ suspend fun syncShopifyProductToMonolith(
   )
   return when (val result = monolith.upsertProductVariants(request)) {
     is Success -> {
-      log.info { "Monolith upsert variants ok: ${result.value} upserted shop=${shopify.shop.normalizedShopifyHost}" }
+      log.info { "Monolith upsert variants ok: ${result.value} upserted" }
       WebhookMirrorOutcome.Mirrored
     }
     is Failure -> {
-      logMonolithFailure("upsertProductVariants", result.reason, "shop=${shopify.shop.normalizedShopifyHost}")
+      logMonolithFailure("upsertProductVariants", result.reason)
       WebhookMirrorOutcome.MonolithFailed(result.reason)
     }
   }

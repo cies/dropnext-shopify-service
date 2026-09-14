@@ -173,7 +173,7 @@ When a shipment line's `product_variant_id` does not appear on any open fulfillm
 
 ## Operational notes
 
-- DSS logs a summary at `info` after each successful sync, e.g. `sync-shipments orderId=1001 shop=acme canceled=0 created=1 skippedShipments=0 fulfillmentIds=[5001]`. `canceled` is always `0`: the cancel operation still exists in the code, but nothing plans one.
+- DSS logs a summary at `info` after each successful sync, e.g. `sync-shipments orderId=1001 canceled=0 created=1 skippedShipments=0 fulfillmentIds=[5001]`. `canceled` is always `0`: the cancel operation still exists in the code, but nothing plans one.
 - Per skipped line at `warn`: `sync-shipments skipped line … tracking=… variant=… reason=no_open_fo qty=…`; per shipment with no matched line: `sync-shipments skipped shipment … tracking=… reason=all_lines_unmatched`.
 - Shopify webhooks (Step A) are answered `200` when a redelivery could not do better and `502` when Shopify or the monolith did not answer, throttled, or answered a `5xx`. Every verified delivery logs one `Webhook done topic=… webhook_id=… outcome=… answered=…` line: `info` for mirrored and skipped, `warn` for a transient failure, `error` for a permanent one.
 - Shopify redelivers a failed delivery up to eight times in four hours and removes the subscription after repeated failures within 24 hours ([Shopify: troubleshoot webhooks](https://shopify.dev/docs/apps/build/webhooks/troubleshooting-webhooks)). `GET /api/check?shop=…` (bearer auth) shows whether each handled topic is still subscribed.

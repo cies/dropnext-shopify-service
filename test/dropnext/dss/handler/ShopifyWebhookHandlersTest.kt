@@ -9,6 +9,9 @@ import dropnext.dss.lib.shopify.graphql.ShopProduct
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 
 import dropnext.dss.lib.shopify.token.InMemoryShopTokenStore
+import dropnext.dss.lib.slf4j.SHOP_MDC_KEY
+import dropnext.dss.lib.slf4j.TOPIC_MDC_KEY
+import dropnext.dss.lib.slf4j.WEBHOOK_ID_MDC_KEY
 import dropnext.dss.path.Paths
 import dropnext.dss.testutil.fake.FakeMonolithService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
@@ -19,6 +22,7 @@ import dropnext.dss.testutil.fixture.testConfig
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
 import dropnext.dss.testutil.helper.base64HmacSha256
 import dropnext.dss.testutil.helper.capturingLogs
+import dropnext.dss.testutil.helper.mdcOf
 import dropnext.dss.testutil.helper.withDssApp
 
 import io.ktor.client.HttpClient
@@ -513,10 +517,63 @@ class ShopifyWebhookHandlersTest {
     }
     val line = lines.single { "Webhook done" in it }
     assert(line.startsWith("WARN"))
-    assert("topic=orders/create shop=acme.myshopify.com webhook_id=delivery-42" in line)
+    assert("topic=orders/create webhook_id=delivery-42" in line)
+    assert(mdcOf(line)[SHOP_MDC_KEY] == "acme.myshopify.com")
     assert("outcome=failed transient=true error=monolith_503" in line)
     assert("lag_ms=" in line)
     assert("answered=502" in line)
+  }
+
+  // ---------- what every line of a delivery carries ----------
+
+  /**
+   * The lines between two summaries are what an incident is made of, so the shop, the topic and the delivery id are
+   * fields on each of them. The workflow's line comes after the Shopify read suspended, where a value put in the
+   * thread-local MDC would be gone or, worse, another delivery's.
+   */
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `every line of a verified delivery carries the shop, the topic and the webhook id in its MDC`() {
+    val shopify = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Failure(ShopifyError.TokenRejected(401))
+      orderForDssDelay = 20.milliseconds
+    }
+    val lines = capturingLogs {
+      withDssApp(deps(shopify = shopify)) { client ->
+        val r = client.signedWebhook("orders/create", """{"id":1001,"admin_graphql_api_id":"gid://shopify/Order/1001"}""", webhookId = "wh-1")
+        assert(r.status == HttpStatusCode.OK)
+      }
+    }
+    val workflowLine = mdcOf(lines.single { "could not load order" in it })
+    assert(workflowLine[SHOP_MDC_KEY] == "acme.myshopify.com")
+    assert(workflowLine[TOPIC_MDC_KEY] == "orders/create")
+    assert(workflowLine[WEBHOOK_ID_MDC_KEY] == "wh-1")
+    val summaryLine = mdcOf(lines.single { "Webhook done" in it })
+    assert(summaryLine[SHOP_MDC_KEY] == "acme.myshopify.com")
+    assert(summaryLine[TOPIC_MDC_KEY] == "orders/create")
+    assert(summaryLine[WEBHOOK_ID_MDC_KEY] == "wh-1")
+  }
+
+  /** The shop header is unverified until the HMAC is, so the rejection names no `shop`; the topic and the id are what Shopify's headers said. */
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `a delivery with a bad HMAC logs its rejection with the topic and the webhook id but no shop`() {
+    val lines = capturingLogs {
+      withDssApp(deps()) { client ->
+        val r = client.post(Paths.webhooksShopify) {
+          header("X-Shopify-Topic", "orders/create")
+          header("X-Shopify-Shop-Domain", "acme.myshopify.com")
+          header("X-Shopify-Webhook-Id", "wh-1")
+          header("X-Shopify-Hmac-Sha256", Base64.getEncoder().encodeToString(ByteArray(32)))
+          setBody("""{"id":1001}""")
+        }
+        assert(r.status == HttpStatusCode.Unauthorized)
+      }
+    }
+    val rejection = mdcOf(lines.single { "HMAC mismatch" in it })
+    assert(rejection[TOPIC_MDC_KEY] == "orders/create")
+    assert(rejection[WEBHOOK_ID_MDC_KEY] == "wh-1")
+    assert(SHOP_MDC_KEY !in rejection)
   }
 
   // ---------- helpers ----------
@@ -527,9 +584,11 @@ class ShopifyWebhookHandlersTest {
     topic: String,
     body: String,
     shopDomain: String? = "acme.myshopify.com",
+    webhookId: String? = null,
   ): HttpResponse = post(Paths.webhooksShopify) {
     header("X-Shopify-Topic", topic)
     shopDomain?.let { header("X-Shopify-Shop-Domain", it) }
+    webhookId?.let { header("X-Shopify-Webhook-Id", it) }
     header("X-Shopify-Hmac-Sha256", base64HmacSha256(WEBHOOK_SECRET, body.toByteArray(StandardCharsets.UTF_8)))
     setBody(body)
   }

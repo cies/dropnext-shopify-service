@@ -66,3 +66,13 @@ fun capturingLogs(block: () -> Unit): List<String> {
   }
   return recorded.toList()
 }
+
+/**
+ * The MDC part of a [capturingLogs] line. A message can carry the same `key=value` text as a field (the summary line's
+ * `topic=`), so a test asserting on the field reads it here rather than finding the text anywhere in the line.
+ */
+fun mdcOf(line: String): Map<String, String> =
+  line.substringAfterLast(" {", missingDelimiterValue = "").removeSuffix("}")
+    .split(",")
+    .filter { it.isNotEmpty() }
+    .associate { entry -> entry.substringBefore("=") to entry.substringAfter("=") }

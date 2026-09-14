@@ -114,7 +114,7 @@ credentials, so the human developer starts it — see "Operational boundary".
     ├── monolith/                # The other direction: `MonolithService` + `HttpMonolithService` answering `MonolithResult`, error-body parsing, structured failure logging
     ├── json/                    # `AppJson` and `MonolithJson`
     ├── crypto/                  # The one HMAC-SHA256 and constant-time compare
-    ├── logging/                 # The MDC trace-id key (`callIdMdc` and `logback.xml` agree on it) and `currentTraceId()`
+    ├── slf4j/                   # The MDC keys shared with the monolith (`trace_id`, `shop`, `route`, …), `currentTraceId()`, and `withMdcEntries` for a value a handler or the warm-up adds
     ├── logflare/                # `LogflareAppender` (event → JSON) and `LogflareBatchSender` (queue, schedule, shipping)
     └── ktor/                    # Ktor server glue: one `install*` function per plugin (call id, call logging, status pages, JSON, request validation, the monolith bearer auth), `DssError` + `respondError`, HTTP client builders
 
@@ -272,8 +272,8 @@ with a reason, a step that goes wrong is `failed` with a countable label.
   underneath it. So a task is ready at the latest ~21 s after start, whatever the monolith did. Nothing else marks it
   (`ArchitectureTest` checks): a gate opened early sends a still-cold task its first webhook.
 - The warm-up runs outside any request, so it mints its own trace id (`warmup-…`), sends it as `X-Trace-Id` on both
-  loopback requests and runs under `MDCContext` (`kotlinx-coroutines-slf4j`, the same element Ktor's `callIdMdc`
-  uses), so every line it causes, the clients' retry and failure lines included, carries it.
+  loopback requests and puts it in the MDC through `withMdcEntries` (an `MDCContext`, the same element Ktor's
+  `callIdMdc` uses), so every line it causes, the clients' retry and failure lines included, carries it.
 - `dssModule(deps, warmUp)` takes the warm-up explicitly: `main` passes `deps.warmUp`, the production one over the
   graph's own clients; `withDssApp` passes `WarmUp.NONE` unless a test hands in another, because the production
   warm-up's outbound calls would show up in every fake's recorded calls. The test engine raises `ApplicationStarted`
@@ -285,10 +285,10 @@ See `test/dropnext/dss/ArchitectureTest.kt` for a formal specification, using th
 regarding what packages a package may import from: `domain` depends on nothing of ours, `boot` is imported only by
 `handler` and the root package and depends on no application package (its `config` and `warmup` halves not on each
 other, `boot/config` on no `lib` package), `lib` never on an
-application package and its sub-packages never on each other (only on `lib/json`, `lib/crypto`, `lib/logging`),
+application package and its sub-packages never on each other (only on `lib/json`, `lib/crypto`, `lib/slf4j`),
 `workflow` never on the HTTP or view layers, `presentation` on nothing but `domain`. Plus the other rules it keeps: no
 reflection, no wildcard imports, no ad-hoc `Json {}` or `HttpClient(...)`, only `Config` in `boot/config/` reads the
-environment and that package imports no framework or logger, only `startWarmUp` marks the service ready, `boot/warmup`
+environment and that package imports no framework or logger, only `startWarmUp` marks the service ready, only `lib/slf4j` imports the SLF4J `MDC` or `MDCContext`, `boot/warmup`
 sees no more of the Ktor server than the application lifecycle, secrets redact and never serialize, Graphql-generated types only inside `lib/shopify/`, the translation boundaries
 and `workflow/`, no hand-written contract DTOs or `OutBoundMonolithPaths` and the file naming rule. The `test/` →
 `src/` mirroring rule lives in `TestSuiteArchitectureTest` and is checked in one direction only: every test file must
@@ -351,6 +351,19 @@ unless configured, which is how the monolith does it too.
   never refused), 16 hex characters otherwise, echoed as `X-Trace-Id` on every response. The monolith client carries
   the client-side `CallId` plugin, which forwards it as `X-Trace-Id` from the coroutine context; nothing reads the
   MDC to do so.
+- **The rest of a request's context** travels the same way, under MDC keys shared with the monolith
+  (`lib/slf4j/mdc.kt`), so one Logflare query returns both services' lines. `route` (the path, never the query string)
+  and `method` are on every line of a call; `topic` and `webhook_id` (the `X-Shopify-Topic` and `X-Shopify-Webhook-Id`
+  headers as sent, cut to the trace id's 64 characters, since they are unverified until the HMAC is) on every line of a
+  webhook delivery, the HMAC rejection's included. All four are `CallLogging` providers in `installCallLogging`.
+  `shop` (the normalized host) is set where each handler resolves the shop, through `withMdcEntries`, the one way to add
+  a value to the MDC (`ArchitectureTest` keeps `org.slf4j.MDC` and `MDCContext` inside `lib/slf4j`). The bar for that
+  is where the shop is trusted: on the webhook route after the HMAC check, on every other route as soon as
+  `ShopDomain.parse` accepts the value, which on the OAuth callback is before its HMAC and state checks (nothing logs in
+  between). A line logged before that point, such as the HMAC rejection or `StatusPages`' line for an exception thrown
+  inside the block, carries no `shop`. The Logflare appender adds `service=dss` and `version` (the `VERSION_TAG`) to
+  every event it ships, the startup and shutdown lines included. The console pattern prints every MDC entry, but not
+  these two.
 
 Quieting a noisy library belongs in `logback.xml` next to the two that are already there.
 
@@ -362,15 +375,18 @@ Shared with the monolith, so a line from either service reads the same way in Lo
 - **`domain` does not log**: a domain function returns its answer, it does not narrate it (`ArchitectureTest` forbids
   the import). Neither does `boot/config`: it is read before the Logflare appender is attached, so it fails the boot
   instead. Workflows and handlers log; `lib` logs only its own failures.
-- **Messages are prose with `key=value` detail**, e.g. `Webhook verified topic=orders/create shop=acme.myshopify.com`;
-  the trace id is never interpolated, the MDC carries it.
+- **Messages are prose with `key=value` detail**, e.g. `Webhook verified topic=orders/create bodyBytes=812`; a value
+  the MDC already carries (the trace id, the shop, the route) is never interpolated. A line logged where the MDC has
+  no `shop`, such as the warm-up's, names the shop in its message.
 - **Levels**: `error` for what needs a human (a bug, an upstream down), `warn` for a refused request or a failed
   optional step, `info` for one line per meaningful event, never per loop iteration. The root level is `INFO`
   everywhere; there is no `LOG_LEVEL` variable.
 - **Nothing secret, nothing bulky**: no tokens, no `Authorization` headers, no request or response bodies, no query
   strings. Secrets are value classes that print `***`, so interpolating one by accident prints nothing useful.
-- **Console pattern** `%d{HH:mm:ss.SSS} [%-5level] %logger{36} - trace_id=%X{trace_id} %msg%n`: the monolith's
-  pattern plus the MDC key, no thread name (under coroutines it names a pool worker).
+- **Console pattern** `%d{HH:mm:ss.SSS} [%-5level] %logger{36} - %msg | %X%n`, the same as the monolith's: the
+  message, then every MDC entry that is set (`%X` without a key prints `key=value` pairs, comma-separated and in no
+  fixed order, so one pattern fits both services' keys and a new key needs no edit), no thread name (under coroutines
+  it names a pool worker).
 
 
 # Security

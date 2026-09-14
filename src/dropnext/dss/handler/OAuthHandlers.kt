@@ -10,6 +10,8 @@ import dropnext.dss.lib.shopify.oauth.ShopifyOAuthService
 import dropnext.dss.lib.shopify.token.ShopLookup
 import dropnext.dss.lib.shopify.token.ShopTokenStore
 import dropnext.dss.lib.shopify.webhook.ShopifyHmacVerifierService
+import dropnext.dss.lib.slf4j.SHOP_MDC_KEY
+import dropnext.dss.lib.slf4j.withMdcEntries
 import dropnext.dss.path.Paths
 import dropnext.dss.presentation.renderOAuthInstallPage
 import dropnext.dss.workflow.installShop
@@ -44,8 +46,10 @@ class OAuthHandlers(
   suspend fun handleInstall(call: ApplicationCall) {
     val rawShop = call.request.queryParameters.getOrFail("shop")
     val shop = call.shopDomainOrRespondText(rawShop, "shop") ?: return
-    val state = shopifyOAuthService.signedState(shop)
-    call.respondRedirect(shopifyOAuthService.authorizeUrl(shop, state))
+    withMdcEntries(SHOP_MDC_KEY to shop.normalizedShopifyHost) {
+      val state = shopifyOAuthService.signedState(shop)
+      call.respondRedirect(shopifyOAuthService.authorizeUrl(shop, state))
+    }
   }
 
   suspend fun handleOAuthCallback(call: ApplicationCall) {
@@ -53,38 +57,40 @@ class OAuthHandlers(
     val hmac = params.getOrFail("hmac")
     val rawShop = params.getOrFail("shop")
     val shop = call.shopDomainOrRespondText(rawShop, "shop") ?: return
-    val state = params.getOrFail("state")
-    val code = params.getOrFail("code")
+    withMdcEntries(SHOP_MDC_KEY to shop.normalizedShopifyHost) {
+      val state = params.getOrFail("state")
+      val code = params.getOrFail("code")
 
-    if (!shopifyHmacVerifierService.verifyOAuthCallback(params, hmac)) {
-      return call.respondTextError(DssError.InvalidSignature("Invalid HMAC"))
-    }
-    if (!shopifyOAuthService.isSignedStateValid(state, shop)) {
-      return call.respondTextError(DssError.InvalidSignature("Invalid or expired state"))
-    }
-
-    val token = when (val exchanged = shopifyOAuthService.exchangeCode(shop, code)) {
-      is Success -> exchanged.value
-      is Failure -> {
-        log.warn { "OAuth code exchange failed for shop=${shop.normalizedShopifyHost}: ${exchanged.reason.message}" }
-        return call.respondTextError(exchanged.reason.toDssError())
+      if (!shopifyHmacVerifierService.verifyOAuthCallback(params, hmac)) {
+        return@withMdcEntries call.respondTextError(DssError.InvalidSignature("Invalid HMAC"))
       }
+      if (!shopifyOAuthService.isSignedStateValid(state, shop)) {
+        return@withMdcEntries call.respondTextError(DssError.InvalidSignature("Invalid or expired state"))
+      }
+
+      val token = when (val exchanged = shopifyOAuthService.exchangeCode(shop, code)) {
+        is Success -> exchanged.value
+        is Failure -> {
+          log.warn { "OAuth code exchange failed: ${exchanged.reason.message}" }
+          return@withMdcEntries call.respondTextError(exchanged.reason.toDssError())
+        }
+      }
+
+      // Remembered under the shop Shopify redirected for; the workflow remembers it again under the
+      // canonical domain once it has asked Shopify, so the factory can hand out a service right away.
+      shopTokens.remember(shop, token)
+      val shopify = (shopifyGraphqlServiceFactory.forShop(shop) as? ShopLookup.Found)?.value
+        ?: return@withMdcEntries call.respondTextError(DssError.UpstreamFailure("could not build a Shopify service for $shop"))
+
+      val report = installShop(
+        shopify = shopify,
+        monolith = monolithService,
+        tokens = shopTokens,
+        token = token,
+        webhookCallbackUrl = "$dssBaseUrl${Paths.webhooksShopify}",
+      )
+      call.response.header(HttpHeaders.CacheControl, "no-store, no-cache, must-revalidate")
+      call.respondText(renderOAuthInstallPage(report), ContentType.Text.Html, HttpStatusCode.OK)
     }
-
-    // Remembered under the shop Shopify redirected for; the workflow remembers it again under the
-    // canonical domain once it has asked Shopify, so the factory can hand out a service right away.
-    shopTokens.remember(shop, token)
-    val shopify = (shopifyGraphqlServiceFactory.forShop(shop) as? ShopLookup.Found)?.value
-      ?: return call.respondTextError(DssError.UpstreamFailure("could not build a Shopify service for $shop"))
-
-    val report = installShop(
-      shopify = shopify,
-      monolith = monolithService,
-      tokens = shopTokens,
-      token = token,
-      webhookCallbackUrl = "$dssBaseUrl${Paths.webhooksShopify}",
-    )
-    call.response.header(HttpHeaders.CacheControl, "no-store, no-cache, must-revalidate")
-    call.respondText(renderOAuthInstallPage(report), ContentType.Text.Html, HttpStatusCode.OK)
   }
 }

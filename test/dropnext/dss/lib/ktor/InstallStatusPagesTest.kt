@@ -2,8 +2,11 @@ package dropnext.dss.lib.ktor
 
 import dropnext.dss.contract.ApiError
 import dropnext.dss.lib.json.AppJson
+import dropnext.dss.lib.slf4j.METHOD_MDC_KEY
+import dropnext.dss.lib.slf4j.ROUTE_MDC_KEY
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
 import dropnext.dss.testutil.helper.capturingLogs
+import dropnext.dss.testutil.helper.mdcOf
 import io.ktor.client.call.body
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation as ClientContentNegotiation
 import io.ktor.client.request.get
@@ -130,5 +133,27 @@ class InstallStatusPagesTest {
     assert("super-secret-code" !in line)
     assert("deadbeef" !in line)
     assert("code=" !in line)
+  }
+
+  /** Which route threw is the first question of an incident; the line answers it as a field, still without the query string. */
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `the unhandled-error line carries the route and the method in its MDC`() {
+    val lines = capturingLogs {
+      testApplication {
+        application {
+          // In the order `dssModule` installs them: the error handler logs under the call logging's MDC.
+          installCallLogging(enabled = false)
+          installStatusPages(plainTextErrorPaths = emptySet())
+          installJsonContentNegotiation()
+          routing { get("/boom") { throw IllegalStateException("boom") } }
+        }
+        client.get("/boom?code=super-secret-code")
+      }
+    }
+
+    val mdc = mdcOf(lines.single { "Unhandled error" in it })
+    assert(mdc[ROUTE_MDC_KEY] == "/boom")
+    assert(mdc[METHOD_MDC_KEY] == "GET")
   }
 }

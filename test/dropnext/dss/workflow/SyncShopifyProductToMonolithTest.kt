@@ -97,7 +97,6 @@ class SyncShopifyProductToMonolithTest {
     assert(line.startsWith("ERROR"))
     assert("status=500" in line)
     assert("monolith_trace_id=fake-upsert" in line)
-    assert("shop=acme.myshopify.com" in line)
   }
 }
 

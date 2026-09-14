@@ -11,6 +11,7 @@ import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
@@ -34,17 +35,28 @@ class LogflareBatchSenderTest {
     maxQueuedEvents: Int = 10_000,
     flushInterval: Duration = 50.milliseconds,
     closeDrainBudget: Duration = 5.seconds,
+    constantFields: Map<String, String> = emptyMap(),
   ) = LogflareBatchSender(
     endpoint = server.endpoint,
     apiKey = LogflareApiKey("test-logflare-key"),
     maxBatchSize = maxBatchSize,
     maxQueuedEvents = maxQueuedEvents,
     flushInterval = flushInterval,
+    constantFields = constantFields,
     reportError = { errors += it },
     closeDrainBudget = closeDrainBudget,
   )
 
   private fun entry(message: String): JsonObject = buildJsonObject { put("message", message) }
+
+  private fun entryWithMetadata(message: String, vararg metadata: Pair<String, String>): JsonObject = buildJsonObject {
+    put("message", message)
+    put("metadata", buildJsonObject { metadata.forEach { (key, value) -> put(key, value) } })
+  }
+
+  private fun metadataOf(server: FakeLogflareServer, message: String): Map<String, String> =
+    server.receivedEvents.single { it["message"]!!.jsonPrimitive.content == message }["metadata"]!!.jsonObject
+      .mapValues { (_, value) -> value.jsonPrimitive.content }
 
   private fun messagesOf(server: FakeLogflareServer) =
     server.receivedEvents.map { it["message"]!!.jsonPrimitive.content }
@@ -386,6 +398,54 @@ class LogflareBatchSenderTest {
       // `X-API-KEY` on the ingest one, and sending the wrong one is a silent 401 in production.
       assert("Bearer test-logflare-key" in server.receivedApiKeys)
       assert("test-logflare-key" in server.receivedApiKeys)
+    }
+  }
+
+  @Test
+  fun `constant fields are shipped in every event's metadata next to the event's own`() {
+    FakeLogflareServer().use { server ->
+      val sender = senderFor(server, constantFields = mapOf("service" to "dss", "version" to "v1"))
+      sender.resolveSourceToken("dropnext-test")
+      sender.start()
+
+      sender.enqueue(entryWithMetadata("with metadata", "level" to "INFO", "trace_id" to "abc"))
+      sender.enqueue(entry("without metadata"))
+
+      assert(server.awaitBatch())
+      sender.close()
+      assert(metadataOf(server, "with metadata") == mapOf("service" to "dss", "version" to "v1", "level" to "INFO", "trace_id" to "abc"))
+      assert(metadataOf(server, "without metadata") == mapOf("service" to "dss", "version" to "v1"))
+    }
+  }
+
+  @Test
+  fun `without constant fields the entry ships unchanged`() {
+    FakeLogflareServer().use { server ->
+      val sender = senderFor(server)
+      sender.resolveSourceToken("dropnext-test")
+      sender.start()
+
+      sender.enqueue(entryWithMetadata("plain", "level" to "WARN"))
+
+      assert(server.awaitBatch())
+      sender.close()
+      assert(metadataOf(server, "plain") == mapOf("level" to "WARN"))
+      assert(server.receivedEvents.single().keys == setOf("message", "metadata"))
+    }
+  }
+
+  @Test
+  fun `an entry whose metadata already has a constant key keeps its own value`() {
+    FakeLogflareServer().use { server ->
+      val sender = senderFor(server, constantFields = mapOf("service" to "dss"))
+      sender.resolveSourceToken("dropnext-test")
+      sender.start()
+
+      sender.enqueue(entryWithMetadata("overridden", "service" to "something-else"))
+
+      assert(server.awaitBatch())
+      sender.close()
+      assert(metadataOf(server, "overridden") == mapOf("service" to "something-else"))
     }
   }
 }

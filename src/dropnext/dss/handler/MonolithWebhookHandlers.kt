@@ -15,6 +15,8 @@ import dropnext.dss.lib.ktor.respondError
 import dropnext.dss.lib.monolith.MonolithService
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlServiceFactory
 import dropnext.dss.lib.shopify.token.ShopTokenStore
+import dropnext.dss.lib.slf4j.SHOP_MDC_KEY
+import dropnext.dss.lib.slf4j.withMdcEntries
 import dropnext.dss.workflow.persistTokenToMonolith
 import dropnext.dss.workflow.syncShopifyShipmentsToFulfillments
 import dropnext.dss.workflow.syncShopifyTrackingEvent
@@ -30,7 +32,8 @@ private val log = KotlinLogging.logger {}
  * Handlers for the monolith's webhook REST endpoints: resolve the shop, hand the request to a workflow
  * and map its answer onto the response. Everything before that is the framework's: the bearer token is
  * checked by the `authenticate` block in [dropnext.dss.routing.monolithWebhookRoutes], and a body that
- * does not decode or does not validate is answered by `StatusPages` before `receive` returns.
+ * does not decode or does not validate is answered by `StatusPages` before `receive` returns. Once the shop parses,
+ * it is in the MDC, so every line the request causes names it as a field.
  */
 class MonolithWebhookHandlers(
   private val shopifyGraphqlServiceFactory: ShopifyGraphqlServiceFactory,
@@ -41,16 +44,18 @@ class MonolithWebhookHandlers(
   suspend fun handleSyncShipments(call: ApplicationCall) {
     val request = call.receive<SyncShipmentsWithFulfillmentsRequest>()
     val shop = call.shopDomainOrRespond(request.shopifySubdomain, "shopify_subdomain") ?: return
-    val shopify = call.shopifyServiceOrRespond(shopifyGraphqlServiceFactory, shop) ?: return
+    withMdcEntries(SHOP_MDC_KEY to shop.normalizedShopifyHost) {
+      val shopify = call.shopifyServiceOrRespond(shopifyGraphqlServiceFactory, shop) ?: return@withMdcEntries
 
-    when (val synced = syncShopifyShipmentsToFulfillments(shopify, request)) {
-      is Success ->
-        call.respond(SyncShipmentsWithFulfillmentsResponse(newFulfillmentIds = synced.value.map { it.value }))
+      when (val synced = syncShopifyShipmentsToFulfillments(shopify, request)) {
+        is Success ->
+          call.respond(SyncShipmentsWithFulfillmentsResponse(newFulfillmentIds = synced.value.map { it.value }))
 
-      is Failure -> {
-        // The log gets Shopify's whole message; the caller may be told less (see `toDssError`).
-        log.warn { "sync-shipments failed shop=${shopify.shop.normalizedShopifyHost} error=${synced.reason.message}" }
-        call.respondError(synced.reason.toDssError())
+        is Failure -> {
+          // The log gets Shopify's whole message; the caller may be told less (see `toDssError`).
+          log.warn { "sync-shipments failed error=${synced.reason.message}" }
+          call.respondError(synced.reason.toDssError())
+        }
       }
     }
   }
@@ -58,15 +63,17 @@ class MonolithWebhookHandlers(
   suspend fun handleTrackingUpdate(call: ApplicationCall) {
     val request = call.receive<TrackingUpdateRequest>()
     val shop = call.shopDomainOrRespond(request.shopifySubdomain, "shopify_subdomain") ?: return
-    val shopify = call.shopifyServiceOrRespond(shopifyGraphqlServiceFactory, shop) ?: return
+    withMdcEntries(SHOP_MDC_KEY to shop.normalizedShopifyHost) {
+      val shopify = call.shopifyServiceOrRespond(shopifyGraphqlServiceFactory, shop) ?: return@withMdcEntries
 
-    when (val synced = syncShopifyTrackingEvent(shopify, request)) {
-      is Success ->
-        call.respond(TrackingUpdateResponse(fulfillmentEventId = synced.value.value))
+      when (val synced = syncShopifyTrackingEvent(shopify, request)) {
+        is Success ->
+          call.respond(TrackingUpdateResponse(fulfillmentEventId = synced.value.value))
 
-      is Failure -> {
-        log.warn { "tracking-update failed shop=${shopify.shop.normalizedShopifyHost} error=${synced.reason.message}" }
-        call.respondError(synced.reason.toDssError())
+        is Failure -> {
+          log.warn { "tracking-update failed error=${synced.reason.message}" }
+          call.respondError(synced.reason.toDssError())
+        }
       }
     }
   }
@@ -79,15 +86,17 @@ class MonolithWebhookHandlers(
   suspend fun handlePutStoreApiKey(call: ApplicationCall) {
     val request = call.receive<UpdateStoreApiKeyRequest>()
     val shop = call.shopDomainOrRespond(request.shopifySubdomain, "shopify_subdomain") ?: return
-    val token = ShopifyAdminToken(request.apiKey)
-    val shopId = request.shopifyShopId?.let(::ShopifyShopId)
+    withMdcEntries(SHOP_MDC_KEY to shop.normalizedShopifyHost) {
+      val token = ShopifyAdminToken(request.apiKey)
+      val shopId = request.shopifyShopId?.let(::ShopifyShopId)
 
-    shopTokens.remember(shop, token)
-    log.info { "PUT stores/api-key: token cached in memory for shop=${shop.normalizedShopifyHost}" }
+      shopTokens.remember(shop, token)
+      log.info { "PUT stores/api-key: token cached in memory" }
 
-    when (val persisted = persistTokenToMonolith(monolithService, shop, shopId, token)) {
-      is MonolithPersistOutcome.Persisted -> call.respond(UpdateStoreApiKeyResponse(storeId = persisted.storeId.value))
-      is MonolithPersistOutcome.Failed -> call.respondError(persisted.toDssError())
+      when (val persisted = persistTokenToMonolith(monolithService, shop, shopId, token)) {
+        is MonolithPersistOutcome.Persisted -> call.respond(UpdateStoreApiKeyResponse(storeId = persisted.storeId.value))
+        is MonolithPersistOutcome.Failed -> call.respondError(persisted.toDssError())
+      }
     }
   }
 }

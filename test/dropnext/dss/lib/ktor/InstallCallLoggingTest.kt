@@ -7,7 +7,11 @@ import dropnext.dss.boot.config.DssMode
 import dropnext.dss.boot.warmup.WarmUp
 import dropnext.dss.dssDependencies
 import dropnext.dss.dssModule
+import dropnext.dss.lib.slf4j.METHOD_MDC_KEY
+import dropnext.dss.lib.slf4j.ROUTE_MDC_KEY
+import dropnext.dss.lib.slf4j.TOPIC_MDC_KEY
 import dropnext.dss.lib.slf4j.TRACE_ID_MDC_KEY
+import dropnext.dss.lib.slf4j.WEBHOOK_ID_MDC_KEY
 import dropnext.dss.path.Paths
 import dropnext.dss.testutil.fixture.testConfig
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
@@ -20,6 +24,7 @@ import io.ktor.server.routing.get
 import io.ktor.server.routing.routing
 import io.ktor.server.testing.testApplication
 import kotlin.test.Test
+import kotlinx.coroutines.delay
 import org.junit.jupiter.api.parallel.ResourceLock
 
 
@@ -135,6 +140,88 @@ class InstallCallLoggingTest {
       }
 
       assert(eventsMentioning(recorded, Paths.health).size == 1)
+    }
+  }
+
+  /** `path()` and never the URI: the OAuth callback's query string carries its `code` and `hmac`. */
+  @Test
+  fun `a handler's line after a suspension carries the route without its query string, and the method`() {
+    captureLogLines { recorded ->
+      testApplication {
+        application {
+          installCallId()
+          installCallLogging(enabled = false)
+          routing {
+            get("/probe") {
+              delay(5)
+              log.info { "handler resumed" }
+              call.respondText("ok")
+            }
+          }
+        }
+        client.get("/probe?secret=1")
+      }
+
+      val mdc = eventsMentioning(recorded, "handler resumed").single().mdcPropertyMap
+      assert(mdc[ROUTE_MDC_KEY] == "/probe")
+      assert(mdc[METHOD_MDC_KEY] == "GET")
+    }
+  }
+
+  @Test
+  fun `a handler's line carries the webhook topic and id when their headers are sent, and neither when not`() {
+    captureLogLines { recorded ->
+      testApplication {
+        application {
+          installCallId()
+          installCallLogging(enabled = false)
+          routing {
+            get("/probe") {
+              log.info { "handler sent topic=${call.request.headers["X-Shopify-Topic"] != null}" }
+              call.respondText("ok")
+            }
+          }
+        }
+        client.get("/probe") {
+          header("X-Shopify-Topic", "orders/create")
+          header("X-Shopify-Webhook-Id", "wh-1")
+        }
+        client.get("/probe")
+      }
+
+      val sent = eventsMentioning(recorded, "handler sent topic=true").single().mdcPropertyMap
+      assert(sent[TOPIC_MDC_KEY] == "orders/create")
+      assert(sent[WEBHOOK_ID_MDC_KEY] == "wh-1")
+      val notSent = eventsMentioning(recorded, "handler sent topic=false").single().mdcPropertyMap
+      assert(TOPIC_MDC_KEY !in notSent)
+      assert(WEBHOOK_ID_MDC_KEY !in notSent)
+    }
+  }
+
+  /** Both headers are anonymous input until the handler has checked the HMAC, and they land on every line of the call. */
+  @Test
+  fun `a webhook topic or id longer than the cap is cut to it`() {
+    captureLogLines { recorded ->
+      testApplication {
+        application {
+          installCallId()
+          installCallLogging(enabled = false)
+          routing {
+            get("/probe") {
+              log.info { "handler saw long headers" }
+              call.respondText("ok")
+            }
+          }
+        }
+        client.get("/probe") {
+          header("X-Shopify-Topic", "t".repeat(MAX_TRACE_ID_LENGTH + 1))
+          header("X-Shopify-Webhook-Id", "w".repeat(MAX_TRACE_ID_LENGTH + 1))
+        }
+      }
+
+      val mdc = eventsMentioning(recorded, "handler saw long headers").single().mdcPropertyMap
+      assert(mdc[TOPIC_MDC_KEY] == "t".repeat(MAX_TRACE_ID_LENGTH))
+      assert(mdc[WEBHOOK_ID_MDC_KEY] == "w".repeat(MAX_TRACE_ID_LENGTH))
     }
   }
 }

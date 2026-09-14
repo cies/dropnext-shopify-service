@@ -30,7 +30,6 @@ suspend fun determineShopifyMutations(
   val calculated = calculateShopifyMutations(order, shipments)
   if (calculated is Success) {
     logSkippedShipmentLines(
-      shopifySubdomain = shopifyGqlService.shop.subdomainOnly,
       shopifyOrderId = shopifyOrderId,
       order = order,
       shipments = shipments,
@@ -40,7 +39,6 @@ suspend fun determineShopifyMutations(
 }
 
 private fun logSkippedShipmentLines(
-  shopifySubdomain: String,
   shopifyOrderId: ShopifyOrderId,
   order: Order,
   shipments: List<Shipment>,
@@ -50,12 +48,12 @@ private fun logSkippedShipmentLines(
     is DryRunResult.Ok -> {
       match.perShipment.forEachIndexed { index, shipmentMatch ->
         shipmentMatch.skipped.forEach { skipped ->
-          logSkippedLine(shopifySubdomain, shopifyOrderId, skipped)
+          logSkippedLine(shopifyOrderId, skipped)
         }
         if (shipmentMatch.groups.isEmpty()) {
           val tracking = shipments.getOrNull(index)?.trackingNumber.orEmpty()
           log.warn {
-            "sync-shipments skipped shipment shop=$shopifySubdomain orderId=$shopifyOrderId " +
+            "sync-shipments skipped shipment orderId=$shopifyOrderId " +
               "tracking=$tracking reason=all_lines_unmatched"
           }
         }
@@ -64,9 +62,9 @@ private fun logSkippedShipmentLines(
   }
 }
 
-private fun logSkippedLine(shop: String, orderId: ShopifyOrderId, skipped: SkippedShipmentLine) {
+private fun logSkippedLine(orderId: ShopifyOrderId, skipped: SkippedShipmentLine) {
   log.warn {
-    "sync-shipments skipped line shop=$shop orderId=$orderId " +
+    "sync-shipments skipped line orderId=$orderId " +
       "tracking=${skipped.trackingNumber} variant=${skipped.productVariantId} " +
       "reason=${skipped.reason.logLabel()} qty=${skipped.quantity}"
   }

@@ -20,6 +20,8 @@ import dropnext.dss.lib.shopify.webhook.ShopifyWebhookTopic
 import dropnext.dss.lib.shopify.webhook.graphqlResourceIdFromShopifyWebhook
 import dropnext.dss.lib.shopify.webhook.productIdFromProductWebhook
 import dropnext.dss.lib.shopify.webhook.shopDomainFromWebhook
+import dropnext.dss.lib.slf4j.SHOP_MDC_KEY
+import dropnext.dss.lib.slf4j.withMdcEntries
 import dropnext.dss.workflow.WebhookMirrorOutcome
 import dropnext.dss.workflow.WebhookSkipReason
 import dropnext.dss.workflow.deleteShopifyProductFromMonolith
@@ -119,32 +121,35 @@ class ShopifyWebhookHandlers(
     log.debug { "Webhook verified topic=${topic.raw} shopDomainHeader=$shopDomainHeader bodyBytes=${body.size}" }
 
     val shop = shopDomainFromWebhook(shopDomainHeader, bodyString)
-    val outcome = when {
-      shop == null -> WebhookMirrorOutcome.Skipped(WebhookSkipReason.NO_SHOP_DOMAIN)
-      !mirrorSlots.tryAcquire() -> WebhookMirrorOutcome.Overloaded
-      else -> try {
-        mirrorWithinBudget(topic, shop, bodyString)
-      } finally {
-        mirrorSlots.release()
+    // Every line from here on names the shop as a field, the workflow's and the clients' included. The rejection above
+    // does not: its shop header was never verified.
+    withMdcEntries(SHOP_MDC_KEY to shop?.normalizedShopifyHost) {
+      val outcome = when {
+        shop == null -> WebhookMirrorOutcome.Skipped(WebhookSkipReason.NO_SHOP_DOMAIN)
+        !mirrorSlots.tryAcquire() -> WebhookMirrorOutcome.Overloaded
+        else -> try {
+          mirrorWithinBudget(topic, shop, bodyString)
+        } finally {
+          mirrorSlots.release()
+        }
       }
-    }
 
-    val report = WebhookDeliveryReport(
-      topic = topic.raw,
-      shop = shop,
-      webhookId = call.request.headers["X-Shopify-Webhook-Id"],
-      lagMillis = call.request.headers["X-Shopify-Triggered-At"]?.let { lagMillis(it, receivedAt) },
-      tookMillis = (System.nanoTime() - startedNanos) / 1_000_000,
-      outcome = outcome,
-    )
-    val answer = if (outcome.isTransient) DssError.UpstreamFailure("not mirrored, please redeliver") else null
-    val line = report.logLine(answeredStatus = answer?.toHttpStatus()?.value ?: HttpStatusCode.OK.value)
-    when (report.logLevel) {
-      WebhookDeliveryReport.LogLevel.INFO -> log.info { line }
-      WebhookDeliveryReport.LogLevel.WARN -> log.warn { line }
-      WebhookDeliveryReport.LogLevel.ERROR -> log.error { line }
+      val report = WebhookDeliveryReport(
+        topic = topic.raw,
+        webhookId = call.request.headers["X-Shopify-Webhook-Id"],
+        lagMillis = call.request.headers["X-Shopify-Triggered-At"]?.let { lagMillis(it, receivedAt) },
+        tookMillis = (System.nanoTime() - startedNanos) / 1_000_000,
+        outcome = outcome,
+      )
+      val answer = if (outcome.isTransient) DssError.UpstreamFailure("not mirrored, please redeliver") else null
+      val line = report.logLine(answeredStatus = answer?.toHttpStatus()?.value ?: HttpStatusCode.OK.value)
+      when (report.logLevel) {
+        WebhookDeliveryReport.LogLevel.INFO -> log.info { line }
+        WebhookDeliveryReport.LogLevel.WARN -> log.warn { line }
+        WebhookDeliveryReport.LogLevel.ERROR -> log.error { line }
+      }
+      if (answer != null) call.respondError(answer) else call.respond(HttpStatusCode.OK, report.toResponse(currentTraceId()))
     }
-    if (answer != null) call.respondError(answer) else call.respond(HttpStatusCode.OK, report.toResponse(currentTraceId()))
   }
 
   private suspend fun mirrorWithinBudget(topic: ShopifyWebhookTopic, shop: ShopDomain, bodyString: String): WebhookMirrorOutcome =

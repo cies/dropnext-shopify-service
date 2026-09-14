@@ -4,6 +4,7 @@ import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
 import dropnext.dss.domain.ShopDomain
 import dropnext.dss.lib.slf4j.TRACE_ID_MDC_KEY
+import dropnext.dss.lib.slf4j.withMdcEntries
 import dropnext.dss.lib.monolith.MonolithService
 import dropnext.dss.lib.monolith.errorLabel
 import dropnext.dss.lib.monolith.logMonolithFailure
@@ -17,8 +18,6 @@ import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
 import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.slf4j.MDCContext
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 
@@ -62,10 +61,10 @@ suspend fun warmUpBeforeTakingTraffic(
   budget: Duration = WARM_UP_BUDGET,
 ): WarmUpReport {
   val traceId = newWarmUpTraceId()
-  // The warm-up runs outside any request, so nothing has put a trace id in the MDC for it. `MDCContext` reinstalls the
-  // map on every thread the coroutine resumes on, so the clients' failure and retry lines carry the id too, and the
-  // three lines of a start (the two below and the delivery's own `Webhook done`) can be found together.
-  return withContext(MDCContext(mapOf(TRACE_ID_MDC_KEY to traceId))) {
+  // The warm-up runs outside any request, so nothing has put a trace id in the MDC for it. Put there this way, it survives
+  // every suspension, so the clients' failure and retry lines carry the id too, and the three lines of a start (the two
+  // below and the delivery's own `Webhook done`) can be found together.
+  return withMdcEntries(TRACE_ID_MDC_KEY to traceId) {
     warmUp(monolith, shopifyGraphqlServiceFactory, loopback, seededShop, serverBound, traceId, budget)
   }
 }

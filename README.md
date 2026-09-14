@@ -67,8 +67,8 @@ All Kotlin lives under `src/dropnext/dss/` (we set `srcDir("src")` in Gradle to 
 | [`lib/shopify/`](src/dropnext/dss/lib/shopify) | Shopify protocol primitives: GID helpers, `ShopifyOAuthService`, `ShopifyHmacVerifierService`, `ShopifyGraphqlService` (typed results) + its factory, the `ShopTokenStore`, webhook shop/id/topic parsers. |
 | [`lib/monolith/`](src/dropnext/dss/lib/monolith) | Outbound monolith client: `MonolithService` interface answering `MonolithResult`, `HttpMonolithService` impl, error body parsing, structured failure logging. |
 | [`lib/json/`](src/dropnext/dss/lib/json) | Shared `kotlinx.serialization` configs: `AppJson` (inbound) and `MonolithJson` (outbound). |
-| [`lib/crypto/`](src/dropnext/dss/lib/crypto), [`lib/logging/`](src/dropnext/dss/lib/slf4j) | The one HMAC-SHA256 and constant-time compare; the MDC trace-id key. |
-| [`lib/ktor/`](src/dropnext/dss/lib/ktor) | Ktor server glue: one `install*` function per plugin (`CallId` for the trace id, `CallLogging` with `callIdMdc`, `StatusPages`, JSON, `RequestValidation`, the `bearer` auth for the monolith), `DssError` helpers, shared HTTP client builders. |
+| [`lib/crypto/`](src/dropnext/dss/lib/crypto), [`lib/slf4j/`](src/dropnext/dss/lib/slf4j) | The one HMAC-SHA256 and constant-time compare; the MDC keys shared with the monolith, `currentTraceId()` and `withMdcEntries`. |
+| [`lib/ktor/`](src/dropnext/dss/lib/ktor) | Ktor server glue: one `install*` function per plugin (`CallId` for the trace id, `CallLogging` with `callIdMdc` and the route, method and webhook MDC providers, `StatusPages`, JSON, `RequestValidation`, the `bearer` auth for the monolith), `DssError` helpers, shared HTTP client builders. |
 | `src/resources/` | `.graphql` queries (compile-time-typed by the Gradle plugin), `logback.xml`. |
 | `src/graphql-schema/` | Committed Shopify Admin schema (regenerated via `./gradlew graphqlIntrospectSchema`). |
 | [`src/resources/monolith-dss-openapi.json`](src/resources/monolith-dss-openapi.json) | Checked-in copy of the canonical DSS ↔ monolith contract (the monolith serves it at `/openapi.json`). DTOs under `dropnext.dss.contract` and `OutBoundMonolithPaths` are **generated** from this. |
@@ -198,7 +198,7 @@ Subscriptions all use the same HTTPS callback: `{DSS_BASE_URL}/webhooks/shopify`
 
 On `products/create` and `products/update`, the app parses the webhook body for the resource id and runs `GetProductById`. On `orders/create`, it runs `GetOrderForDss` and POSTs to the monolith. On `orders/updated`, the webhook is acknowledged but not mirrored to monolith.
 
-**Shop domain:** webhooks use `X-Shopify-Shop-Domain` (forward this header through your reverse proxy). DSS logs include a per-request `trace_id` (Ktor's `CallId` plugin, put in the Logback MDC by `CallLogging` and kept across coroutine suspensions); a caller's `X-Request-Id` or `X-Trace-Id` is adopted, every response carries it as `X-Trace-Id`, and every call to the monolith forwards it as `X-Trace-Id`. A monolith error body carries the monolith's own trace id, logged as `monolith_trace_id`.
+**Shop domain:** webhooks use `X-Shopify-Shop-Domain` (forward this header through your reverse proxy). DSS logs include a per-request `trace_id` (Ktor's `CallId` plugin, put in the Logback MDC by `CallLogging` and kept across coroutine suspensions); a caller's `X-Request-Id` or `X-Trace-Id` is adopted, every response carries it as `X-Trace-Id`, and every call to the monolith forwards it as `X-Trace-Id`. A monolith error body carries the monolith's own trace id, logged as `monolith_trace_id`. Every line of a request also carries `route` and `method` in the MDC, every line of a webhook delivery `topic` and `webhook_id`, and every line logged once a handler has resolved the shop `shop`; the events shipped to Logflare add `service` (`dss`) and `version`.
 
 
 ### DSS internal REST

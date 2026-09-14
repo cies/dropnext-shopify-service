@@ -2,6 +2,7 @@ package dropnext.dss.handler
 
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
+import dropnext.dss.boot.config.DssMode
 import dropnext.dss.DssDependencies
 
 import dropnext.dss.contract.ApiError
@@ -24,6 +25,8 @@ import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlServiceFactory
 
 import dropnext.dss.lib.shopify.token.InMemoryShopTokenStore
+import dropnext.dss.lib.slf4j.ROUTE_MDC_KEY
+import dropnext.dss.lib.slf4j.SHOP_MDC_KEY
 import dropnext.dss.path.Paths
 import dropnext.dss.testutil.fake.FakeMonolithService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
@@ -33,6 +36,9 @@ import dropnext.dss.testutil.fixture.diagramCrossFoShipment
 import dropnext.dss.testutil.fixture.minimalOrder
 import dropnext.dss.testutil.fixture.orderWithFulfillment
 import dropnext.dss.testutil.fixture.testConfig
+import dropnext.dss.testutil.helper.capturingLogs
+import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
+import dropnext.dss.testutil.helper.mdcOf
 import dropnext.dss.testutil.helper.withDssApp
 import io.ktor.client.call.body
 import io.ktor.client.request.header
@@ -44,6 +50,8 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
+import kotlin.time.Duration.Companion.milliseconds
+import org.junit.jupiter.api.parallel.ResourceLock
 import org.junit.jupiter.api.Test
 
 
@@ -693,13 +701,55 @@ class MonolithWebhookHandlersTest {
    * need a working service pass their own [shopifyGraphqlServiceFactory] (typically wrapping a
    * [FakeShopifyGraphqlService]).
    */
+
+  // ---------- the shop on every log line ----------
+
+  /** The handler's line comes after Shopify's answer, a suspension away from where the shop was resolved. */
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `sync-shipments logs its lines with the shop in the MDC`() {
+    val fakeShopify = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Failure(ShopifyError.Network("connection reset"))
+      orderForDssDelay = 20.milliseconds
+    }
+    val lines = capturingLogs {
+      withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+        val r = client.post(Paths.syncShipmentsWithFulfillments) {
+          contentType(ContentType.Application.Json)
+          setBody(validSyncRequest())
+        }
+        assert(r.status == HttpStatusCode.BadGateway)
+      }
+    }
+    assert(mdcOf(lines.single { "sync-shipments failed" in it })[SHOP_MDC_KEY] == "acme.myshopify.com")
+  }
+
+  /** No shop parsed, no shop named: the call's summary line, logged in `DEV` only, carries the route and no shop. */
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `sync-shipments with an unparseable shopify_subdomain logs its 400 without a shop`() {
+    val lines = capturingLogs {
+      withDssApp(deps(mode = DssMode.DEV), authenticateAsMonolith = true) { client ->
+        val r = client.post(Paths.syncShipmentsWithFulfillments) {
+          contentType(ContentType.Application.Json)
+          setBody(validSyncRequest().copy(shopifySubdomain = "!!invalid!!"))
+        }
+        assert(r.status == HttpStatusCode.BadRequest)
+      }
+    }
+    val summary = mdcOf(lines.single { "POST ${Paths.syncShipmentsWithFulfillments} -> 400" in it })
+    assert(summary[ROUTE_MDC_KEY] == Paths.syncShipmentsWithFulfillments)
+    assert(SHOP_MDC_KEY !in summary)
+  }
+
   private fun deps(
     secret: String = defaultInternalSecret,
     monolith: MonolithService = FakeMonolithService(),
     shopTokens: InMemoryShopTokenStore = InMemoryShopTokenStore(),
     shopifyGraphqlServiceFactory: ShopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = null),
+    mode: DssMode = DssMode.PROD,
   ): DssDependencies = dssDependencies(
-    config = testConfig(monolithToDssApiKey = secret),
+    config = testConfig(monolithToDssApiKey = secret, mode = mode),
     monolithService = monolith,
     shopTokens = shopTokens,
     shopifyGraphqlServiceFactory = shopifyGraphqlServiceFactory,
