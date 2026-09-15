@@ -11,17 +11,18 @@ import dropnext.dss.lib.shopify.graphql.HttpShopifyGraphqlService
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlServer
-import dropnext.dss.testutil.fixture.minimalOrder
+import dropnext.dss.testutil.fixture.fulfillment
+import dropnext.dss.testutil.fixture.orderWithFulfillment
+import dropnext.dss.testutil.fixture.orderWithFulfillments
 import dropnext.dss.testutil.helper.shopifyGraphqlUrl
 import dropnext.dss.testutil.helper.testHttpClient
 import dropnext.graphql.generated.FulfillmentEventCreateMutation
 import dropnext.graphql.generated.GetOrderForDss
 import dropnext.graphql.generated.enums.FulfillmentEventStatus
+import dropnext.graphql.generated.enums.FulfillmentStatus
 import dropnext.graphql.generated.fulfillmenteventcreatemutation.FulfillmentEvent as CreatedFulfillmentEvent
 import dropnext.graphql.generated.fulfillmenteventcreatemutation.FulfillmentEventCreatePayload
 import dropnext.graphql.generated.fulfillmenteventcreatemutation.UserError as EventUserError
-import dropnext.graphql.generated.getorderfordss.Fulfillment
-import dropnext.graphql.generated.getorderfordss.FulfillmentTrackingInfo
 import io.ktor.client.HttpClient
 import java.net.URI
 import kotlin.test.BeforeTest
@@ -102,17 +103,25 @@ class SyncShopifyTrackingEventTest {
     assert((result as Failure).reason is ShopifyError.UserError)
   }
 
+  /** A cancelled fulfillment keeps its tracking number, but the package it named is no longer on the order. */
+  @Test
+  fun `createTrackingEvent returns NotFound when only a cancelled fulfillment has the tracking number`() = runBlocking {
+    fake.stubGetOrderForDss(order = orderWithFulfillments(fulfillment(5000L, listOf("1Z999"), status = FulfillmentStatus.CANCELLED)))
+    val result = syncShopifyTrackingEvent(shopify, trackingRequest(trackingNumber = "1Z999"))
+    assert((result as Failure).reason is ShopifyError.NotFound)
+  }
+
+  @Test
+  fun `createTrackingEvent matches a tracking number that differs only in surrounding whitespace`() = runBlocking {
+    fake.stubGetOrderForDss(order = orderWithTracking(trackingNumber = "1Z999 "))
+    fake.stubFulfillmentEventCreateOk(eventId = 7777L)
+    val result = syncShopifyTrackingEvent(shopify, trackingRequest(trackingNumber = " 1Z999"))
+    assert(result == Success(ShopifyFulfillmentEventId(7777L)))
+  }
+
   // ---------- helpers ----------
 
-  private fun orderWithTracking(trackingNumber: String) = minimalOrder().copy(
-    fulfillments = listOf(
-      Fulfillment(
-        id = "gid://shopify/Fulfillment/5000",
-        legacyResourceId = "5000",
-        trackingInfo = listOf(FulfillmentTrackingInfo(number = trackingNumber)),
-      ),
-    ),
-  )
+  private fun orderWithTracking(trackingNumber: String) = orderWithFulfillment(id = 5000L, trackingNumbers = listOf(trackingNumber))
 
   private fun FakeShopifyGraphqlServer.stubGetOrderForDss(
     order: dropnext.graphql.generated.getorderfordss.Order?,

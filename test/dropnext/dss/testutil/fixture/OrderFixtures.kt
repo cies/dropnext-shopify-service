@@ -2,6 +2,7 @@ package dropnext.dss.testutil.fixture
 
 import dropnext.graphql.generated.enums.CurrencyCode
 import dropnext.graphql.generated.enums.FulfillmentOrderStatus
+import dropnext.graphql.generated.enums.FulfillmentStatus
 import dropnext.graphql.generated.enums.OrderDisplayFinancialStatus
 import dropnext.graphql.generated.enums.OrderDisplayFulfillmentStatus
 import dropnext.graphql.generated.getorderfordss.Fulfillment
@@ -184,17 +185,29 @@ internal fun orderWithTwoVariantFulfillmentOrders(
   )
 }
 
+/** [minimalOrder] as `orders/create` can find it: Shopify routes an order into fulfillment orders after creating it. */
+internal fun orderWithoutFulfillmentOrders(): Order =
+  minimalOrder().copy(fulfillmentOrders = FulfillmentOrderConnection(edges = emptyList()))
+
 /**
  * [minimalOrder] carrying one existing fulfillment, for the cancel-then-recreate paths and for the
  * tracking-event sync, which finds its fulfillment by [trackingNumbers].
  */
 internal fun orderWithFulfillment(id: Long, trackingNumbers: List<String> = emptyList()): Order =
-  minimalOrder().copy(
-    fulfillments = listOf(
-      Fulfillment(
-        id = "gid://shopify/Fulfillment/$id",
-        legacyResourceId = id.toString(),
-        trackingInfo = trackingNumbers.map { FulfillmentTrackingInfo(number = it) },
-      ),
-    ),
+  orderWithFulfillments(fulfillment(id, trackingNumbers))
+
+internal fun orderWithFulfillments(vararg fulfillments: Fulfillment): Order =
+  minimalOrder().copy(fulfillments = fulfillments.toList())
+
+/** A fulfillment as `GetOrderForDss` loads it; live ([FulfillmentStatus.SUCCESS]) unless told otherwise. */
+internal fun fulfillment(
+  id: Long,
+  trackingNumbers: List<String> = emptyList(),
+  status: FulfillmentStatus = FulfillmentStatus.SUCCESS,
+): Fulfillment =
+  Fulfillment(
+    id = "gid://shopify/Fulfillment/$id",
+    legacyResourceId = id.toString(),
+    status = status,
+    trackingInfo = trackingNumbers.map { FulfillmentTrackingInfo(number = it) },
   )

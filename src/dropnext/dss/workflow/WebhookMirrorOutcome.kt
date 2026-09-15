@@ -50,7 +50,7 @@ enum class WebhookSkipReason {
   /** Shopify no longer has the product the webhook announced; its `products/delete` follows. */
   PRODUCT_GONE,
 
-  /** No variant-backed line on a fulfillment order: a tip or custom-line order, nothing the monolith could match. */
+  /** No variant-backed line: a tip or custom-line order, nothing the monolith could match. */
   NO_MAPPABLE_LINES,
 
   /** A topic the service acknowledges without mirroring: `orders/updated`, and anything it never registered. */

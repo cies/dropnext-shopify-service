@@ -52,7 +52,7 @@ suspend fun syncShopifyOrderToMonolith(
   if (req.lineItems.isEmpty()) {
     log.warn {
       "Webhook $webhookTopic: skip monolith order sync — mapped line_items empty " +
-        "(no variant-backed lines or no fulfillment_order_id — e.g. tips/custom-only order)"
+        "(no variant-backed lines, e.g. a tips or custom-only order)"
     }
     return WebhookMirrorOutcome.Skipped(WebhookSkipReason.NO_MAPPABLE_LINES)
   }

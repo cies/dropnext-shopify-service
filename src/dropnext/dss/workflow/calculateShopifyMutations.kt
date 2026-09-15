@@ -25,7 +25,12 @@ fun calculateShopifyMutations(
         ShipmentPlan(
           mutations = matched.mapNotNull { (shipment, shipmentMatch) -> fulfillmentCreate(shipment, shipmentMatch) },
           skippedLines = match.perShipment.flatMap { it.skipped },
-          unmatchedShipments = matched.filter { (_, shipmentMatch) -> shipmentMatch.groups.isEmpty() }.map { it.first },
+          alreadyFulfilledShipments = matched
+            .filter { (_, shipmentMatch) -> shipmentMatch.alreadyFulfilledBy.isNotEmpty() }
+            .map { (shipment, shipmentMatch) -> AlreadyFulfilledShipment(shipment, shipmentMatch.alreadyFulfilledBy) },
+          unmatchedShipments = matched
+            .filter { (_, shipmentMatch) -> shipmentMatch.groups.isEmpty() && shipmentMatch.alreadyFulfilledBy.isEmpty() }
+            .map { it.first },
         ),
       )
     }

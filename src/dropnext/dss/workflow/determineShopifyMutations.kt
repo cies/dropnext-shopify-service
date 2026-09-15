@@ -32,13 +32,15 @@ suspend fun determineShopifyMutations(
 }
 
 /**
- * In payload order: each shipment's skipped lines, then the shipment itself when nothing in it matched. Keyed by
- * tracking number, which the request validators keep unique within one payload.
+ * In payload order: a shipment already fulfilled, or each shipment's skipped lines, then the shipment itself when
+ * nothing in it matched. Keyed by tracking number, which the request validators keep unique within one payload.
  */
 private fun logSkips(shopifyOrderId: ShopifyOrderId, shipments: List<Shipment>, plan: ShipmentPlan) {
   val skippedLinesByTracking = plan.skippedLines.groupBy { it.trackingNumber }
+  val alreadyFulfilledByTracking = plan.alreadyFulfilledShipments.associateBy { it.shipment.trackingNumber }
   val unmatchedTrackingNumbers = plan.unmatchedShipments.map { it.trackingNumber }.toSet()
   shipments.forEach { shipment ->
+    alreadyFulfilledByTracking[shipment.trackingNumber]?.let { logAlreadyFulfilled(shopifyOrderId, it) }
     skippedLinesByTracking[shipment.trackingNumber].orEmpty().forEach { logSkippedLine(shopifyOrderId, it) }
     if (shipment.trackingNumber in unmatchedTrackingNumbers) {
       log.warn {
@@ -47,6 +49,16 @@ private fun logSkips(shopifyOrderId: ShopifyOrderId, shipments: List<Shipment>, 
       }
     }
   }
+}
+
+/**
+ * A re-send is how the monolith recovers from a lost commit or a `502`, so one live fulfillment with the tracking number
+ * is information. Two are a duplicate someone made by hand, or one from before the skip existed, for a human to clean up.
+ */
+private fun logAlreadyFulfilled(orderId: ShopifyOrderId, skipped: AlreadyFulfilledShipment) {
+  val line = "sync-shipments skipped shipment orderId=$orderId tracking=${skipped.shipment.trackingNumber} " +
+    "reason=already_fulfilled fulfillmentIds=${skipped.fulfillments.map { it.legacyResourceId }}"
+  if (skipped.fulfillments.size == 1) log.info { line } else log.warn { line }
 }
 
 private fun logSkippedLine(orderId: ShopifyOrderId, skipped: SkippedShipmentLine) {

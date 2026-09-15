@@ -177,7 +177,7 @@ decode or does not pass the domain validators is a `400` shaped by `StatusPages`
 
 | Route | Body | Does |
 |---|---|---|
-| `POST /sync-shipments-with-fulfillments` | `SyncShipmentsWithFulfillmentsRequest` | `syncShopifyShipmentsToFulfillments`: reconciles DropNext shipments with the order's Shopify fulfillment orders (calculate → determine → effect the mutations). |
+| `POST /sync-shipments-with-fulfillments` | `SyncShipmentsWithFulfillmentsRequest` | `syncShopifyShipmentsToFulfillments`: reconciles DropNext shipments with the order's Shopify fulfillment orders (calculate → determine → effect the mutations). A shipment whose tracking number is already on a live fulfillment is skipped, so the monolith's re-send of a whole payload creates nothing twice. |
 | `POST /tracking-update` | `TrackingUpdateRequest` | `syncShopifyTrackingEvent`: a tracking status becomes a Shopify `FulfillmentEvent`. |
 | `PUT /stores/api-key` | `UpdateStoreApiKeyRequest` | Caches the shop's Admin token in memory and forwards it to the monolith; answers `502` (or `404` for a store the monolith does not know) when the monolith did not persist it, with the token still cached. A blank `api_key` or a non-positive `shopify_shop_id` is a `400` before the cache is touched; `shopify_shop_id` is `null` when unknown. |
 

@@ -253,11 +253,10 @@ class HttpMonolithServiceTest {
     val line = sent["line_items"]!!.jsonArray.single().jsonObject
     assert(
       line.keys == setOf(
-        "shopify_line_item_id", "product_variant_id", "quantity", "fulfillment_order_id",
+        "shopify_line_item_id", "product_variant_id", "quantity",
         "snapshot_of_variant_title", "snapshot_of_product_title", "snapshot_of_price_as_string",
       ),
     )
-    assert(line["fulfillment_order_id"]?.jsonPrimitive?.long == 301L)
     assert(line["snapshot_of_price_as_string"]?.jsonPrimitive?.content == "19.99")
     val address = sent["shipping_address"]!!.jsonObject
     assert(address["first_name"] == JsonNull)

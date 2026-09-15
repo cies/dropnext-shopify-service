@@ -5,6 +5,7 @@ import org.gradle.api.JavaVersion.VERSION_25
 import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_25
 import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
+import org.openapitools.generator.gradle.plugin.tasks.GenerateTask
 
 
 plugins {
@@ -472,6 +473,14 @@ openApiGenerate {
       "enumPropertyNaming" to "UPPERCASE",
     )
   )
+}
+
+tasks.named<GenerateTask>("openApiGenerate") {
+  // `inputSpec` is a URI string, which Gradle does not fingerprint: without the file as an input, a refreshed copy of the
+  // monolith's spec leaves this task up to date and the contract DTOs stale.
+  inputs.file(openApiSpecFile)
+  // Generate from scratch, so a schema or field the spec no longer has leaves no class behind to compile.
+  cleanupOutput.set(true)
 }
 
 sourceSets["main"].kotlin.srcDir("${layout.buildDirectory.get()}/generated/openapi/src/main/kotlin")

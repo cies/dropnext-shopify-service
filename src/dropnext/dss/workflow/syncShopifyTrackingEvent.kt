@@ -5,6 +5,7 @@ import dev.forkhandles.result4k.Success
 import dropnext.dss.contract.TrackingUpdateRequest
 import dropnext.dss.domain.ShopifyFulfillmentEventId
 import dropnext.dss.domain.ShopifyOrderId
+import dropnext.dss.domain.fulfillment.liveFulfillmentsWithTrackingNumber
 import dropnext.dss.lib.shopify.graphql.ParsedFulfillmentStatus
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlService
@@ -13,7 +14,7 @@ import dropnext.dss.lib.shopify.orderGid
 
 
 /**
- * Looks up the Shopify fulfillment by order and tracking number, then creates a `FulfillmentEvent` in Shopify.
+ * Looks up the live Shopify fulfillment by order and tracking number, then creates a `FulfillmentEvent` in Shopify.
  * Composes [ShopifyGraphqlService.orderForDss] and [ShopifyGraphqlService.createFulfillmentEvent].
  */
 suspend fun syncShopifyTrackingEvent(
@@ -30,9 +31,7 @@ suspend fun syncShopifyTrackingEvent(
     is Failure -> return loaded
     is Success -> loaded.value
   }
-  val fulfillmentGid = order.fulfillments.find { fulfillment ->
-    fulfillment.trackingInfo.any { it.number == payload.trackingNumber }
-  }?.id
+  val fulfillmentGid = liveFulfillmentsWithTrackingNumber(order, payload.trackingNumber).firstOrNull()?.id
     ?: return Failure(
       ShopifyError.NotFound("no fulfillment with tracking number ${payload.trackingNumber} on order $shopifyOrderId"),
     )

@@ -4,7 +4,6 @@ import dropnext.dss.contract.CreateShopifyOrderRequest
 import dropnext.dss.contract.OrderLineItem
 import dropnext.dss.contract.ShippingAddress
 import dropnext.dss.domain.ShopifyOrderId
-import dropnext.dss.domain.fulfillment.isOpenForFulfillment
 import dropnext.dss.lib.shopify.legacyIdFromGid
 
 import dropnext.graphql.generated.enums.OrderDisplayFinancialStatus
@@ -25,9 +24,6 @@ enum class OrderLineItemOmission {
 
   /** The variant's `legacyResourceId` is not a number, so the monolith could not key it. */
   UNPARSEABLE_VARIANT_ID,
-
-  /** The variant is on none of the order's fulfillment orders, open or closed. */
-  NO_FULFILLMENT_ORDER,
 
   /** The line item's own gid carries no numeric id. */
   UNPARSEABLE_LINE_ITEM_ID,
@@ -80,15 +76,11 @@ fun mapOrderForMonolith(
     val variant = li.variant ?: return@mapNotNull omit(li.id, OrderLineItemOmission.NO_VARIANT)
     val variantLegacy = variant.legacyResourceId.toLongOrNull()
       ?: return@mapNotNull omit(li.id, OrderLineItemOmission.UNPARSEABLE_VARIANT_ID)
-    val fulfillmentOrderId = fulfillmentOrderLegacyIdForVariant(order, variantLegacy)
-      ?: return@mapNotNull omit(li.id, OrderLineItemOmission.NO_FULFILLMENT_ORDER)
     val lineId = legacyIdFromGid(li.id) ?: return@mapNotNull omit(li.id, OrderLineItemOmission.UNPARSEABLE_LINE_ITEM_ID)
     OrderLineItem(
-
       shopifyLineItemId = lineId,
       productVariantId = variantLegacy,
       quantity = li.quantity,
-      fulfillmentOrderId = fulfillmentOrderId,
       snapshotOfVariantTitle = li.name,
       snapshotOfProductTitle = li.title,
       snapshotOfPriceAsString = shopifyMoneyAmountForWire(li.originalUnitPriceSet.shopMoney.amount),
@@ -163,23 +155,6 @@ private fun OrderDisplayFulfillmentStatus.toMonolithFulfillmentStatus(): String?
     OrderDisplayFulfillmentStatus.REQUEST_DECLINED,
     OrderDisplayFulfillmentStatus.__UNKNOWN_VALUE -> null
   }
-
-/**
- * The fulfillment order the monolith should file the line under. An open one wins over a closed or
- * cancelled one holding the same variant (a location move leaves both on the order); when none is
- * open, as on an order that was already fulfilled when its webhook arrived, the first one still
- * names where the units went. `null` only when no fulfillment order holds the variant at all.
- */
-private fun fulfillmentOrderLegacyIdForVariant(order: Order, legacyVariantId: Long): Long? {
-  val holdingTheVariant = order.fulfillmentOrders.edges.map { it.node }.filter { fulfillmentOrder ->
-    fulfillmentOrder.lineItems.edges.any { it.node.variant?.legacyResourceId?.toLongOrNull() == legacyVariantId }
-  }
-  val chosen = holdingTheVariant.firstOrNull { it.status.isOpenForFulfillment() }
-    ?: holdingTheVariant.firstOrNull()
-    ?: return null
-  return legacyIdFromGid(chosen.id)
-}
-
 
 private fun MailingAddress.toDto(): ShippingAddress =
   ShippingAddress(

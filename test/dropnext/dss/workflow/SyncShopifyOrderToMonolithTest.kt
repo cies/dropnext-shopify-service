@@ -11,9 +11,9 @@ import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.testutil.fake.FakeMonolithService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
 import dropnext.dss.testutil.fixture.minimalOrder
+import dropnext.dss.testutil.fixture.orderWithoutFulfillmentOrders
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
 import dropnext.dss.testutil.helper.capturingLogs
-import dropnext.graphql.generated.getorderfordss.FulfillmentOrderConnection
 import dropnext.graphql.generated.getorderfordss.LineItemConnection
 import dropnext.graphql.generated.getorderfordss.LineItemEdge
 import kotlin.test.Test
@@ -103,17 +103,26 @@ class SyncShopifyOrderToMonolithTest {
     assert(monolith.createOrderCalls.isEmpty())
   }
 
+  /** The race this guards: Shopify routes an order into fulfillment orders after creating it, and the delivery can land first. */
   @Test
-  fun `syncShopifyOrderToMonolith skips when no mapped line items remain`() {
-    // Order with no fulfillment orders → mapped lineItems is empty → skip sync.
+  fun `an order Shopify has not routed into fulfillment orders yet is mirrored with its lines`() {
     val monolith = FakeMonolithService()
-    val shopify = FakeShopifyGraphqlService().apply {
-      orderForDssResult = Success(minimalOrder().copy(fulfillmentOrders = FulfillmentOrderConnection(edges = emptyList())))
-    }
-    val result = runBlocking {
-      syncShopifyOrderToMonolith(shopify, monolith, "gid://shopify/Order/1001", "orders/create")
-    }
-    assert(result is WebhookMirrorOutcome.Skipped)
+    val shopify = FakeShopifyGraphqlService().apply { orderForDssResult = Success(orderWithoutFulfillmentOrders()) }
+    val result = runBlocking { syncShopifyOrderToMonolith(shopify, monolith, "gid://shopify/Order/1001", "orders/create") }
+    assert(result == WebhookMirrorOutcome.Mirrored)
+    assert(monolith.createOrderCalls.single().lineItems.single().productVariantId == 101L)
+  }
+
+  @Test
+  fun `an order without a variant-backed line is skipped without asking the monolith`() {
+    val order = minimalOrder()
+    val tipOnly = order.copy(
+      lineItems = LineItemConnection(edges = listOf(LineItemEdge(node = order.lineItems.edges.single().node.copy(variant = null)))),
+    )
+    val monolith = FakeMonolithService()
+    val shopify = FakeShopifyGraphqlService().apply { orderForDssResult = Success(tipOnly) }
+    val result = runBlocking { syncShopifyOrderToMonolith(shopify, monolith, "gid://shopify/Order/1001", "orders/create") }
+    assert(result == WebhookMirrorOutcome.Skipped(WebhookSkipReason.NO_MAPPABLE_LINES))
     assert(monolith.createOrderCalls.isEmpty())
   }
 
@@ -164,7 +173,7 @@ class SyncShopifyOrderToMonolithTest {
     assert(monolith.createOrderCalls.isEmpty())
   }
 
-  /** A tip or a custom line is expected and goes at `info`; a variant on no fulfillment order is not, and goes at `warn`. */
+  /** A tip or a custom line is expected and goes at `info`; a line with a variant is sent, whether or not a fulfillment order holds it. */
   @Test
   @ResourceLock(GLOBAL_LOG_REGISTRY)
   fun `every omitted line item is logged with its reason`() {
@@ -185,13 +194,11 @@ class SyncShopifyOrderToMonolithTest {
     }
 
     val omitted = lines.filter { "omitted line item" in it }
-    assert(omitted.size == 2)
-    assert(omitted.single { "LineItem/202" in it }.startsWith("INFO"))
-    assert("reason=no_variant" in omitted.single { "LineItem/202" in it })
-    assert(omitted.single { "LineItem/203" in it }.startsWith("WARN"))
-    assert("reason=no_fulfillment_order" in omitted.single { "LineItem/203" in it })
-    // The order still went out with the one line the monolith can take.
-    assert(monolith.createOrderCalls.single().lineItems.single().productVariantId == 101L)
+    assert(omitted.single().startsWith("INFO"))
+    assert("LineItem/202" in omitted.single())
+    assert("reason=no_variant" in omitted.single())
+    // The order went out with both variant-backed lines, the one on no fulfillment order included.
+    assert(monolith.createOrderCalls.single().lineItems.map { it.productVariantId } == listOf(101L, 999L))
   }
 
   private fun sampleCreateOrderRequest(): CreateShopifyOrderRequest =
@@ -220,7 +227,6 @@ class SyncShopifyOrderToMonolithTest {
           shopifyLineItemId = 201L,
           productVariantId = 101L,
           quantity = 1,
-          fulfillmentOrderId = 0L,
           snapshotOfVariantTitle = "Item",
           snapshotOfProductTitle = "Product",
           snapshotOfPriceAsString = "19.99",

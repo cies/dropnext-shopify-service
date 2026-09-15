@@ -5,12 +5,13 @@ import dev.forkhandles.result4k.Success
 import dropnext.dss.domain.ShopifyOrderId
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
+import dropnext.dss.testutil.fixture.fulfillment
 import dropnext.dss.testutil.fixture.minimalOrder
+import dropnext.dss.testutil.fixture.orderWithFoQuantities
 import dropnext.dss.testutil.fixture.orderWithTwoVariantFulfillmentOrders
 import dropnext.dss.testutil.fixture.shipment
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
 import dropnext.dss.testutil.helper.capturingLogs
-import dropnext.graphql.generated.getorderfordss.Fulfillment
 import kotlin.test.Test
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.parallel.ResourceLock
@@ -69,11 +70,7 @@ class DetermineShopifyMutationsTest {
     fake.orderForDssResult = Success(
       minimalOrder().copy(
         fulfillments = listOf(
-          Fulfillment(
-            id = "gid://shopify/Fulfillment/8000",
-            legacyResourceId = "8000",
-            trackingInfo = emptyList(),
-          ),
+          fulfillment(8000L),
         ),
       ),
     )
@@ -127,4 +124,35 @@ class DetermineShopifyMutationsTest {
     assert(lines.none { "sync-shipments skipped " in it })
   }
 
+  /** A re-send is how the monolith recovers from a lost commit or a `502`, so it is information, not a warning. */
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `a shipment already fulfilled is logged at info with the fulfillment it landed on`() {
+    val fake = FakeShopifyGraphqlService()
+    fake.orderForDssResult = Success(
+      orderWithFoQuantities(remaining = 1, total = 2).copy(fulfillments = listOf(fulfillment(8000L, listOf("TRK-A")))),
+    )
+    val lines = capturingLogs {
+      runBlocking { determineShopifyMutations(fake, ShopifyOrderId(1001L), listOf(shipment(tracking = "TRK-A"))) }
+    }
+    val line = lines.single { "sync-shipments skipped " in it }
+    assert(line.startsWith("INFO sync-shipments skipped shipment orderId=1001 tracking=TRK-A reason=already_fulfilled fulfillmentIds=[8000]"))
+  }
+
+  /** Put there by hand, or a duplicate from before the skip existed: the sync leaves it alone, and a human cleans it up. */
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `a tracking number on two live fulfillments is logged at warn with both`() {
+    val fake = FakeShopifyGraphqlService()
+    fake.orderForDssResult = Success(
+      orderWithFoQuantities(remaining = 1, total = 3).copy(
+        fulfillments = listOf(fulfillment(8000L, listOf("TRK-A")), fulfillment(8001L, listOf("TRK-A"))),
+      ),
+    )
+    val lines = capturingLogs {
+      runBlocking { determineShopifyMutations(fake, ShopifyOrderId(1001L), listOf(shipment(tracking = "TRK-A"))) }
+    }
+    val line = lines.single { "sync-shipments skipped " in it }
+    assert(line.startsWith("WARN sync-shipments skipped shipment orderId=1001 tracking=TRK-A reason=already_fulfilled fulfillmentIds=[8000, 8001]"))
+  }
 }

@@ -3,14 +3,11 @@ package dropnext.dss.mapper
 import dropnext.dss.contract.OrderLineItem
 import dropnext.dss.domain.ShopifyOrderId
 import dropnext.dss.testutil.fixture.minimalOrder
-import dropnext.dss.testutil.fixture.openFulfillmentOrder
-import dropnext.dss.testutil.fixture.orderWithFulfillmentOrders
+import dropnext.dss.testutil.fixture.orderWithoutFulfillmentOrders
 import dropnext.dss.testutil.helper.orderToCreateShopifyOrderRequest
 import dropnext.graphql.generated.enums.CountryCode
-import dropnext.graphql.generated.enums.FulfillmentOrderStatus
 import dropnext.graphql.generated.enums.OrderDisplayFinancialStatus
 import dropnext.graphql.generated.enums.OrderDisplayFulfillmentStatus
-import dropnext.graphql.generated.getorderfordss.FulfillmentOrderConnection
 import dropnext.graphql.generated.getorderfordss.LineItem
 import dropnext.graphql.generated.getorderfordss.LineItemConnection
 import dropnext.graphql.generated.getorderfordss.LineItemEdge
@@ -55,11 +52,12 @@ class MapOrderForMonolithTest {
     assert(req.createdAt == "2026-04-25T10:30:00Z")
   }
 
+  /** Shopify routes an order into fulfillment orders after creating it, so `orders/create` can find none yet. */
   @Test
-  fun `omits line items without resolvable fulfillment_order_id`() {
-    val order = minimalOrder().copy(fulfillmentOrders = FulfillmentOrderConnection(edges = emptyList()))
-    val req = orderToCreateShopifyOrderRequest("dropnext-staging", order)
-    assert(req.lineItems.isEmpty())
+  fun `an order without fulfillment orders maps its line and reports no omission`() {
+    val mapping = mapOrderForMonolith("dropnext-staging", orderId, orderWithoutFulfillmentOrders())
+    assert(mapping.request.lineItems.single().productVariantId == 101L)
+    assert(mapping.omittedLineItems.isEmpty())
   }
 
   @Test
@@ -232,7 +230,6 @@ class MapOrderForMonolithTest {
         shopifyLineItemId = 1L,
         productVariantId = 1L,
         quantity = 2,
-        fulfillmentOrderId = 1L,
         snapshotOfVariantTitle = "Item",
         snapshotOfProductTitle = "Product",
         snapshotOfPriceAsString = "19.99",
@@ -263,7 +260,6 @@ class MapOrderForMonolithTest {
         shopifyLineItemId = 1L,
         productVariantId = 1L,
         quantity = 2,
-        fulfillmentOrderId = 1L,
         snapshotOfVariantTitle = "Item",
         snapshotOfProductTitle = "Product",
         snapshotOfPriceAsString = "19.99",
@@ -287,24 +283,6 @@ class MapOrderForMonolithTest {
       shopifyAmountToMinorUnits(it.snapshotOfPriceAsString, "USD") * it.quantity.toLong()
     }
     assert(req.totalAsString == minorUnitsToShopifyAmount(lineSumMinor, "USD"))
-  }
-
-  // ---------- which fulfillment order a line is filed under ----------
-
-  @Test
-  fun `files a line under the open fulfillment order rather than a cancelled one holding the same variant`() {
-    val cancelled = openFulfillmentOrder(foId = 300L, lineItemId = 400L, variantId = 101L, remaining = 0, status = FulfillmentOrderStatus.CANCELLED)
-    val open = openFulfillmentOrder(foId = 301L, lineItemId = 401L, variantId = 101L, remaining = 2)
-    val req = orderToCreateShopifyOrderRequest("dropnext-staging", orderWithFulfillmentOrders(cancelled, open))
-    assert(req.lineItems.single().fulfillmentOrderId == 301L)
-  }
-
-  /** An order fulfilled before its webhook arrived has only closed fulfillment orders; they still say where the units went. */
-  @Test
-  fun `falls back to a closed fulfillment order when no open one holds the variant`() {
-    val closed = openFulfillmentOrder(foId = 300L, lineItemId = 400L, variantId = 101L, remaining = 0, status = FulfillmentOrderStatus.CLOSED)
-    val req = orderToCreateShopifyOrderRequest("dropnext-staging", orderWithFulfillmentOrders(closed))
-    assert(req.lineItems.single().fulfillmentOrderId == 300L)
   }
 
   /** A snapshot without a readable id used to be sent as order `0`; the id now comes from the gid the caller loaded. */
@@ -334,13 +312,6 @@ class MapOrderForMonolithTest {
     val order = minimalOrder().withSingleLineItem { it.copy(variant = it.variant!!.copy(legacyResourceId = "abc")) }
     val mapping = mapOrderForMonolith("dropnext-staging", orderId, order)
     assert(mapping.omittedLineItems.single().reason == OrderLineItemOmission.UNPARSEABLE_VARIANT_ID)
-  }
-
-  @Test
-  fun `a line whose variant is on no fulfillment order is omitted as such`() {
-    val order = minimalOrder().copy(fulfillmentOrders = FulfillmentOrderConnection(edges = emptyList()))
-    val mapping = mapOrderForMonolith("dropnext-staging", orderId, order)
-    assert(mapping.omittedLineItems.single().reason == OrderLineItemOmission.NO_FULFILLMENT_ORDER)
   }
 
   @Test

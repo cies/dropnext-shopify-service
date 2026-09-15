@@ -33,13 +33,18 @@ import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlServiceFactory
 import dropnext.dss.testutil.fixture.diagramCrossFoOrder
 import dropnext.dss.testutil.fixture.diagramCrossFoShipment
+import dropnext.dss.testutil.fixture.fulfillment
 import dropnext.dss.testutil.fixture.minimalOrder
+import dropnext.dss.testutil.fixture.orderWithFoQuantities
 import dropnext.dss.testutil.fixture.orderWithFulfillment
+import dropnext.dss.testutil.fixture.orderWithFulfillments
+import dropnext.dss.testutil.fixture.shipment
 import dropnext.dss.testutil.fixture.testConfig
 import dropnext.dss.testutil.helper.capturingLogs
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
 import dropnext.dss.testutil.helper.mdcOf
 import dropnext.dss.testutil.helper.withDssApp
+import dropnext.graphql.generated.enums.FulfillmentStatus
 import io.ktor.client.call.body
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -239,6 +244,25 @@ class MonolithWebhookHandlersTest {
     }
   }
 
+  /** The monolith re-sends the whole payload after a `502`; what already landed must not be created a second time. */
+  @Test
+  fun `sync-shipments re-send answers 200 with only the new shipment's fulfillment id`() {
+    val fakeShopify = FakeShopifyGraphqlService()
+    fakeShopify.orderForDssResult = Success(
+      orderWithFoQuantities(remaining = 1, total = 2).copy(fulfillments = listOf(fulfillment(5001L, listOf("TRK-A")))),
+    )
+    fakeShopify.createFulfillmentResult = Success(ShopifyFulfillmentId(5002L))
+    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(validSyncRequest().copy(shipments = listOf(shipment(tracking = "TRK-A"), shipment(tracking = "TRK-B"))))
+      }
+      assert(r.status == HttpStatusCode.OK)
+      assert(r.body<SyncShipmentsWithFulfillmentsResponse>().newFulfillmentIds == listOf(5002L))
+      assert(fakeShopify.createFulfillmentCalls.single().tracking.number == "TRK-B")
+    }
+  }
+
   // ---------- missing token ----------
 
   @Test
@@ -278,6 +302,27 @@ class MonolithWebhookHandlersTest {
       val event = fakeShopify.createFulfillmentEventCalls.single()
       assert(event.fulfillmentGid == "gid://shopify/Fulfillment/8000")
       assert(event.happenedAt == "2026-04-02T08:30:00Z")
+    }
+  }
+
+  /** A cancelled fulfillment keeps its tracking number; the event belongs to the live one carrying it too. */
+  @Test
+  fun `tracking-update attaches the event to the live fulfillment when a cancelled one has the same tracking number`() {
+    val fakeShopify = FakeShopifyGraphqlService()
+    fakeShopify.orderForDssResult = Success(
+      orderWithFulfillments(
+        fulfillment(8000L, listOf("1Z999"), status = FulfillmentStatus.CANCELLED),
+        fulfillment(8001L, listOf("1Z999")),
+      ),
+    )
+    fakeShopify.createFulfillmentEventResult = Success(ShopifyFulfillmentEventId(7002L))
+    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.trackingUpdate) {
+        contentType(ContentType.Application.Json)
+        setBody(validTrackingRequest())
+      }
+      assert(r.status == HttpStatusCode.OK)
+      assert(fakeShopify.createFulfillmentEventCalls.single().fulfillmentGid == "gid://shopify/Fulfillment/8001")
     }
   }
 

@@ -70,6 +70,8 @@ query GetOrderForDss($id: ID!) {
     fulfillments(first: 50) {
       id
       legacyResourceId
+      # A cancelled fulfillment keeps its tracking number, so it has to be told apart from a live one.
+      status
       trackingInfo {
         number
       }

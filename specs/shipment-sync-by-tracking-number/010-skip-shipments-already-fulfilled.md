@@ -1,6 +1,6 @@
 # Spec: skip shipments that already have a fulfillment
 
-Status: draft
+Status: implemented (see "Implementation appendix")
 Author: cies (with Claude)
 Date: 2026-09-11
 Depends on: `specs/matcher-cleanup/010-one-walk-per-variant.md` (the plan carries the skips). Prerequisite for
@@ -127,3 +127,40 @@ Test-first, cheapest flavour first.
    DSS cannot tell apart.
 2. Is case-sensitive comparison right for our carriers? The monolith keeps tracking numbers unique in
    `tracking_numbers`; whether it normalises case on entry decides it.
+
+
+## Implementation appendix
+
+Implemented 2026-09-15, test-first (14 new tests red, then green; the affected classes pass 249/249).
+
+### What changed
+
+- `GetOrderForDss.graphql`: `status` on `fulfillments`. Test fixtures gained `fulfillment(id, trackingNumbers, status)` and
+  `orderWithFulfillments(...)`; every hand-built `Fulfillment` literal in the tests now goes through them.
+- `domain/fulfillment/liveFulfillmentsWithTrackingNumber.kt`: the shared lookup (trim both sides, case-sensitive,
+  `CANCELLED` left out).
+- `dryRunAllShipments` asks the lookup before matching a shipment; a hit is an `Ok` with no groups, no skipped lines and
+  `alreadyFulfilledBy` holding the live fulfillments. It adds nothing to the plan, so later shipments keep their quantity.
+- `ShipmentPlan` gained `alreadyFulfilledShipments` (`AlreadyFulfilledShipment(shipment, fulfillments)`) and
+  `skippedShipmentCount`; `unmatchedShipments` no longer includes a shipment skipped by its tracking number.
+- `determineShopifyMutations` logs `sync-shipments skipped shipment … reason=already_fulfilled fulfillmentIds=[…]`.
+- `syncShopifyShipmentsToFulfillments`: the summary's `skippedShipments` is read from the plan.
+- `syncShopifyTrackingEvent` uses the lookup: trimmed, and never a cancelled fulfillment.
+- `docs/FULFILLMENT_VERIFICATION.md` (known gap 1 removed, rules, table, logs, checklist) and the `CLAUDE.md` route table.
+
+### Deviations from the spec
+
+- No `SkipReason.ALREADY_FULFILLED` and no `skippedShipment: SkipReason?`: `SkipReason` is line-level and would then
+  accept a value no line can have. `ShipmentMatchResult.Ok` carries `alreadyFulfilledBy: List<Fulfillment>` instead,
+  which also gives the log line (and `030`) the fulfillment ids. The log label is still `already_fulfilled`.
+
+### Open questions, as decided
+
+1. Log level: `info` when one live fulfillment carries the tracking number (a re-send is expected), `warn` when several do.
+2. Case-sensitive comparison kept, as specified. Whether the monolith normalizes case on entry is still worth confirming.
+
+### Points for the human developer
+
+- `FulfillmentStatus` also has `ERROR` and `FAILURE` (fulfillment-service requests). Only `CANCELLED` is excluded, as
+  the spec says, so a fulfillment in one of those still counts as live and its shipment is skipped. Merchant-managed
+  fulfillments, which this service creates, are `SUCCESS`, so this should not occur for our own fulfillments.

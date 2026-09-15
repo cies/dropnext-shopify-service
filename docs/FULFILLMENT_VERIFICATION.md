@@ -1,9 +1,10 @@
 # Fulfillment verification (DSS)
 
 > **Temporary note.** This document describes the sync as it runs since 2026-08-31: additive, never cancelling,
-> matched against live remaining quantity. Three gaps are known (see "Known gaps"). The planned design is in
+> matched against live remaining quantity, skipping a shipment whose tracking number is already on a live fulfillment.
+> Two gaps are known (see "Known gaps"). The planned design is in
 > `specs/shipment-sync-by-tracking-number/`: `000-analysis-cancel-and-recreate.md` explains why the cancel went and
-> what that broke, `010-skip-shipments-already-fulfilled.md` makes a re-sent payload safe,
+> what that broke, `010-skip-shipments-already-fulfilled.md` (landed) makes a re-sent payload safe,
 > `020-cancel-replaced-fulfillments.md` cancels exactly the fulfillments whose tracking numbers the monolith names as
 > replaced (the supplier portal's shipment split), `030-report-per-shipment-outcomes.md` changes the response, and
 > `040-rewrite-the-fulfillment-docs.md` rewrites this document to the landed design and removes this note.
@@ -62,7 +63,7 @@ flowchart LR
 
 1. Place a test order on the staging shop (variant-backed line items).
 2. Confirm DSS logs: webhook verified → `Monolith create order accepted`.
-3. Confirm monolith order has correct `product_variant_id` and **non-zero** `fulfillment_order_id` on each line.
+3. Confirm the monolith order has the correct `product_variant_id` on each line.
 
 ## Step B — Supplier shipment → Shopify fulfill
 
@@ -101,7 +102,8 @@ The sync is additive: it never cancels or changes an existing fulfillment.
 ```
 validate the request
   → load the order (GetOrderForDss)
-  → match every shipment against the live remaining quantity of the open fulfillment-order lines,
+  → skip every shipment whose tracking number is already on a live fulfillment of the order
+  → match every other shipment against the live remaining quantity of the open fulfillment-order lines,
     each shipment against what the earlier shipments of the payload already claimed
   → any quantity error: 400, nothing created
   → one fulfillmentCreate per shipment with at least one matched line, in payload order,
@@ -110,13 +112,18 @@ validate the request
 
 Matching rules:
 
+- A shipment whose tracking number is on a fulfillment of the order that is not cancelled is skipped whole
+  (`already_fulfilled`) before any quantity is matched: it claims nothing and cannot cause a quantity error. Tracking
+  numbers are trimmed and compared case-sensitively. This is what makes the monolith's re-send of a whole payload safe.
 - Duplicate `product_variant_id` rows within one shipment are summed first.
-- A line matches an open fulfillment-order line of the same variant. When several carry it, the one with the most
-  left once the plan so far is honored wins, the first in Graphql order on a tie.
+- A line matches the open fulfillment-order lines of the same variant. It is taken from the one with the most left
+  once the plan so far is honored, the first in Graphql order on a tie, and from the next only what that one cannot
+  serve: a quantity one line can take stays on one line, a larger one is spread over several (on one fulfillment order
+  or on several, all in the shipment's one fulfillment).
 - A variant on no open fulfillment order is skipped (`no_open_fo`); a variant whose open lines have nothing
   remaining is skipped (`zero_remaining`).
-- A quantity above what is left, on the line or after earlier shipments of the same payload claimed it, is an
-  error for the whole payload.
+- A quantity above what the variant's open lines have left together, counting what earlier shipments of the same
+  payload claimed, is an error for the whole payload.
 
 ### Partial match (unmatched variants)
 
@@ -127,7 +134,8 @@ When a shipment line's `product_variant_id` does not appear on any open fulfillm
 | Line matches an open fulfillment-order line with enough remaining | 200 | Included in `fulfillmentCreate` |
 | Variant not on any open fulfillment order | 200 | Line skipped; matched lines still fulfilled |
 | All lines in a shipment unmatched | 200 | No create for that shipment; `new_fulfillment_ids` omits it |
-| Quantity exceeds `remainingQuantity` (single line or cross-shipment total) | **400** | Nothing created; existing fulfillments untouched |
+| Shipment's tracking number already on a live fulfillment | 200 | No create for that shipment; `new_fulfillment_ids` omits it |
+| Quantity exceeds what the variant's open lines have left together (including cross-shipment totals) | **400** | Nothing created; existing fulfillments untouched |
 | Order not found | **404** | No mutations |
 
 **Partial-match manual check:**
@@ -140,18 +148,18 @@ When a shipment line's `product_variant_id` does not appear on any open fulfillm
 **Hard-failure manual check:**
 
 1. Note existing fulfillments on a test order.
-2. POST a payload where a line quantity exceeds the fulfillment-order line's `remainingQuantity`.
+2. POST a payload where a line quantity exceeds what the variant's open fulfillment-order lines have remaining together.
 3. Expect **400**; confirm no fulfillment was added and the existing ones are unchanged in Shopify Admin.
 
 **Failure checks (request validation and sync):**
 
 - Malformed body, missing fields, non-positive `shopify_order_id`, invalid `shopify_subdomain`, duplicate `tracking_number` within one payload → **400**.
-- Quantity greater than `remainingQuantity` (including cross-shipment over-allocation) → **400**, nothing created.
+- Quantity greater than what the variant's open lines have remaining together (including cross-shipment over-allocation) → **400**, nothing created.
 - Order not found in Shopify → **404**.
 - No resolvable Shopify Admin token for the shop, or a token Shopify rejects → **401**.
 - Shopify unreachable, throttling, or answering a `5xx` → **502**.
 - Shopify refuses a create (a user error) → **400**.
-- A failure after some creates → the fulfillments created before it stay in Shopify, and the error body does not name them (known gap 3).
+- A failure after some creates → the fulfillments created before it stay in Shopify, and the error body does not name them (known gap 2). A re-send of the same payload skips them by their tracking numbers.
 
 ## Step C — Tracking event (AfterShip-style)
 
@@ -174,6 +182,7 @@ When a shipment line's `product_variant_id` does not appear on any open fulfillm
 ## Operational notes
 
 - DSS logs a summary at `info` after each successful sync, e.g. `sync-shipments orderId=1001 canceled=0 created=1 skippedShipments=0 fulfillmentIds=[5001]`. `canceled` is always `0`: the cancel operation still exists in the code, but nothing plans one.
+- Per shipment skipped by its tracking number: `sync-shipments skipped shipment … tracking=… reason=already_fulfilled fulfillmentIds=[…]`, at `info` when one live fulfillment carries it and at `warn` when several do (a duplicate for a human to clean up).
 - Per skipped line at `warn`: `sync-shipments skipped line … tracking=… variant=… reason=no_open_fo qty=…`; per shipment with no matched line: `sync-shipments skipped shipment … tracking=… reason=all_lines_unmatched`.
 - Shopify webhooks (Step A) are answered `200` when a redelivery could not do better and `502` when Shopify or the monolith did not answer, throttled, or answered a `5xx`. Every verified delivery logs one `Webhook done topic=… webhook_id=… outcome=… answered=…` line: `info` for mirrored and skipped, `warn` for a transient failure, `error` for a permanent one.
 - Shopify redelivers a failed delivery up to eight times in four hours and removes the subscription after repeated failures within 24 hours ([Shopify: troubleshoot webhooks](https://shopify.dev/docs/apps/build/webhooks/troubleshooting-webhooks)). `GET /api/check?shop=…` (bearer auth) shows whether each handled topic is still subscribed.
@@ -182,24 +191,24 @@ When a shipment line's `product_variant_id` does not appear on any open fulfillm
 ## Known limitations
 
 - `GetOrderForDss` loads at most 100 line items, 50 fulfillment orders with 100 lines each, and 50 fulfillments, and nothing reports a longer list: an order past those limits is matched against a partial snapshot, and a tracking number on the fifty-first fulfillment is not found.
-- Matching is by variant only; the `fulfillment_order_id` the monolith stores on order lines is not used by the sync.
-- `/tracking-update` compares tracking numbers exactly (no trimming) and takes the first fulfillment that carries the number.
+- Matching is by variant only.
+- `/tracking-update` trims the tracking number, compares it case-sensitively, ignores cancelled fulfillments, and takes the first live fulfillment that carries it.
 
 ## Known gaps
 
 These are what the temporary note at the top refers to.
 
-1. **A re-sent shipment can be created twice.** When remaining quantity is left on its fulfillment-order line, a re-send of an already-synced shipment creates a second fulfillment with the same tracking number. The monolith re-sends after a lost commit, and after a `502` part-way through the creates.
-2. **A shipment split does not reach Shopify.** The new shipments' lines point at units the old fulfillments still hold, so every line is skipped and the answer is `200` with an empty `new_fulfillment_ids`. Shopify keeps the old fulfillments and tracking numbers, and the next `/tracking-update` for a new tracking number answers `404`.
-3. **A partial failure does not report what landed.** When a later create fails, the answer is an error body that does not name the fulfillments created before it.
+1. **A shipment split does not reach Shopify.** The new shipments' lines point at units the old fulfillments still hold, so every line is skipped and the answer is `200` with an empty `new_fulfillment_ids`. Shopify keeps the old fulfillments and tracking numbers, and the next `/tracking-update` for a new tracking number answers `404`.
+2. **A partial failure does not report what landed.** When a later create fails, the answer is an error body that does not name the fulfillments created before it.
 
 ## Extended manual checklist
 
 1. **Cross-FO shipment** — one shipment spanning two fulfillment orders → one Shopify fulfillment, correct tracking, both fulfillment orders reflected.
-2. **Bad quantity** — payload with a quantity above `remainingQuantity` → **400**, nothing created, existing fulfillments untouched.
+2. **Bad quantity** — payload with a quantity above what the variant's open lines have remaining together → **400**, nothing created, existing fulfillments untouched.
 3. **Partial match** — one unmatched variant in payload → **200**, partial fulfillment created, skipped line in logs.
 4. **Incremental shipment** — sync a shipment for one item, then later a shipment for a second item → the first fulfillment stays, a second one is created.
-5. **Re-send of a fully shipped line** — re-send a shipment whose lines have nothing remaining → **200** with an empty `new_fulfillment_ids`, nothing created. With quantity remaining, see known gap 1.
+5. **Re-send of a synced shipment** — re-send a shipment that already has its fulfillment, with and without quantity remaining on its lines → **200** with an empty `new_fulfillment_ids`, nothing created, and `sync-shipments skipped shipment … reason=already_fulfilled` in the DSS logs.
+6. **Spread** — a variant on two open fulfillment-order lines with one unit left on each, shipped as two units in one shipment → **200**, one fulfillment covering both lines.
 
 ## Automated tests in this repo
 

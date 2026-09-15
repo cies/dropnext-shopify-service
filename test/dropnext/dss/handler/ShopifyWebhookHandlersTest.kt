@@ -17,6 +17,7 @@ import dropnext.dss.testutil.fake.FakeMonolithService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlServiceFactory
 import dropnext.dss.testutil.fixture.minimalOrder
+import dropnext.dss.testutil.fixture.orderWithoutFulfillmentOrders
 import dropnext.dss.testutil.fixture.sampleProduct
 import dropnext.dss.testutil.fixture.testConfig
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
@@ -166,8 +167,24 @@ class ShopifyWebhookHandlersTest {
       val forwarded = monolith.createOrderCalls.single()
       assert(forwarded.shopifyOrderId == 1001L)
       assert(forwarded.shopifySubdomain == "acme")
-      assert(forwarded.lineItems.single().fulfillmentOrderId == 301L)
+      assert(forwarded.lineItems.single().productVariantId == 101L)
       assert(shopify.orderForDssCalls.single() == "gid://shopify/Order/1001")
+    }
+  }
+
+  /** Shopify routes an order into fulfillment orders after creating it; a delivery that lands first must still carry the order. */
+  @Test
+  fun `orders_create for an order not yet routed into fulfillment orders POSTs it with its lines`() {
+    val monolith = FakeMonolithService()
+    val shopify = FakeShopifyGraphqlService().apply { orderForDssResult = Success(orderWithoutFulfillmentOrders()) }
+    withDssApp(deps(monolith = monolith, shopify = shopify)) { client ->
+      val r = client.signedWebhook(
+        "orders/create",
+        """{"id":1001,"admin_graphql_api_id":"gid://shopify/Order/1001","domain":"acme.myshopify.com"}""",
+      )
+      assert(r.status == HttpStatusCode.OK)
+      assert(r.body<WebhookDeliveryResponse>().outcome == "mirrored")
+      assert(monolith.createOrderCalls.single().lineItems.single().productVariantId == 101L)
     }
   }
 

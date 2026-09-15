@@ -4,12 +4,12 @@ import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
 import dropnext.dss.domain.fulfillment.SkipReason
 import dropnext.dss.lib.shopify.graphql.ShopifyError
+import dropnext.dss.testutil.fixture.fulfillment
 import dropnext.dss.testutil.fixture.minimalOrder
 import dropnext.dss.testutil.fixture.orderWithFoQuantities
 import dropnext.dss.testutil.fixture.orderWithFulfillment
 import dropnext.dss.testutil.fixture.orderWithTwoVariantFulfillmentOrders
 import dropnext.dss.testutil.fixture.shipment
-import dropnext.graphql.generated.getorderfordss.Fulfillment
 import kotlin.test.Test
 
 
@@ -69,11 +69,7 @@ class CalculateShopifyMutationsTest {
   fun `payload that exceeds remaining after existing fulfillment fails with no cancels`() {
     val order = orderWithFoQuantities(remaining = 1, total = 2).copy(
       fulfillments = listOf(
-        Fulfillment(
-          id = "gid://shopify/Fulfillment/8000",
-          legacyResourceId = "8000",
-          trackingInfo = emptyList(),
-        ),
+        fulfillment(8000L),
       ),
     )
     val shipments = listOf(
@@ -96,11 +92,7 @@ class CalculateShopifyMutationsTest {
       secondTotal = 1,
     ).copy(
       fulfillments = listOf(
-        Fulfillment(
-          id = "gid://shopify/Fulfillment/8000",
-          legacyResourceId = "8000",
-          trackingInfo = emptyList(),
-        ),
+        fulfillment(8000L),
       ),
     )
     val result = calculateShopifyMutations(order, listOf(shipment(variantId = 202L, tracking = "TRK-O2")))
@@ -125,11 +117,7 @@ class CalculateShopifyMutationsTest {
   fun `already fulfilled variant is omitted and does not plan cancel`() {
     val order = orderWithFoQuantities(remaining = 0, total = 1).copy(
       fulfillments = listOf(
-        Fulfillment(
-          id = "gid://shopify/Fulfillment/8000",
-          legacyResourceId = "8000",
-          trackingInfo = emptyList(),
-        ),
+        fulfillment(8000L),
       ),
     )
     val result = calculateShopifyMutations(order, listOf(shipment(quantity = 1)))
@@ -148,11 +136,7 @@ class CalculateShopifyMutationsTest {
       secondTotal = 1,
     ).copy(
       fulfillments = listOf(
-        Fulfillment(
-          id = "gid://shopify/Fulfillment/8000",
-          legacyResourceId = "8000",
-          trackingInfo = emptyList(),
-        ),
+        fulfillment(8000L),
       ),
     )
     val shipments = listOf(
@@ -194,4 +178,27 @@ class CalculateShopifyMutationsTest {
     assert(plan.unmatchedShipments.isEmpty())
   }
 
+  /** Two units of a variant, the first shipped as TRK-A, and the monolith sending `[A, B]` again after a partial failure. */
+  @Test
+  fun `a re-sent payload plans a create only for the shipment not yet fulfilled`() {
+    val order = orderWithFoQuantities(remaining = 1, total = 2).copy(fulfillments = listOf(fulfillment(8000L, listOf("TRK-A"))))
+    val plan = (calculateShopifyMutations(order, listOf(shipment(tracking = "TRK-A"), shipment(tracking = "TRK-B"))) as Success).value
+    val create = plan.mutations.single() as ShopifyMutation.FulfillmentCreate
+    assert(create.trackingNumber == "TRK-B")
+    assert(plan.alreadyFulfilledShipments.single().shipment.trackingNumber == "TRK-A")
+    assert(plan.alreadyFulfilledShipments.single().fulfillments.single().legacyResourceId == "8000")
+    assert(plan.unmatchedShipments.isEmpty())
+  }
+
+  @Test
+  fun `a payload whose shipments are all fulfilled plans nothing`() {
+    val order = orderWithFoQuantities(remaining = 1, total = 3).copy(
+      fulfillments = listOf(fulfillment(8000L, listOf("TRK-A")), fulfillment(8001L, listOf("TRK-B"))),
+    )
+    val plan = (calculateShopifyMutations(order, listOf(shipment(tracking = "TRK-A"), shipment(tracking = "TRK-B"))) as Success).value
+    assert(plan.mutations.isEmpty())
+    assert(plan.alreadyFulfilledShipments.map { it.shipment.trackingNumber } == listOf("TRK-A", "TRK-B"))
+    assert(plan.skippedLines.isEmpty())
+    assert(plan.unmatchedShipments.isEmpty())
+  }
 }

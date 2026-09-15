@@ -11,9 +11,12 @@ import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
 import dropnext.dss.testutil.fixture.diagramCrossFoOrder
 import dropnext.dss.testutil.fixture.diagramCrossFoShipment
+import dropnext.dss.testutil.fixture.fulfillment
 import dropnext.dss.testutil.fixture.minimalOrder
+import dropnext.dss.testutil.fixture.openFulfillmentOrder
 import dropnext.dss.testutil.fixture.orderWithFoQuantities
 import dropnext.dss.testutil.fixture.orderWithFulfillment
+import dropnext.dss.testutil.fixture.orderWithFulfillmentOrders
 import dropnext.dss.testutil.fixture.orderWithTwoVariantFulfillmentOrders
 import dropnext.dss.testutil.fixture.shipment
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
@@ -195,7 +198,7 @@ class SyncShopifyShipmentsToFulfillmentsTest {
   }
 
   @Test
-  fun `partial failure recovery on retry skips the fulfilled variant and creates the rest`() = runBlocking {
+  fun `a retry after a partial failure skips the shipment already fulfilled by its tracking number and creates the rest`() = runBlocking {
     val fake = FakeShopifyGraphqlService().apply {
       orderForDssResult = Success(orderWithTwoVariantFulfillmentOrders())
       createFulfillmentResultQueue += Success(ShopifyFulfillmentId(5001L))
@@ -211,10 +214,11 @@ class SyncShopifyShipmentsToFulfillmentsTest {
     assert(firstAttempt.failureOrNull() is ShopifyError.UserError)
     assert(fake.createFulfillmentCalls.size == 2)
 
-    // The retry sees the order as Shopify has it now: the first variant's unit is fulfilled.
+    // The retry sees the order as Shopify has it now: the first shipment is a fulfillment carrying its tracking number.
     fake.clear()
     fake.orderForDssResult = Success(
-      orderWithTwoVariantFulfillmentOrders(firstRemaining = 0, firstTotal = 1, secondRemaining = 1, secondTotal = 1),
+      orderWithTwoVariantFulfillmentOrders(firstRemaining = 0, firstTotal = 1, secondRemaining = 1, secondTotal = 1)
+        .copy(fulfillments = listOf(fulfillment(5001L, listOf("TRK-1")))),
     )
     fake.createFulfillmentResult = Success(ShopifyFulfillmentId(6002L))
     val retry = syncShopifyShipmentsToFulfillments(fake, payload)
@@ -262,6 +266,67 @@ class SyncShopifyShipmentsToFulfillmentsTest {
     assert(result.newFulfillmentIds().isEmpty())
     assert(fake.cancelFulfillmentCalls.isEmpty())
     assert(fake.createFulfillmentCalls.isEmpty())
+  }
+
+  /** Two units of a variant, the first shipped as TRK-A: the re-send used to create TRK-A twice and refuse TRK-B. */
+  @Test
+  fun `a re-sent payload creates only the shipment that has no fulfillment yet`() = runBlocking {
+    val fake = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Success(orderWithFoQuantities(remaining = 1, total = 2).copy(fulfillments = listOf(fulfillment(5001L, listOf("TRK-A")))))
+      createFulfillmentResult = Success(ShopifyFulfillmentId(5002L))
+    }
+    val result = syncShopifyShipmentsToFulfillments(fake, syncRequest(shipments = listOf(shipment(tracking = "TRK-A"), shipment(tracking = "TRK-B"))))
+    assert(result.newFulfillmentIds() == listOf(5002L))
+    assert(fake.createFulfillmentCalls.single().tracking.number == "TRK-B")
+  }
+
+  @Test
+  fun `a re-send of a payload whose shipments are all fulfilled calls no mutation`() = runBlocking {
+    val fake = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Success(orderWithFoQuantities(remaining = 1, total = 2).copy(fulfillments = listOf(fulfillment(5001L, listOf("TRK-A")))))
+    }
+    val result = syncShopifyShipmentsToFulfillments(fake, syncRequest(shipments = listOf(shipment(tracking = "TRK-A"))))
+    assert(result.newFulfillmentIds().isEmpty())
+    assert(fake.createFulfillmentCalls.isEmpty())
+    assert(fake.cancelFulfillmentCalls.isEmpty())
+  }
+
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `the summary line counts a shipment skipped by its tracking number`() {
+    val fake = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Success(orderWithFoQuantities(remaining = 2, total = 3).copy(fulfillments = listOf(fulfillment(5001L, listOf("TRK-A")))))
+      createFulfillmentResult = Success(ShopifyFulfillmentId(5002L))
+    }
+    val lines = capturingLogs {
+      runBlocking {
+        syncShopifyShipmentsToFulfillments(fake, syncRequest(shipments = listOf(shipment(tracking = "TRK-A"), shipment(tracking = "TRK-B"))))
+      }
+    }
+    val line = lines.single { "sync-shipments orderId=" in it }
+    assert("created=1" in line)
+    assert("skippedShipments=1" in line)
+  }
+
+  @Test
+  fun `a shipment line spread over two fulfillment orders becomes one fulfillment carrying both`() = runBlocking {
+    val fake = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Success(
+        orderWithFulfillmentOrders(
+          openFulfillmentOrder(foId = 301L, lineItemId = 401L, variantId = 101L, remaining = 1),
+          openFulfillmentOrder(foId = 302L, lineItemId = 402L, variantId = 101L, remaining = 1),
+        ),
+      )
+      createFulfillmentResult = Success(ShopifyFulfillmentId(5300L))
+    }
+    val result = syncShopifyShipmentsToFulfillments(fake, syncRequest(quantity = 2))
+    assert(result.newFulfillmentIds() == listOf(5300L))
+    assert(
+      fake.createFulfillmentCalls.single().lines.map { it.lineItemId to it.quantity } == listOf(
+        "gid://shopify/FulfillmentOrderLineItem/401" to 1,
+        "gid://shopify/FulfillmentOrderLineItem/402" to 1,
+      ),
+    )
   }
 
   // ---------- helpers ----------

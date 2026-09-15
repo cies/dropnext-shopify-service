@@ -15,7 +15,8 @@ private val log = KotlinLogging.logger {}
 /**
  * Creates Shopify fulfillments from the supplied shipments without canceling existing ones.
  * Fulfillment orders are resolved automatically by matching `product_variant_id` against
- * fulfillment order line items and live remaining quantity.
+ * fulfillment order line items and live remaining quantity. A shipment whose tracking number is already
+ * on a live fulfillment of the order is skipped, so a re-sent payload creates nothing twice.
  *
  * Returns the ids of the created fulfillments.
  *
@@ -26,18 +27,17 @@ suspend fun syncShopifyShipmentsToFulfillments(
   payload: SyncShipmentsWithFulfillmentsRequest,
 ): ShopifyResult<List<ShopifyFulfillmentId>> {
   val shopifyOrderId = ShopifyOrderId(payload.shopifyOrderId)
-  val mutations = when (val determined = determineShopifyMutations(shopifyGqlService, shopifyOrderId, payload.shipments)) {
+  val plan = when (val determined = determineShopifyMutations(shopifyGqlService, shopifyOrderId, payload.shipments)) {
     is Failure -> return determined
-    is Success -> determined.value.mutations
+    is Success -> determined.value
   }
-  val effected = effectShopifyMutations(shopifyGqlService, mutations)
+  val effected = effectShopifyMutations(shopifyGqlService, plan.mutations)
   if (effected is Success) {
     // One summary line per run, so a run can be found by order and shop and read off in Logflare.
-    val canceled = mutations.count { it is ShopifyMutation.FulfillmentCancel }
-    val skippedShipments = payload.shipments.size - mutations.count { it is ShopifyMutation.FulfillmentCreate }
+    val canceled = plan.mutations.count { it is ShopifyMutation.FulfillmentCancel }
     log.info {
       "sync-shipments orderId=$shopifyOrderId " +
-        "canceled=$canceled created=${effected.value.size} skippedShipments=$skippedShipments " +
+        "canceled=$canceled created=${effected.value.size} skippedShipments=${plan.skippedShipmentCount} " +
         "fulfillmentIds=${effected.value.map { it.value }}"
     }
   }

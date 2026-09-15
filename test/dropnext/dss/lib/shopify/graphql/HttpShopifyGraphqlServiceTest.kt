@@ -12,7 +12,9 @@ import dropnext.dss.domain.ShopifyFulfillmentId
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.testutil.fake.FakeFlakyServer
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlServer
+import dropnext.dss.testutil.fixture.fulfillment
 import dropnext.dss.testutil.fixture.minimalOrder
+import dropnext.dss.testutil.fixture.orderWithFulfillments
 import dropnext.dss.testutil.fixture.sampleProduct
 import dropnext.dss.testutil.helper.shopifyGraphqlUrl
 import dropnext.dss.testutil.helper.testHttpClient
@@ -287,6 +289,15 @@ class HttpShopifyGraphqlServiceTest {
     assert(result is Success)
     assert((result as Success).value.legacyResourceId == "1001")
     assert(fake.calls.single().variables.jsonObject["id"]?.jsonPrimitive?.content == "gid://shopify/Order/1001")
+  }
+
+  /** The sync tells a cancelled fulfillment from a live one by it, so the status has to survive the wire. */
+  @Test
+  fun `orderForDss decodes the status of the order's fulfillments`() = runBlocking {
+    val order = orderWithFulfillments(fulfillment(8000L, listOf("1Z999"), status = FulfillmentStatus.CANCELLED))
+    fake.stubData("GetOrderForDss", GetOrderForDss.Result(order = order), GetOrderForDss.Result.serializer())
+    val result = shopify.orderForDss("gid://shopify/Order/1001")
+    assert((result as Success).value.fulfillments.single().status == FulfillmentStatus.CANCELLED)
   }
 
   @Test
