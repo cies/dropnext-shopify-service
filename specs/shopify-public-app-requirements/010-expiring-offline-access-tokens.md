@@ -3,7 +3,8 @@
 Status: draft
 Author: cies (with Claude)
 Date: 2026-09-12
-Depends on: the answer to "Precondition" below. Independent of the other spec folders.
+Depends on: the answer to "Precondition" below, given in `000`: custom distribution, so this is not built. Independent of
+the other spec folders.
 Repos: monolith first (it stores the tokens and serves the contract), then the DSS in the same session
 (`../CLAUDE.md`, "Cross-repo couplings").
 
@@ -18,6 +19,10 @@ errors. Custom apps and merchant-created apps are not affected.
   2027-01-01. Every Shopify call the DSS makes stops working on that date otherwise.
 - Custom distribution: nothing here is required. The spec stays as a record of what a switch to public distribution
   would take.
+- A switch is not a setting: Shopify does not change an app's distribution method, so going public is a new app (`000`).
+  Created after 2026-04-01, that app uses expiring tokens from its first install, and every shop installs it anew: the
+  exchange of non-expiring tokens ("Migrating" below, and rollout step 3) applies only to an app that already is public.
+  The refresh, and its single owner, remain.
 
 
 ## Problem
@@ -167,3 +172,4 @@ result through `GET /stores`.
 - [Shopify changelog: expiring offline access tokens required for all public apps as of January 1, 2027](https://shopify.dev/changelog/expiring-offline-access-tokens-required-for-all-public-apps-as-of-january-1-2027)
 - [Shopify changelog: expiring offline access tokens required for new public apps as of April 1, 2026](https://shopify.dev/changelog/expiring-offline-access-tokens-required-for-public-apps-april-1-2026)
 - [Shopify developer community: migrating from non-expiring to expiring access tokens](https://community.shopify.dev/t/migrating-from-non-expiring-to-expiring-access-tokens/34525)
+- [Shopify: select a distribution method](https://shopify.dev/docs/apps/launch/distribution/select-distribution-method)

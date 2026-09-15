@@ -28,13 +28,13 @@ class LiveFulfillmentsWithTrackingNumberTest {
       fulfillment(8000L, listOf("TRK-A"), status = FulfillmentStatus.CANCELLED),
       fulfillment(8001L, listOf("TRK-A")),
     )
-    assert(liveFulfillmentsWithTrackingNumber(order, "TRK-A").map { it.legacyResourceId } == listOf("8001"))
+    assert(liveFulfillmentsWithTrackingNumber(order, "TRK-A").map { it.id } == listOf("gid://shopify/Fulfillment/8001"))
   }
 
   @Test
   fun `answers every live fulfillment when two carry the same tracking number`() {
     val order = orderWithFulfillments(fulfillment(8000L, listOf("TRK-A")), fulfillment(8001L, listOf("TRK-A")))
-    assert(liveFulfillmentsWithTrackingNumber(order, "TRK-A").map { it.legacyResourceId } == listOf("8000", "8001"))
+    assert(liveFulfillmentsWithTrackingNumber(order, "TRK-A").map { it.id } == listOf("gid://shopify/Fulfillment/8000", "gid://shopify/Fulfillment/8001"))
   }
 
   @Test

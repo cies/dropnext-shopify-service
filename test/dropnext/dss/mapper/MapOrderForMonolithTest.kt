@@ -324,6 +324,15 @@ class MapOrderForMonolithTest {
   private fun Order.withSingleLineItem(change: (LineItem) -> LineItem): Order =
     copy(lineItems = LineItemConnection(edges = listOf(LineItemEdge(node = change(lineItems.edges.single().node)))))
 
+  /** Protected customer data the monolith keeps with the order; an order without a customer has none. */
+  @Test
+  fun `passes the order's email on, and none when Shopify has none`() {
+    val withEmail = orderToCreateShopifyOrderRequest("dropnext-staging", minimalOrder().copy(email = "buyer@example.com"))
+    val withoutEmail = orderToCreateShopifyOrderRequest("dropnext-staging", minimalOrder().copy(email = null))
+    assert(withEmail.email == "buyer@example.com")
+    assert(withoutEmail.email == null)
+  }
+
   @Test
   fun `falls back to raw createdAt when parsing fails`() {
 

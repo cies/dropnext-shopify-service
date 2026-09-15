@@ -4,6 +4,8 @@ import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Result
 import dev.forkhandles.result4k.Success
 import dev.forkhandles.result4k.map
+import dropnext.dss.domain.ObsoleteSubscriptionRemoval
+import dropnext.dss.domain.ObsoleteWebhookSubscription
 import dropnext.dss.domain.WebhookRegistrationReport
 import dropnext.dss.domain.WebhookSubscriptionStatus
 import dropnext.dss.domain.WebhookTopicRegistration
@@ -20,25 +22,32 @@ private val log = KotlinLogging.logger {}
 /** The handled topics that have a subscription topic, in registration order. */
 private val registrableTopics: List<ShopifyWebhookTopic> = ShopifyWebhookTopic.known.filter { it.subscriptionTopic != null }
 
+private val registrableTopicNames: Set<String> = registrableTopics.mapNotNull { it.subscriptionTopic?.name }.toSet()
+
 /**
  * Read-only: what Shopify has for every handled topic, sorted into subscribed at [callbackUrl] delivering as the topic
  * declares, [WebhookTopicStatus.Mismatched] (subscribed there delivering otherwise), [WebhookTopicStatus.Missing],
- * and pointing elsewhere. One query without a URL filter, so a subscription left behind at an earlier callback URL shows
- * up as stale instead of staying invisible.
+ * and pointing elsewhere, plus what is subscribed at [callbackUrl] for a topic the service does not handle. One query
+ * without a topic or URL filter, so a subscription left behind at an earlier callback URL shows up as stale, and one left
+ * behind by a topic the service stopped handling as obsolete, instead of either staying invisible. What points elsewhere
+ * for a topic the service does not handle is not the service's to judge, and is left out.
  * Composes [ShopifyGraphqlService.webhookSubscriptions].
  */
 suspend fun scanShopifyWebhooks(
   shopify: ShopifyGraphqlService,
   callbackUrl: String,
 ): ShopifyResult<WebhookRegistrationReport> =
-  shopify.webhookSubscriptions(registrableTopics.mapNotNull { it.subscriptionTopic }, callbackUrl = null).map { all ->
+  shopify.webhookSubscriptions().map { all ->
     WebhookRegistrationReport(
-      registrableTopics.map { topic ->
+      topics = registrableTopics.map { topic ->
         val name = topic.subscriptionTopic!!.name
         val ours = all.filter { it.topic == name && it.uri == callbackUrl }
         val elsewhere = all.filter { it.topic == name && it.uri != callbackUrl }
         WebhookTopicRegistration(topic = name, status = scannedStatus(topic, ours), stale = elsewhere)
       },
+      obsolete = all
+        .filter { it.uri == callbackUrl && it.topic !in registrableTopicNames }
+        .map { ObsoleteWebhookSubscription(it, ObsoleteSubscriptionRemoval.NotAttempted) },
     )
   }
 
@@ -52,18 +61,20 @@ private fun scannedStatus(topic: ShopifyWebhookTopic, ours: List<WebhookSubscrip
 
 /**
  * Leaves the shop subscribed at [callbackUrl] to every handled topic, each with the payload fields the topic declares
- * (the `orders` topics are id-only, because the DSS fetches the full order via Graphql after the webhook arrives), no
- * filter and JSON.
+ * (id-only where the resource is loaded through Graphql after the delivery), no filter and JSON, and to nothing else there.
  *
  * - A topic already subscribed there that way is left alone: registering it again is what made every reinstall show
  *   five failures.
  * - One subscribed there delivering otherwise is updated in place, since Shopify refuses a second subscription for the
  *   same topic and address.
  * - A missing topic first repoints a stale HTTPS subscription to [callbackUrl], so the old address stops receiving
- *   copies, and is registered only when there is none or the repoint did not work. One per topic, for the same reason;
- *   nothing is deleted.
+ *   copies, and is registered only when there is none or the repoint did not work. One per topic, for the same reason.
+ * - A subscription at [callbackUrl] for a topic the service does not handle is deleted: its deliveries would be verified
+ *   and acknowledged for nothing. Nothing at another address is ever deleted.
  *
- * Composes [scanShopifyWebhooks], [ShopifyGraphqlService.updateWebhookSubscription] and [ShopifyGraphqlService.registerWebhook].
+ * Never fails: an install has no second attempt to wait for (see [reregisterShopifyWebhooks] for a caller that has).
+ * Composes [scanShopifyWebhooks], [ShopifyGraphqlService.updateWebhookSubscription], [ShopifyGraphqlService.registerWebhook]
+ * and [ShopifyGraphqlService.deleteWebhookSubscription].
  */
 suspend fun registerShopifyWebhooks(
   shopify: ShopifyGraphqlService,
@@ -77,9 +88,30 @@ suspend fun registerShopifyWebhooks(
       WebhookRegistrationReport(registrableTopics.map { WebhookTopicRegistration(it.subscriptionTopic!!.name, WebhookTopicStatus.Missing) })
     }
   }
+  return registerScanned(shopify, callbackUrl, scanned)
+}
 
+/**
+ * What [registerShopifyWebhooks] does, for a shop installed before a change to the handled topics or their payload fields,
+ * except that a failed scan fails it: the caller can ask again, and a run without the scan would report every topic that
+ * exists as refused and delete nothing.
+ */
+suspend fun reregisterShopifyWebhooks(
+  shopify: ShopifyGraphqlService,
+  callbackUrl: String,
+): ShopifyResult<WebhookRegistrationReport> =
+  when (val scan = scanShopifyWebhooks(shopify, callbackUrl)) {
+    is Success -> Success(registerScanned(shopify, callbackUrl, scan.value))
+    is Failure -> scan
+  }
+
+private suspend fun registerScanned(
+  shopify: ShopifyGraphqlService,
+  callbackUrl: String,
+  scanned: WebhookRegistrationReport,
+): WebhookRegistrationReport {
   val report = WebhookRegistrationReport(
-    scanned.topics.map { row ->
+    topics = scanned.topics.map { row ->
       val topic = registrableTopics.first { it.subscriptionTopic!!.name == row.topic }
       when (val status = row.status) {
         is WebhookTopicStatus.Missing -> repointOrRegister(shopify, topic, row, callbackUrl)
@@ -93,6 +125,7 @@ suspend fun registerShopifyWebhooks(
         is WebhookTopicStatus.Repointed, is WebhookTopicStatus.Unsuccessful -> row
       }
     },
+    obsolete = scanned.obsolete.map { deleteObsoleteSubscription(shopify, it) },
   )
 
   report.failures.forEach { row ->
@@ -103,9 +136,28 @@ suspend fun registerShopifyWebhooks(
   }
   log.info {
     "Webhooks registered active=${report.activeCount} added=${report.addedCount} updated=${report.updatedCount} " +
-      "repointed=${report.repointedCount} failed=${report.failures.size} stale=${report.staleCount}"
+      "repointed=${report.repointedCount} failed=${report.failures.size} stale=${report.staleCount} " +
+      "deleted=${report.deletedCount} obsolete=${report.obsoleteCount}"
   }
   return report
+}
+
+private suspend fun deleteObsoleteSubscription(
+  shopify: ShopifyGraphqlService,
+  obsolete: ObsoleteWebhookSubscription,
+): ObsoleteWebhookSubscription {
+  val subscription = obsolete.subscription
+  val removal = when (val deleted = shopify.deleteWebhookSubscription(subscription.id)) {
+    is Success -> {
+      log.info { "Webhook subscription deleted topic=${subscription.topic} id=${subscription.id} reason=topic_not_handled" }
+      ObsoleteSubscriptionRemoval.Deleted
+    }
+    is Failure -> {
+      log.warn { "Webhook subscription deletion failed topic=${subscription.topic} id=${subscription.id} error=${deleted.reason.message}" }
+      ObsoleteSubscriptionRemoval.Failed(deleted.reason.message)
+    }
+  }
+  return obsolete.copy(removal = removal)
 }
 
 /**

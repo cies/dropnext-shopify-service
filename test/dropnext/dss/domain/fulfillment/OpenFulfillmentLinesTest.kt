@@ -41,8 +41,7 @@ class OpenFulfillmentLinesTest {
     val unreadable = FulfillmentOrderLineItem(
       id = "gid://shopify/FulfillmentOrderLineItem/401",
       remainingQuantity = 5,
-      totalQuantity = 5,
-      variant = ProductVariant(id = "gid://shopify/ProductVariant/101", legacyResourceId = "not-a-number"),
+      variant = ProductVariant(legacyResourceId = "not-a-number"),
     )
     val fulfillmentOrder = FulfillmentOrder(
       id = "gid://shopify/FulfillmentOrder/301",
@@ -71,7 +70,7 @@ class OpenFulfillmentLinesTest {
 
   @Test
   fun `availableGiven an empty plan is the snapshot remaining quantity`() {
-    val line = openFulfillmentLines(orderWithFulfillmentOrders(openFulfillmentOrder(foId = 301L, lineItemId = 401L, variantId = 101L, remaining = 3, total = 5)))
+    val line = openFulfillmentLines(orderWithFulfillmentOrders(openFulfillmentOrder(foId = 301L, lineItemId = 401L, variantId = 101L, remaining = 3)))
       .getValue(101L).single()
     assert(line.availableGiven(emptyList()) == 3)
   }

@@ -21,7 +21,6 @@ internal fun sampleProduct(
   title: String = "Sample",
   publishedAt: String? = "2026-04-01T00:00:00Z",
 ): Product = Product(
-  id = "gid://shopify/Product/$legacyResourceId",
   legacyResourceId = legacyResourceId,
   title = title,
   description = "",
@@ -41,13 +40,11 @@ internal fun sampleProduct(
 )
 
 private fun sampleProductVariant(variantId: String): ProductVariant = ProductVariant(
-  id = "gid://shopify/ProductVariant/$variantId",
   legacyResourceId = variantId,
   title = "Default",
   sku = "SKU-$variantId",
   barcode = null,
   price = "10.00",
-  updatedAt = "2026-04-01T00:00:00Z",
   selectedOptions = emptyList(),
   media = MediaConnection(edges = emptyList()),
 )

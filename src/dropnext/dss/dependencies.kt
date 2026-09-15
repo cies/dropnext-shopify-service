@@ -12,6 +12,7 @@ import dropnext.dss.handler.MAX_CONCURRENT_MIRRORS
 import dropnext.dss.handler.MonolithWebhookHandlers
 import dropnext.dss.handler.OAuthHandlers
 import dropnext.dss.handler.ShopifyWebhookHandlers
+import dropnext.dss.handler.WebhookSubscriptionHandlers
 import dropnext.dss.handler.WEBHOOK_MIRROR_BUDGET
 import dropnext.dss.handler.WEBHOOK_MONOLITH_MAX_RETRIES
 import dropnext.dss.handler.WEBHOOK_WRITE_GRACE
@@ -49,6 +50,7 @@ class DssDependencies(
   private val monolithHttpClient: HttpClient,
   private val webhookMonolithHttpClient: HttpClient,
   val diagnosticsHandlers: DiagnosticsHandlers,
+  val webhookSubscriptionHandlers: WebhookSubscriptionHandlers,
   val oauthHandlers: OAuthHandlers,
   val shopifyWebhookHandlers: ShopifyWebhookHandlers,
   val monolithWebhookHandlers: MonolithWebhookHandlers,
@@ -145,7 +147,8 @@ fun dssDependencies(
   httpClient = httpClient,
   monolithHttpClient = monolithHttpClient,
   webhookMonolithHttpClient = webhookMonolithHttpClient,
-  diagnosticsHandlers = DiagnosticsHandlers(config, shopifyGraphqlServiceFactory, readiness),
+  diagnosticsHandlers = DiagnosticsHandlers(config, readiness),
+  webhookSubscriptionHandlers = WebhookSubscriptionHandlers(config.dssBaseUrl, shopifyGraphqlServiceFactory),
   oauthHandlers = OAuthHandlers(
     config.dssBaseUrl,
     oauthClient,

@@ -1,6 +1,8 @@
 package dropnext.dss.presentation
 
 import dropnext.dss.domain.MonolithPersistOutcome
+import dropnext.dss.domain.ObsoleteSubscriptionRemoval
+import dropnext.dss.domain.ObsoleteWebhookSubscription
 import dropnext.dss.domain.ProductCount
 import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopInstallReport
@@ -22,6 +24,7 @@ class RenderOAuthInstallPageTest {
     shop: String = "acme.myshopify.com",
     monolithPersist: MonolithPersistOutcome = MonolithPersistOutcome.Persisted(storeId = StoreId(1L)),
     topics: List<WebhookTopicRegistration> = emptyList(),
+    obsolete: List<ObsoleteWebhookSubscription> = emptyList(),
     productCount: ProductCount? = ProductCount(count = 3, isExact = true),
   ): String =
     renderOAuthInstallPage(
@@ -31,7 +34,7 @@ class RenderOAuthInstallPageTest {
         monolithPersist = monolithPersist,
         productCount = productCount,
         webhookCallbackUrl = CALLBACK_URL,
-        webhooks = WebhookRegistrationReport(topics),
+        webhooks = WebhookRegistrationReport(topics, obsolete),
       ),
     )
 
@@ -111,7 +114,7 @@ class RenderOAuthInstallPageTest {
         ),
       ),
     )
-    assert("1 already active, 2 added, 0 updated and 0 repointed from another URL in this install, 1 failed, 1 pointing elsewhere." in html)
+    assert("1 already active, 2 added, 0 updated and 0 repointed from another URL in this install, 1 failed, 1 pointing elsewhere, 0 deleted for a topic the service no longer handles." in html)
   }
 
   @Test
@@ -164,7 +167,7 @@ class RenderOAuthInstallPageTest {
     assert(">repointed<" in html)
     assert("gid://shopify/WebhookSubscription/2" in html)
     assert("https://old.example/webhooks/shopify" in html)
-    assert("0 already active, 0 added, 1 updated and 1 repointed from another URL in this install, 0 failed, 0 pointing elsewhere." in html)
+    assert("0 already active, 0 added, 1 updated and 1 repointed from another URL in this install, 0 failed, 0 pointing elsewhere, 0 deleted for a topic the service no longer handles." in html)
   }
 
   /** An update Shopify accepted without applying it is a failure the reader acts on, shown with what Shopify kept. */
@@ -226,6 +229,27 @@ class RenderOAuthInstallPageTest {
     assert("permission denied" in html)
     assert("scope missing" in html)
     assert("Reinstall the app after fixing." in html)
+  }
+
+  @Test
+  fun `names what was subscribed for a topic no longer handled, deleted or not, with the deletion error escaped`() {
+    val html = renderBase(
+      obsolete = listOf(
+        ObsoleteWebhookSubscription(webhookSubscriptionStatus(3, "ORDERS_UPDATED"), ObsoleteSubscriptionRemoval.Deleted),
+        ObsoleteWebhookSubscription(webhookSubscriptionStatus(4, "CUSTOMERS_CREATE"), ObsoleteSubscriptionRemoval.Failed("<denied>")),
+      ),
+    )
+    assert("1 deleted for a topic the service no longer handles." in html)
+    assert("Subscriptions at the webhook callback URL for a topic the service no longer handles:" in html)
+    assert("gid://shopify/WebhookSubscription/3" in html)
+    assert("deletion failed: " in html)
+    assert("&lt;denied&gt;" in html)
+    assert("<denied>" !in html)
+  }
+
+  @Test
+  fun `says nothing about topics no longer handled when nothing was subscribed for one`() {
+    assert("for a topic the service no longer handles:" !in renderBase())
   }
 
   @Test

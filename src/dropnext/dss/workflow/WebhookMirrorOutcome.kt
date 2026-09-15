@@ -53,7 +53,7 @@ enum class WebhookSkipReason {
   /** No variant-backed line: a tip or custom-line order, nothing the monolith could match. */
   NO_MAPPABLE_LINES,
 
-  /** A topic the service acknowledges without mirroring: `orders/updated`, and anything it never registered. */
+  /** A topic the service does not subscribe to, such as a delivery for a subscription an earlier version left behind: acknowledged, not mirrored. */
   TOPIC_NOT_MIRRORED,
 }
 

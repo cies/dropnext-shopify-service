@@ -20,6 +20,7 @@ import dropnext.dss.testutil.fixture.sampleProduct
 import dropnext.dss.testutil.helper.shopifyGraphqlUrl
 import dropnext.dss.testutil.helper.testHttpClient
 import dropnext.dss.testutil.helper.throwingHttpClient
+import dropnext.graphql.generated.DeleteWebhookSubscription
 import dropnext.graphql.generated.FulfillmentCancelMutation
 import dropnext.graphql.generated.FulfillmentCreateWithLineItems
 import dropnext.graphql.generated.FulfillmentEventCreateMutation
@@ -30,6 +31,8 @@ import dropnext.graphql.generated.ProductsCount
 import dropnext.graphql.generated.RegisterWebhook
 import dropnext.graphql.generated.ShopIdentity
 import dropnext.graphql.generated.UpdateWebhookSubscription
+import dropnext.graphql.generated.deletewebhooksubscription.UserError as DeleteUserError
+import dropnext.graphql.generated.deletewebhooksubscription.WebhookSubscriptionDeletePayload
 import dropnext.graphql.generated.enums.CountPrecision
 import dropnext.graphql.generated.enums.CurrencyCode
 import dropnext.graphql.generated.enums.FulfillmentEventStatus
@@ -45,6 +48,7 @@ import dropnext.graphql.generated.fulfillmentcreatewithlineitems.UserError as Cr
 import dropnext.graphql.generated.fulfillmenteventcreatemutation.FulfillmentEvent as CreatedFulfillmentEvent
 import dropnext.graphql.generated.fulfillmenteventcreatemutation.FulfillmentEventCreatePayload
 import dropnext.graphql.generated.fulfillmenteventcreatemutation.UserError as EventUserError
+import dropnext.graphql.generated.getproductbyid.MediaImage
 
 import dropnext.graphql.generated.getproductbyid.Shop as GetProductByIdShop
 import dropnext.graphql.generated.getwebhooksubscriptions.WebhookSubscription as ExistingSubscription
@@ -159,6 +163,37 @@ class HttpShopifyGraphqlServiceTest {
     val shopProduct = (result as Success).value
     assert(shopProduct?.shopCurrencyCode == "EUR")
     assert(shopProduct?.product?.title == "Sample")
+  }
+
+  /**
+   * Why `GetProductById` keeps its `Video`, `ExternalVideo` and `Model3d` fragments although nothing reads them. The
+   * generated client decodes a `Media` node into the class generated for its `__typename`, and a `__typename` without
+   * one fails the whole response. The generated `DefaultMediaImplementation` would take those nodes, but only once it is
+   * registered with the client's serializer, which this service does not do. Without the fragments this test fails, and
+   * in production a product with a video would never reach the monolith.
+   */
+  @Test
+  fun `productById decodes a product whose media holds a video`() = runBlocking {
+    fake.stubRaw(
+      "GetProductById",
+      """
+      {"data":{"shop":{"currencyCode":"EUR"},"product":{
+        "legacyResourceId":"501","title":"Sample","description":"","descriptionHtml":"","vendor":"","productType":"",
+        "tags":[],"handle":"sample","status":"ACTIVE","publishedAt":null,
+        "createdAt":"2026-04-01T00:00:00Z","updatedAt":"2026-04-01T00:00:00Z",
+        "media":{"edges":[
+          {"node":{"__typename":"Video","id":"gid://shopify/Video/1"}},
+          {"node":{"__typename":"MediaImage","image":{"url":"https://cdn.example/cover.jpg"}}}
+        ]},
+        "variants":{"edges":[]}
+      }}}
+      """.trimIndent(),
+    )
+    val result = shopify.productById("gid://shopify/Product/501")
+    val media = (result as Success).value!!.product.media.edges.map { it.node }
+    assert(media.size == 2)
+    assert(media.first() !is MediaImage)
+    assert((media.last() as MediaImage).image?.url == "https://cdn.example/cover.jpg")
   }
 
   @Test
@@ -290,10 +325,11 @@ class HttpShopifyGraphqlServiceTest {
 
   @Test
   fun `orderForDss sends the order gid and decodes the order`() = runBlocking {
-    fake.stubData("GetOrderForDss", GetOrderForDss.Result(order = minimalOrder()), GetOrderForDss.Result.serializer())
+    fake.stubData("GetOrderForDss", GetOrderForDss.Result(order = minimalOrder().copy(email = "buyer@example.com")), GetOrderForDss.Result.serializer())
     val result = shopify.orderForDss("gid://shopify/Order/1001")
     assert(result is Success)
-    assert((result as Success).value.legacyResourceId == "1001")
+    assert((result as Success).value.name == "#1001")
+    assert(result.value.email == "buyer@example.com")
     assert(fake.calls.single().variables.jsonObject["id"]?.jsonPrimitive?.content == "gid://shopify/Order/1001")
   }
 
@@ -474,10 +510,7 @@ class HttpShopifyGraphqlServiceTest {
       ),
       GetWebhookSubscriptions.Result.serializer(),
     )
-    val result = shopify.webhookSubscriptions(
-      topics = listOf(WebhookSubscriptionTopic.ORDERS_CREATE, WebhookSubscriptionTopic.PRODUCTS_UPDATE),
-      callbackUrl = CALLBACK_URL,
-    )
+    val result = shopify.webhookSubscriptions()
     assert(result is Success)
     assert((result as Success).value.map { it.topic } == listOf("ORDERS_CREATE", "PRODUCTS_UPDATE"))
     assert(result.value.first().id == "gid://shopify/WebhookSubscription/1")
@@ -700,7 +733,45 @@ class HttpShopifyGraphqlServiceTest {
     assert((result as Failure).reason == ShopifyError.UserError(listOf("id: Webhook subscription does not exist")))
   }
 
+  @Test
+  fun `deleteWebhookSubscription sends the id and succeeds on the deleted id`() = runBlocking {
+    stubDeletePayload(WebhookSubscriptionDeletePayload(userErrors = emptyList(), deletedWebhookSubscriptionId = "gid://shopify/WebhookSubscription/7"))
+
+    val result = shopify.deleteWebhookSubscription("gid://shopify/WebhookSubscription/7")
+
+    assert(result == Success(Unit))
+    assert(fake.calls.single().variables.jsonObject["id"]?.jsonPrimitive?.content == "gid://shopify/WebhookSubscription/7")
+  }
+
+  @Test
+  fun `deleteWebhookSubscription prefixes a user error with the field it names`() = runBlocking {
+    stubDeletePayload(
+      WebhookSubscriptionDeletePayload(
+        userErrors = listOf(DeleteUserError(field = listOf("id"), message = "Webhook subscription does not exist")),
+        deletedWebhookSubscriptionId = null,
+      ),
+    )
+    val result = shopify.deleteWebhookSubscription("gid://shopify/WebhookSubscription/7")
+    assert((result as Failure).reason == ShopifyError.UserError(listOf("id: Webhook subscription does not exist")))
+  }
+
+  /** A payload without the deleted id and without a user error has not said the subscription is gone. */
+  @Test
+  fun `deleteWebhookSubscription without a deleted id in the payload is a GraphqlError`() = runBlocking {
+    stubDeletePayload(WebhookSubscriptionDeletePayload(userErrors = emptyList(), deletedWebhookSubscriptionId = null))
+    val result = shopify.deleteWebhookSubscription("gid://shopify/WebhookSubscription/7")
+    assert((result as Failure).reason is ShopifyError.GraphqlError)
+  }
+
   // ---------- helpers ----------
+
+  private fun stubDeletePayload(payload: WebhookSubscriptionDeletePayload) {
+    fake.stubData(
+      "DeleteWebhookSubscription",
+      DeleteWebhookSubscription.Result(webhookSubscriptionDelete = payload),
+      DeleteWebhookSubscription.Result.serializer(),
+    )
+  }
 
   private fun stubUpdatedSubscription(includeFields: List<String>) {
     fake.stubData(

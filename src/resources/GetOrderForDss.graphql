@@ -2,10 +2,8 @@ query GetOrderForDss($id: ID!) {
   order(id: $id) {
     id
     name
-    # Not mapped into the monolith order: kept in the snapshot for discoverability. Like the shipping address, it is
-    # protected customer data, which a public app may only read with Shopify's approval.
+    # Protected customer data, like the shipping address: a public app may only read it with Shopify's approval.
     email
-    legacyResourceId
     createdAt
     totalPriceSet {
       shopMoney {
@@ -40,7 +38,6 @@ query GetOrderForDss($id: ID!) {
             }
           }
           variant {
-            id
             legacyResourceId
           }
         }
@@ -56,9 +53,7 @@ query GetOrderForDss($id: ID!) {
               node {
                 id
                 remainingQuantity
-                totalQuantity
                 variant {
-                  id
                   legacyResourceId
                 }
               }
@@ -69,7 +64,6 @@ query GetOrderForDss($id: ID!) {
     }
     fulfillments(first: 50) {
       id
-      legacyResourceId
       # A cancelled fulfillment keeps its tracking number, so it has to be told apart from a live one.
       status
       trackingInfo {

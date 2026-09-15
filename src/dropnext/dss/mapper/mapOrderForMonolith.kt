@@ -96,6 +96,7 @@ fun mapOrderForMonolith(
     shopifySubdomain = shopifySubdomain,
     shopifyOrderId = orderId.value,
     name = order.name,
+    email = order.email,
     financialStatus = order.displayFinancialStatus?.toFinancialString() ?: "Unknown",
     fulfillmentStatus = order.displayFulfillmentStatus.toMonolithFulfillmentStatus(),
     createdAt = formatCreatedAtUtcZ(order.createdAt),

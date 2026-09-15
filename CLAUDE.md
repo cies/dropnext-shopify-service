@@ -137,14 +137,16 @@ credentials, so the human developer starts it — see "Operational boundary".
    `200` would lose the delivery.
 4. Dispatch on `ShopifyWebhookTopic`, each case one workflow function:
    - `products/create`, `products/update`: `syncShopifyProductToMonolith` — `productById`, map with
-     `toProductVariantItems`, upsert the variants on the monolith (`upsertProductVariants`).
+     `toProductVariantItems`, upsert the variants on the monolith (`upsertProductVariants`). Subscribed id-only
+     (`id`, `admin_graphql_api_id`), like `orders/create`: the product is loaded anyway.
    - `products/delete`: `deleteShopifyProductFromMonolith` — the product id from the body (the only thing the
      body carries; the product can no longer be fetched), soft-delete its variants on the monolith
      (`deleteProductVariants`). Needs no Admin token, so it runs even for a shop without one.
    - `orders/create`: `syncShopifyOrderToMonolith` — `orderForDss`, `mapOrderForMonolith` (keyed by the id the webhook's gid carries),
      `postCreateOrder` (a `409` from the monolith is `CreateOrderOutcome.AlreadyExisted`, a success).
-   - `orders/updated`: acknowledged, not mirrored (the `create` already carried the order).
-   - Anything else: logged and acknowledged.
+   - Anything else: logged and acknowledged. That includes `orders/updated`, which the service no longer subscribes to
+     but a shop registered before may still deliver until its subscriptions are registered again, and Shopify's
+     compliance topics, which are not subscribed (see "Shopify app distribution").
 5. Every workflow answers a `WebhookMirrorOutcome`, and the handler chooses the status from it (`isTransient`): `200`
    when a redelivery could not go better (mirrored, nothing to mirror, no token, a token, a request or a query that is
    refused, an answer that no longer decodes), `502` when Shopify or the monolith did not answer, throttled, answered a
@@ -181,14 +183,21 @@ decode or does not pass the domain validators is a `400` shaped by `StatusPages`
 | `POST /tracking-update` | `TrackingUpdateRequest` | `syncShopifyTrackingEvent`: a tracking status becomes a Shopify `FulfillmentEvent`. |
 | `PUT /stores/api-key` | `UpdateStoreApiKeyRequest` | Caches the shop's Admin token in memory and forwards it to the monolith; answers `502` (or `404` for a store the monolith does not know) when the monolith did not persist it, with the token still cached. A blank `api_key` or a non-positive `shopify_shop_id` is a `400` before the cache is touched; `shopify_shop_id` is `null` when unknown. |
 
-The other inbound routes are the OAuth pair (`/install`, `/oauth/callback`) and the diagnostics endpoints (`/`,
-`/health`, `/api`, `/api/check`, `/api/redirect-url`); all of them are constants in `path/Paths.kt`. `/health` answers
+The other inbound routes are the OAuth pair (`/install`, `/oauth/callback`), the diagnostics endpoints (`/`,
+`/health`, `/api`, `/api/redirect-url`) and the per-shop webhook subscription pair (`/api/check`,
+`/api/webhooks/register`, `WebhookSubscriptionHandlers`); all of them are constants in `path/Paths.kt`. `/health` answers
 `503` with `status=warming_up` until the warm-up is done (see "Warm-up and readiness") and `200` with `status=ok`
-after; it is the one route the readiness gate touches. `/api/check?shop=`
-is the one diagnostics route behind the bearer auth: it answers whether the shop's token resolves and, from a
-read-only `scanShopifyWebhooks`, one row per handled webhook topic (`active` at our callback URL with the payload
-fields the topic declares, no filter and JSON, `mismatched` when subscribed there otherwise, or `missing`, plus stale
-subscriptions pointing elsewhere), so "is this shop still subscribed" can be asked without a reinstall.
+after; it is the one route the readiness gate touches. The webhook subscription pair sits behind the bearer auth.
+`GET /api/check?shop=` answers whether the shop's token resolves and, from a read-only `scanShopifyWebhooks`, one row
+per handled webhook topic (`active` at our callback URL with the payload fields the topic declares, no filter and JSON,
+`mismatched` when subscribed there otherwise, or `missing`, plus stale subscriptions pointing elsewhere) and the
+`obsolete` subscriptions at our URL for a topic the service does not handle, so "is this shop still subscribed" can be
+asked without a reinstall. `POST /api/webhooks/register?shop=` runs the install's registration for one shop without the
+merchant (`reregisterShopifyWebhooks`): it is how a change to the handled topics or their payload fields reaches a shop
+installed before it, and the monolith calls it once per shop it wants to bring along. It answers the same rows with
+what the run changed (`added`, `updated`, `repointed`, `not_applied`, `failed`, obsolete ones `deleted` or
+`delete_failed`) and a `summary` of the counts; a failed scan is a `502`, because a run without it would register blind
+and delete nothing. It never touches the token.
 
 The canonical contract is the monolith's `/openapi.json`, checked in here as `src/resources/monolith-dss-openapi.json`;
 the DTOs (`dropnext.dss.contract`) and `OutBoundMonolithPaths` are generated from it — never
@@ -211,9 +220,26 @@ callback HMAC and the state, exchanges the code for an Admin token (`ShopifyOAut
 it to the monolith (`putStoreApiKey`), count the catalogue, register the webhook subscriptions
 (`registerShopifyWebhooks`: scans what exists, updates a subscription at our URL whose payload fields, filter or
 format differ, repoints one stale HTTPS subscription per missing topic to our URL (resetting the same three), registers
-the topics still missing with the fields each topic declares, and reports active/added/updated/repointed/not applied/failed) and answer a `ShopInstallReport` that
+the topics still missing with the fields each topic declares, deletes a subscription at our URL for a topic the
+service does not handle, and reports active/added/updated/repointed/not applied/failed/deleted) and answer a `ShopInstallReport` that
 `renderOAuthInstallPage` renders. Nothing after the exchange fails the install; each step reports on the page instead.
 Failures in this flow are plain-text errors (`respondTextError`), not JSON.
+
+## Shopify app distribution
+The Shopify app is custom-distributed, not public: it is not in the App Store, listed or unlisted. Several things this
+service leaves out follow from that, and none of them can be switched on later for the same app, because Shopify does
+not change an app's distribution method: going public means a new app, with new client credentials, which every shop
+installs again.
+
+- **No compliance webhooks, no redaction.** `customers/data_request`, `customers/redact` and `shop/redact` are required
+  only of App Store apps. They are not subscribed (they can only be declared in the app configuration, never through
+  the Admin API), a delivery would be acknowledged as an unhandled topic, and nothing in the monolith redacts the
+  customer data it stores. Shopify's API Terms still bind a custom app: a merchant's data is deleted within 30 days of an
+  uninstall or of an enforceable deletion request. Nothing automates that yet.
+- **Non-expiring offline tokens.** Expiring ones are required only of public apps.
+- **Protected customer data without review.** The order's shipping address, name, phone and email are available to a
+  custom app as it is; a public app has to request those fields and pass a review.
+- **Installs.** A custom-distribution app installs on one store, or on the stores of one Shopify Plus organization.
 
 ## Outbound monolith integration
 `HttpMonolithService` is the single HTTP boundary to the monolith; `MonolithService` is its interface and
@@ -273,8 +299,8 @@ traffic, in two parts that each end in one log line: the **outbound** part (one 
 service) needs only the dependency graph and starts on
 Ktor's `ApplicationStarted`; the **inbound** part waits for `ServerReady` (the socket is bound) and sends the service
 two requests over `127.0.0.1` through `HttpWarmUpLoopbackService` (`boot/warmup/`): `GET /api/check` with the monolith's
-bearer, and a self-signed `orders/updated` delivery with webhook id `warm-up`, so every plugin and the HMAC have run
-once. Both parts name `WARM_UP_PLACEHOLDER_SHOP`, which the monolith answers `404` for. The warm-up changes nothing and never throws for an upstream failure; a step it cannot run is `skipped`
+bearer, and a self-signed delivery for `orders/updated` (a topic the service does not subscribe to, so it is acknowledged
+without work) with webhook id `warm-up`, so every plugin and the HMAC have run once. Both parts name `WARM_UP_PLACEHOLDER_SHOP`, which the monolith answers `404` for. The warm-up changes nothing and never throws for an upstream failure; a step it cannot run is `skipped`
 with a reason, a step that goes wrong is `failed` with a countable label.
 
 - `Readiness` (`boot/warmup/`) is the flag `/health` reads; `startWarmUp` (same package, called by `dssModule`) marks it in a `finally` when the `WarmUp` returns,

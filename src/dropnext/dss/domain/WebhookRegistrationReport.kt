@@ -8,8 +8,12 @@ package dropnext.dss.domain
  * lists subscriptions for the same topic that point elsewhere (an earlier tunnel, another environment) and
  * still receive the deliveries. After an install it holds what could not be repointed to our URL: those beside
  * a subscription already there, all but the first of several, and any that is not an HTTPS address.
+ * [obsolete] lists what is subscribed at our callback URL for a topic the service does not handle.
  */
-data class WebhookRegistrationReport(val topics: List<WebhookTopicRegistration>) {
+data class WebhookRegistrationReport(
+  val topics: List<WebhookTopicRegistration>,
+  val obsolete: List<ObsoleteWebhookSubscription> = emptyList(),
+) {
   val activeCount: Int get() = topics.count { it.status is WebhookTopicStatus.Active }
   val addedCount: Int get() = topics.count { it.status is WebhookTopicStatus.Added }
   val updatedCount: Int get() = topics.count { it.status is WebhookTopicStatus.Updated }
@@ -17,6 +21,12 @@ data class WebhookRegistrationReport(val topics: List<WebhookTopicRegistration>)
   val missingCount: Int get() = topics.count { it.status is WebhookTopicStatus.Missing }
   val staleCount: Int get() = topics.sumOf { it.stale.size }
   val failures: List<WebhookTopicRegistration> get() = topics.filter { it.status is WebhookTopicStatus.Unsuccessful }
+
+  /** Deleted by this run. */
+  val deletedCount: Int get() = obsolete.count { it.removal is ObsoleteSubscriptionRemoval.Deleted }
+
+  /** Still subscribed after this run: a scan does not delete, and a deletion can fail. */
+  val obsoleteCount: Int get() = obsolete.count { it.removal !is ObsoleteSubscriptionRemoval.Deleted }
 }
 
 /** [topic] is the Admin API enum name (`PRODUCTS_CREATE`). */
@@ -60,6 +70,25 @@ sealed interface WebhookTopicStatus {
 
   /** This run tried and Shopify refused; [error] is its user error, which the reader is about to act on. */
   data class Failed(val error: String) : Unsuccessful
+}
+
+/**
+ * A subscription at our callback URL for a topic the service does not handle, typically one an earlier version
+ * registered: every delivery would be verified and acknowledged for nothing.
+ */
+data class ObsoleteWebhookSubscription(
+  val subscription: WebhookSubscriptionStatus,
+  val removal: ObsoleteSubscriptionRemoval,
+)
+
+sealed interface ObsoleteSubscriptionRemoval {
+  /** A read-only scan: nothing was sent to Shopify. */
+  data object NotAttempted : ObsoleteSubscriptionRemoval
+
+  data object Deleted : ObsoleteSubscriptionRemoval
+
+  /** Shopify refused or did not answer; [error] says which, and the subscription is still there. */
+  data class Failed(val error: String) : ObsoleteSubscriptionRemoval
 }
 
 /**

@@ -1,5 +1,8 @@
-query GetWebhookSubscriptions($topics: [WebhookSubscriptionTopic!], $uri: String) {
-  webhookSubscriptions(first: 100, topics: $topics, uri: $uri) {
+# Every subscription this app has on the shop, whatever its topic or address: one at our callback URL for a topic the
+# service no longer handles has to be seen to be deleted. The answer holds this app's subscriptions only, a handful per
+# shop, so one page is all there is.
+query GetWebhookSubscriptions {
+  webhookSubscriptions(first: 100) {
     nodes {
       id
       topic

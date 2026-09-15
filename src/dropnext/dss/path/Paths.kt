@@ -16,8 +16,11 @@ object Paths {
   const val index = "/"
   const val health = "/health"
   const val api = "/api"
-  const val apiCheck = "/api/check"
   const val apiRedirectUrl = "/api/redirect-url"
+
+  // --- Webhook subscriptions (called by the monolith) ---
+  const val apiCheck = "/api/check"
+  const val apiWebhooksRegister = "/api/webhooks/register"
 
   // --- Shopify OAuth ---
   const val install = "/install"

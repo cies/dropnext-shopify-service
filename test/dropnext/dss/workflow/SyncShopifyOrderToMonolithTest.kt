@@ -181,7 +181,7 @@ class SyncShopifyOrderToMonolithTest {
     val tip = mapped.copy(id = "gid://shopify/LineItem/202", variant = null)
     val unknownVariant = mapped.copy(
       id = "gid://shopify/LineItem/203",
-      variant = mapped.variant!!.copy(id = "gid://shopify/ProductVariant/999", legacyResourceId = "999"),
+      variant = mapped.variant!!.copy(legacyResourceId = "999"),
     )
     val order = minimalOrder().copy(
       lineItems = LineItemConnection(edges = listOf(mapped, tip, unknownVariant).map { LineItemEdge(node = it) }),

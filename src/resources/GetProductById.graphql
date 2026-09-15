@@ -3,7 +3,6 @@ query GetProductById($id: ID!) {
     currencyCode
   }
   product(id: $id) {
-    id
     legacyResourceId
     title
     description
@@ -25,6 +24,8 @@ query GetProductById($id: ID!) {
               url
             }
           }
+          # Not read, but selected: the generated client cannot decode a `__typename` it has no class for, so without
+          # these a product with a video or a 3D model would not decode and never reach the monolith.
           ... on Video {
             id
           }
@@ -40,13 +41,11 @@ query GetProductById($id: ID!) {
     variants(first: 100) {
       edges {
         node {
-          id
           legacyResourceId
           title
           sku
           barcode
           price
-          updatedAt
           selectedOptions {
             name
             value
@@ -60,6 +59,8 @@ query GetProductById($id: ID!) {
                     url
                   }
                 }
+                # Not read, but selected: the generated client cannot decode a `__typename` it has no class for, so without
+                # these a product with a video or a 3D model would not decode and never reach the monolith.
                 ... on Video {
                   id
                 }

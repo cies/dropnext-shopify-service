@@ -5,11 +5,12 @@ import dropnext.graphql.generated.enums.WebhookSubscriptionTopic
 
 
 /**
- * The `orders` topics carry ids only: the order is loaded through Graphql right after the delivery, so the rest of the
- * payload would only be bytes to verify and parse. It does not spare the app protected customer data access: loading the
- * order, with its shipping address and e-mail, needs that access just as a full payload would.
+ * The resource id and nothing more: the product or the order is loaded through Graphql right after the delivery, so the
+ * rest of the payload (megabytes for a product with many variants) would only be bytes to verify and discard. It does
+ * not spare the app protected customer data access: loading the order, with its shipping address and email, needs that
+ * access just as a full payload would.
  */
-private val ordersSafeFields = listOf("id", "admin_graphql_api_id")
+private val idOnlyFields = listOf("id", "admin_graphql_api_id")
 
 /**
  * Inbound webhook topics this service routes on. [Other] captures any unhandled topic header,
@@ -18,8 +19,8 @@ private val ordersSafeFields = listOf("id", "admin_graphql_api_id")
  * and lose that signal.
  *
  * Each known case carries the matching Shopify Admin Graphql [subscriptionTopic] and the fields the subscription projects,
- * so the post-installation registration (`workflow/registerShopifyWebhooks`) derives everything from [known]:
- * adding a topic in one place is enough.
+ * so the webhook registration (`workflow/registerShopifyWebhooks`) derives everything from [known]: adding a topic in one
+ * place is enough, and removing one there has the registration delete the subscription it leaves behind.
  */
 sealed interface ShopifyWebhookTopic {
   val raw: String
@@ -46,13 +47,16 @@ sealed interface ShopifyWebhookTopic {
   data object ProductsCreate : ShopifyWebhookTopic {
     override val raw = "products/create"
     override val subscriptionTopic = WebhookSubscriptionTopic.PRODUCTS_CREATE
+    override val includeFields = idOnlyFields
   }
 
   data object ProductsUpdate : ShopifyWebhookTopic {
     override val raw = "products/update"
     override val subscriptionTopic = WebhookSubscriptionTopic.PRODUCTS_UPDATE
+    override val includeFields = idOnlyFields
   }
 
+  /** The full payload: it is `{"id": …}` already, so a field list would only be one more thing Shopify could report back differently. */
   data object ProductsDelete : ShopifyWebhookTopic {
     override val raw = "products/delete"
     override val subscriptionTopic = WebhookSubscriptionTopic.PRODUCTS_DELETE
@@ -61,13 +65,7 @@ sealed interface ShopifyWebhookTopic {
   data object OrdersCreate : ShopifyWebhookTopic {
     override val raw = "orders/create"
     override val subscriptionTopic = WebhookSubscriptionTopic.ORDERS_CREATE
-    override val includeFields = ordersSafeFields
-  }
-
-  data object OrdersUpdated : ShopifyWebhookTopic {
-    override val raw = "orders/updated"
-    override val subscriptionTopic = WebhookSubscriptionTopic.ORDERS_UPDATED
-    override val includeFields = ordersSafeFields
+    override val includeFields = idOnlyFields
   }
 
   data class Other(override val raw: String) : ShopifyWebhookTopic {
@@ -81,7 +79,6 @@ sealed interface ShopifyWebhookTopic {
       ProductsCreate,
       ProductsDelete,
       OrdersCreate,
-      OrdersUpdated,
     )
 
     fun parse(header: String?): ShopifyWebhookTopic =
@@ -90,7 +87,6 @@ sealed interface ShopifyWebhookTopic {
         ProductsUpdate.raw -> ProductsUpdate
         ProductsDelete.raw -> ProductsDelete
         OrdersCreate.raw -> OrdersCreate
-        OrdersUpdated.raw -> OrdersUpdated
         else -> Other(v)
       }
   }

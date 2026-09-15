@@ -11,7 +11,26 @@ class ShopifyWebhookTopicTest {
     assert(ShopifyWebhookTopic.parse("products/update") == ShopifyWebhookTopic.ProductsUpdate)
     assert(ShopifyWebhookTopic.parse("products/delete") == ShopifyWebhookTopic.ProductsDelete)
     assert(ShopifyWebhookTopic.parse("orders/create") == ShopifyWebhookTopic.OrdersCreate)
-    assert(ShopifyWebhookTopic.parse("orders/updated") == ShopifyWebhookTopic.OrdersUpdated)
+  }
+
+  /** Shops installed before the topic was dropped keep delivering it until their subscriptions are registered again. */
+  @Test
+  fun `a topic the service no longer handles falls into Other`() {
+    assert(ShopifyWebhookTopic.parse("orders/updated") == ShopifyWebhookTopic.Other("orders/updated"))
+  }
+
+  /** Both are loaded through Graphql after the delivery, so the payload is only the id to load. */
+  @Test
+  fun `the products create and update topics declare id-only fields, the delete topic the full payload`() {
+    assert(ShopifyWebhookTopic.ProductsCreate.includeFields == listOf("id", "admin_graphql_api_id"))
+    assert(ShopifyWebhookTopic.ProductsUpdate.includeFields == listOf("id", "admin_graphql_api_id"))
+    assert(ShopifyWebhookTopic.ProductsDelete.includeFields == null)
+  }
+
+  @Test
+  fun `known holds no topic twice and every one has a subscription topic`() {
+    assert(ShopifyWebhookTopic.known.toSet().size == ShopifyWebhookTopic.known.size)
+    assert(ShopifyWebhookTopic.known.all { it.subscriptionTopic != null })
   }
 
   @Test
@@ -46,7 +65,7 @@ class ShopifyWebhookTopicTest {
   @Test
   fun `a topic's include fields match Shopify's report as a set, with the full payload reported as empty`() {
     assert(ShopifyWebhookTopic.OrdersCreate.matchesIncludeFields(listOf("admin_graphql_api_id", "id")))
-    assert(ShopifyWebhookTopic.ProductsCreate.matchesIncludeFields(emptyList()))
+    assert(ShopifyWebhookTopic.ProductsDelete.matchesIncludeFields(emptyList()))
   }
 
   @Test
@@ -54,19 +73,20 @@ class ShopifyWebhookTopicTest {
     assert(!ShopifyWebhookTopic.OrdersCreate.matchesIncludeFields(emptyList()))
     assert(!ShopifyWebhookTopic.OrdersCreate.matchesIncludeFields(listOf("id")))
     assert(!ShopifyWebhookTopic.ProductsUpdate.matchesIncludeFields(listOf("id")))
+    assert(!ShopifyWebhookTopic.ProductsUpdate.matchesIncludeFields(emptyList()))
   }
 
   @Test
   fun `a subscription matches a topic with the declared fields, no filter and json`() {
     assert(ShopifyWebhookTopic.OrdersCreate.matchesSubscription(webhookSubscriptionStatus(includeFields = listOf("id", "admin_graphql_api_id"))))
-    assert(ShopifyWebhookTopic.ProductsCreate.matchesSubscription(webhookSubscriptionStatus(filter = "")))
+    assert(ShopifyWebhookTopic.ProductsDelete.matchesSubscription(webhookSubscriptionStatus(filter = "")))
   }
 
   /** A filter drops events, and XML is a body the webhook parsers cannot read. */
   @Test
   fun `a subscription with a filter, in xml or with other fields does not match`() {
-    assert(!ShopifyWebhookTopic.ProductsCreate.matchesSubscription(webhookSubscriptionStatus(filter = "vendor:Acme")))
-    assert(!ShopifyWebhookTopic.ProductsCreate.matchesSubscription(webhookSubscriptionStatus(format = "XML")))
+    assert(!ShopifyWebhookTopic.ProductsDelete.matchesSubscription(webhookSubscriptionStatus(filter = "vendor:Acme")))
+    assert(!ShopifyWebhookTopic.ProductsDelete.matchesSubscription(webhookSubscriptionStatus(format = "XML")))
     assert(!ShopifyWebhookTopic.OrdersCreate.matchesSubscription(webhookSubscriptionStatus(includeFields = emptyList())))
   }
 }

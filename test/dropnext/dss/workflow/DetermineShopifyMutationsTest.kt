@@ -90,10 +90,8 @@ class DetermineShopifyMutationsTest {
       orderWithTwoVariantFulfillmentOrders(
         firstVariantId = 101L,
         firstRemaining = 0,
-        firstTotal = 1,
         secondVariantId = 202L,
         secondRemaining = 1,
-        secondTotal = 1,
       ),
     )
     val shipments = listOf(
@@ -130,7 +128,7 @@ class DetermineShopifyMutationsTest {
   fun `a shipment already fulfilled is logged at info with the fulfillment it landed on`() {
     val fake = FakeShopifyGraphqlService()
     fake.orderForDssResult = Success(
-      orderWithFoQuantities(remaining = 1, total = 2).copy(fulfillments = listOf(fulfillment(8000L, listOf("TRK-A")))),
+      orderWithFoQuantities(remaining = 1).copy(fulfillments = listOf(fulfillment(8000L, listOf("TRK-A")))),
     )
     val lines = capturingLogs {
       runBlocking { determineShopifyMutations(fake, ShopifyOrderId(1001L), listOf(shipment(tracking = "TRK-A"))) }
@@ -145,7 +143,7 @@ class DetermineShopifyMutationsTest {
   fun `a tracking number on two live fulfillments is logged at warn with both`() {
     val fake = FakeShopifyGraphqlService()
     fake.orderForDssResult = Success(
-      orderWithFoQuantities(remaining = 1, total = 3).copy(
+      orderWithFoQuantities(remaining = 1).copy(
         fulfillments = listOf(fulfillment(8000L, listOf("TRK-A")), fulfillment(8001L, listOf("TRK-A"))),
       ),
     )

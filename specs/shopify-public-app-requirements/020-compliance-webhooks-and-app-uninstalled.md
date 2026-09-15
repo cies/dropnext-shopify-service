@@ -1,10 +1,12 @@
 # Spec: compliance webhooks and `app/uninstalled`
 
-Status: draft
+Status: draft, not built: the app is custom-distributed (`000`), and Shopify requires the compliance topics only of
+App Store apps. Checked against Shopify's documentation on 2026-09-16.
 Author: cies (with Claude)
 Date: 2026-09-12
-Depends on: the precondition of `010` for the compliance topics (they are required of public apps). `app/uninstalled`
-is worth having whatever the distribution, and does not depend on `010`.
+Depends on: `000` for the compliance topics. `app/uninstalled` is worth having whatever the distribution: Shopify's API
+Terms require deleting a merchant's data within 30 days of an uninstall from custom apps too, and today the monolith
+does not learn of one.
 Repos: monolith first (it holds the data and serves the contract), then the DSS; the app configuration in Shopify.
 
 
@@ -16,7 +18,8 @@ Repos: monolith first (it holds the data and serves the contract), then the DSS;
   that did reach `/webhooks/shopify` would be verified and then answered `200 skipped topic_not_mirrored`, having done
   nothing.
 - **Where the data is.** The DSS keeps no customer data: it is stateless and caches tokens only. The monolith does: every
-  order mirrored through `POST /orders` carries the customer's shipping address, name and phone number.
+  order mirrored through `POST /orders` carries the customer's shipping address, name and phone number (folded into
+  `delivery_addresses`) and the buyer's email (`shopify_orders.email`), and supplier orders repeat the address.
 - **Uninstalls.** Shopify revokes the app's token when a merchant uninstalls it. Nothing tells the monolith: it keeps the
   dead token in `stores.encoded_api_key`, keeps queuing shipment syncs and tracking updates for the shop, and each of
   them ends in a `401` (`DssError.ShopifyAdminTokenRejected`) that reads the same as a broken install.
@@ -29,17 +32,27 @@ Repos: monolith first (it holds the data and serves the contract), then the DSS;
 From Shopify's privacy law compliance documentation (see "Sources"; confirm the details when this spec is picked up):
 
 - **Who.** "Any app that you distribute through the Shopify App Store must respond to data subject requests, regardless
-  of whether the app collects personal data."
+  of whether the app collects personal data." Unlisted ("limited visibility") apps are distributed through the App Store
+  too. Custom-distribution apps are outside the scope; no page grants them an explicit exemption. The current App Store
+  requirements page no longer lists the topics as a review item, while the privacy page still says an app without them
+  is rejected.
 - **Configuration.** The compliance topics are declared in the app configuration (`shopify.app.toml`,
   `[[webhooks.subscriptions]]` with `compliance_topics`), deployed with the Shopify CLI. Shopify also recommends that
   configuration for ordinary topics; subscriptions declared there do not show up in the Admin API's
-  `webhookSubscriptions` query.
+  `webhookSubscriptions` query ("Returns only shop-scoped subscriptions, not app-scoped subscriptions configured in TOML
+  files"). The Dev Dashboard can declare them as well. Two consequences here: `/api/check` cannot see a declared
+  subscription, and the webhook registration never deletes one, since it only acts on what that query returns.
 - **Answers.** A `200`-series status for a valid request; `401 Unauthorized` when the HMAC does not verify, which
   `ShopifyWebhookHandlers` already answers.
-- **Deadlines.** The action is completed within 30 days of the request. `shop/redact` arrives 48 hours after the store
-  owner uninstalls the app.
-- **Payloads.** The shop (`shop_id`, `shop_domain`), and per topic the customer (`id`, `email`, `phone`), the orders
-  concerned (`orders_requested` or `orders_to_redact`) and, for a data request, its `data_request.id`.
+- **Deadlines.** The action is completed within 30 days of the request, unless the law requires keeping the data.
+  `shop/redact` arrives 48 hours after the store owner uninstalls the app. `customers/redact` arrives 10 days after the
+  deletion request when the customer has placed no order in the past six months; otherwise Shopify withholds it until
+  six months have passed.
+- **Payloads.** `customers/data_request`: `shop_id`, `shop_domain`, `orders_requested[]`, `customer {id, email, phone}`,
+  `data_request {id}`. `customers/redact`: `shop_id`, `shop_domain`, `customer {id, email, phone}`, `orders_to_redact[]`.
+  `shop/redact`: `shop_id`, `shop_domain`.
+- **Beyond the webhooks.** The API Terms oblige every app, custom ones included, to delete a merchant's data within 30
+  days of an uninstall or of "an enforceable request to delete data from a Merchant, a Customer or Shopify".
 
 
 ## What changes
@@ -57,15 +70,18 @@ From Shopify's privacy law compliance documentation (see "Sources"; confirm the 
   The answer is a `200` once the monolith has recorded the request, a `502` when it could not (Shopify redelivers). The
   DSS never needs the Admin token for these, so they run for a shop without one.
 - `WebhookSkipReason` and the delivery report labels gain nothing: each of these is mirrored or failed.
-- `/api/check` and the install page report whether the shop is subscribed to `app/uninstalled`.
+- `/api/check` and the install page report whether the shop is subscribed to `app/uninstalled`, which they can only if
+  it is registered through the API (open question 4).
 
 ### Monolith
 
 - Contract endpoints for an uninstall and for a privacy request.
 - A `privacy_requests` table: topic, store, customer id, order ids, Shopify's webhook id (unique, so a redelivery
   records nothing twice), received and completed timestamps.
-- Jobs: `customers/redact` removes or anonymises the customer's personal data on the named orders; `shop/redact` removes
+- Jobs: `customers/redact` removes or anonymizes the customer's personal data on the named orders; `shop/redact` removes
   the store's Shopify data; `customers/data_request` produces what the store owner has to hand over (open question 3).
+  The monolith keeps no Shopify customer id, so both customer topics are keyed by the order ids in the payload, within
+  the store. Matching on the stored email instead would reach orders Shopify did not name.
 - The uninstall clears `encoded_api_key` and stops the shop's sync and tracking jobs from calling the DSS.
 
 ### App configuration
@@ -118,16 +134,27 @@ From Shopify's privacy law compliance documentation (see "Sources"; confirm the 
 
 ## Open questions for the human developer
 
-1. Is the app public? The compliance topics are required only then (see `010`).
+1. Is the app public? The compliance topics are required only then. **Answered 2026-09-16:** no, it is
+   custom-distributed (`000`); this spec waits until that changes.
 2. One monolith endpoint per topic, or one privacy-request endpoint that takes the topic?
+   - Per topic: three routes, DTOs, `MonolithService` methods, wire tests and fake entries; the generated types stop
+     the DSS from building a request that lacks what its topic needs.
+   - One endpoint, `topic` as an enum and the fields the topics share (store, webhook id, order ids, a nullable data
+     request id): one of each; the monolith checks per topic that the request is complete.
+   - The verified Shopify payload passed through as it came: the monolith would parse Shopify's format, which the DSS
+     exists to keep out of it, and would store the customer's email and phone.
+   - Either way, a request the monolith refuses as incomplete is a bug and must not be acknowledged to Shopify.
 3. What does `customers/data_request` produce, and how does it reach the store owner?
 4. `app/uninstalled` registered through the API, like today's topics, or declared in the app configuration together
    with the compliance topics?
-5. Which monolith records hold the customer's personal data (orders, supplier orders, invoices), and which of them must
-   be kept for bookkeeping rather than redacted?
+5. Which monolith records hold the customer's personal data (orders with their delivery addresses and email, supplier
+   orders, invoices), and which of them must be kept for bookkeeping rather than redacted?
 
 
 ## Sources
 
 - [Shopify: privacy law compliance](https://shopify.dev/docs/apps/build/compliance/privacy-law-compliance)
 - [Shopify: subscribe to webhook topics](https://shopify.dev/docs/apps/build/webhooks/subscribe)
+- [Shopify Admin Graphql: `webhookSubscriptions`](https://shopify.dev/docs/api/admin-graphql/latest/queries/webhookSubscriptions)
+- [Shopify: App Store requirements](https://shopify.dev/docs/apps/launch/shopify-app-store/app-store-requirements)
+- [Shopify API Terms](https://www.shopify.com/legal/api-terms)

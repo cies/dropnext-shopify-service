@@ -3,10 +3,12 @@ package dropnext.dss.workflow
 import com.expediagroup.graphql.client.ktor.GraphQLKtorClient
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
+import dropnext.dss.domain.ObsoleteSubscriptionRemoval
 import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.domain.WebhookTopicStatus
 import dropnext.dss.lib.shopify.graphql.HttpShopifyGraphqlService
+import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlService
 import dropnext.dss.lib.shopify.webhook.ShopifyWebhookTopic
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlServer
@@ -14,9 +16,12 @@ import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
 import dropnext.dss.testutil.helper.capturingLogs
 import dropnext.dss.testutil.helper.shopifyGraphqlUrl
 import dropnext.dss.testutil.helper.testHttpClient
+import dropnext.graphql.generated.DeleteWebhookSubscription
 import dropnext.graphql.generated.GetWebhookSubscriptions
 import dropnext.graphql.generated.RegisterWebhook
 import dropnext.graphql.generated.UpdateWebhookSubscription
+import dropnext.graphql.generated.deletewebhooksubscription.UserError as DeleteUserError
+import dropnext.graphql.generated.deletewebhooksubscription.WebhookSubscriptionDeletePayload
 import dropnext.graphql.generated.enums.WebhookSubscriptionFormat
 import dropnext.graphql.generated.enums.WebhookSubscriptionTopic
 import dropnext.graphql.generated.getwebhooksubscriptions.WebhookSubscription as ExistingSubscription
@@ -33,6 +38,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -43,8 +49,8 @@ private const val CALLBACK_URL = "https://dss.example/webhooks/shopify"
 private const val OLD_CALLBACK_URL = "https://old-tunnel.example/webhooks/shopify"
 private const val OLDER_CALLBACK_URL = "https://older-tunnel.example/webhooks/shopify"
 private const val PUBSUB_URI = "pubsub://analytics-project:shopify-orders"
-private val ALL_TOPICS = setOf("PRODUCTS_CREATE", "PRODUCTS_UPDATE", "PRODUCTS_DELETE", "ORDERS_CREATE", "ORDERS_UPDATED")
-private val ORDERS_FIELDS = listOf("id", "admin_graphql_api_id")
+private val ALL_TOPICS = setOf("PRODUCTS_CREATE", "PRODUCTS_UPDATE", "PRODUCTS_DELETE", "ORDERS_CREATE")
+private val ID_ONLY_FIELDS = listOf("id", "admin_graphql_api_id")
 
 
 /**
@@ -77,38 +83,41 @@ class RegisterShopifyWebhooksTest {
   // ---------- registering ----------
 
   @Test
-  fun `a first install registers all five topics and reports each as added`() = runBlocking {
+  fun `a first install registers all four topics and reports each as added`() = runBlocking {
     stubExistingSubscriptions(emptyList())
     stubRegisterOk()
 
     val report = registerShopifyWebhooks(shopify, CALLBACK_URL)
 
-    assert(fake.calls.count { it.operationName == "RegisterWebhook" } == 5)
+    assert(fake.calls.count { it.operationName == "RegisterWebhook" } == 4)
     assert(report.topics.map { it.topic }.toSet() == ALL_TOPICS)
     assert(report.topics.all { it.status is WebhookTopicStatus.Added })
-    assert(report.addedCount == 5)
+    assert(report.addedCount == 4)
     assert(report.failures.isEmpty())
     val added = report.topics.first().status as WebhookTopicStatus.Added
     assert(added.subscription.id == "gid://shopify/WebhookSubscription/9999")
     assert(added.subscription.uri == CALLBACK_URL)
   }
 
+  /** Every topic whose resource is loaded through Graphql after the delivery; a deleted product's payload is its id already. */
   @Test
-  fun `restricts orders topics to id-only include fields`() = runBlocking {
+  fun `registers id-only include fields for every topic but products delete`() = runBlocking {
     stubExistingSubscriptions(emptyList())
     stubRegisterOk()
 
     registerShopifyWebhooks(shopify, CALLBACK_URL)
 
-    val registers = fake.calls.filter { it.operationName == "RegisterWebhook" }
-    val ordersCalls = registers.filter { "ORDERS_CREATE" in it.rawBody || "ORDERS_UPDATED" in it.rawBody }
-    val productCalls = registers.filter { call ->
-      "PRODUCTS_CREATE" in call.rawBody || "PRODUCTS_UPDATE" in call.rawBody || "PRODUCTS_DELETE" in call.rawBody
+    val fieldsByTopic = fake.calls.filter { it.operationName == "RegisterWebhook" }.associate { call ->
+      val variables = call.variables.jsonObject
+      variables["topic"]!!.jsonPrimitive.content to variables["includeFields"]?.jsonArray?.map { it.jsonPrimitive.content }
     }
-    assert(ordersCalls.size == 2)
-    assert(productCalls.size == 3)
-    ordersCalls.forEach { call -> assert("admin_graphql_api_id" in call.rawBody) }
-    productCalls.forEach { call -> assert("admin_graphql_api_id" !in call.rawBody) }
+    val expected = mapOf(
+      "PRODUCTS_UPDATE" to ID_ONLY_FIELDS,
+      "PRODUCTS_CREATE" to ID_ONLY_FIELDS,
+      "PRODUCTS_DELETE" to null,
+      "ORDERS_CREATE" to ID_ONLY_FIELDS,
+    )
+    assert(fieldsByTopic == expected)
   }
 
   /** The reinstall: everything is already there, so nothing is sent and nothing fails. */
@@ -121,7 +130,7 @@ class RegisterShopifyWebhooksTest {
 
     assert(fake.calls.none { it.operationName == "RegisterWebhook" })
     assert(updateCalls().isEmpty())
-    assert(report.activeCount == 5)
+    assert(report.activeCount == 4)
     assert(report.addedCount == 0)
     assert(report.failures.isEmpty())
   }
@@ -133,9 +142,9 @@ class RegisterShopifyWebhooksTest {
 
     val report = registerShopifyWebhooks(shopify, CALLBACK_URL)
 
-    assert(fake.calls.count { it.operationName == "RegisterWebhook" } == 3)
+    assert(fake.calls.count { it.operationName == "RegisterWebhook" } == 2)
     assert(report.activeCount == 2)
-    assert(report.addedCount == 3)
+    assert(report.addedCount == 2)
     assert(report.topics.single { it.topic == "PRODUCTS_CREATE" }.status is WebhookTopicStatus.Active)
     assert(report.topics.single { it.topic == "PRODUCTS_DELETE" }.status is WebhookTopicStatus.Added)
   }
@@ -156,7 +165,7 @@ class RegisterShopifyWebhooksTest {
 
     val report = registerShopifyWebhooks(shopify, CALLBACK_URL)
 
-    assert(report.failures.size == 5)
+    assert(report.failures.size == 4)
     assert(report.failures.all { "scope missing" in (it.status as WebhookTopicStatus.Failed).error })
     assert(report.failures.map { it.topic }.toSet() == ALL_TOPICS)
   }
@@ -169,8 +178,8 @@ class RegisterShopifyWebhooksTest {
 
     val report = registerShopifyWebhooks(shopify, CALLBACK_URL)
 
-    assert(fake.calls.count { it.operationName == "RegisterWebhook" } == 5)
-    assert(report.addedCount == 5)
+    assert(fake.calls.count { it.operationName == "RegisterWebhook" } == 4)
+    assert(report.addedCount == 4)
     assert(report.failures.isEmpty())
   }
 
@@ -180,30 +189,30 @@ class RegisterShopifyWebhooksTest {
   @Test
   fun `a subscription at our url with the full payload is updated to the declared fields, not registered again`() = runBlocking {
     stubExistingSubscriptions(activeAtCallbackUrl(except = "ORDERS_CREATE") + subscription(1, "ORDERS_CREATE", CALLBACK_URL, includeFields = emptyList()))
-    stubUpdated(1, "ORDERS_CREATE", CALLBACK_URL, ORDERS_FIELDS)
+    stubUpdated(1, "ORDERS_CREATE", CALLBACK_URL, ID_ONLY_FIELDS)
 
     val report = registerShopifyWebhooks(shopify, CALLBACK_URL)
 
     val variables = updateCalls().single().variables.jsonObject
     assert(variables["id"]!!.jsonPrimitive.content == "gid://shopify/WebhookSubscription/1")
     assert(variables["uri"]!!.jsonPrimitive.content == CALLBACK_URL)
-    assert(variables["includeFields"]!!.jsonArray.map { it.jsonPrimitive.content } == ORDERS_FIELDS)
+    assert(variables["includeFields"]!!.jsonArray.map { it.jsonPrimitive.content } == ID_ONLY_FIELDS)
     assert(fake.calls.none { it.operationName == "RegisterWebhook" })
     val ordersCreate = report.topics.single { it.topic == "ORDERS_CREATE" }.status as WebhookTopicStatus.Updated
-    assert(ordersCreate.subscription.includeFields == ORDERS_FIELDS)
+    assert(ordersCreate.subscription.includeFields == ID_ONLY_FIELDS)
     assert(report.updatedCount == 1)
   }
 
   /** `null` is the full payload: the client leaves the variable out, and the operation's `= null` default resets the fields. */
   @Test
-  fun `a products subscription restricted to some fields is reset to the full payload`() = runBlocking {
-    stubExistingSubscriptions(activeAtCallbackUrl(except = "PRODUCTS_CREATE") + subscription(1, "PRODUCTS_CREATE", CALLBACK_URL, includeFields = listOf("id")))
-    stubUpdated(1, "PRODUCTS_CREATE", CALLBACK_URL, includeFields = emptyList())
+  fun `a products delete subscription restricted to some fields is reset to the full payload`() = runBlocking {
+    stubExistingSubscriptions(activeAtCallbackUrl(except = "PRODUCTS_DELETE") + subscription(1, "PRODUCTS_DELETE", CALLBACK_URL, includeFields = listOf("id")))
+    stubUpdated(1, "PRODUCTS_DELETE", CALLBACK_URL, includeFields = emptyList())
 
     val report = registerShopifyWebhooks(shopify, CALLBACK_URL)
 
     assert("includeFields" !in updateCalls().single().variables.jsonObject)
-    assert(report.topics.single { it.topic == "PRODUCTS_CREATE" }.status is WebhookTopicStatus.Updated)
+    assert(report.topics.single { it.topic == "PRODUCTS_DELETE" }.status is WebhookTopicStatus.Updated)
   }
 
   /** An update Shopify accepted but did not apply must not read as a repair: it is how a changed meaning of `null` would show. */
@@ -238,7 +247,7 @@ class RegisterShopifyWebhooksTest {
     stubExistingSubscriptions(
       activeAtCallbackUrl(except = "ORDERS_CREATE") + subscription(1, "ORDERS_CREATE", CALLBACK_URL, format = WebhookSubscriptionFormat.XML),
     )
-    stubUpdated(1, "ORDERS_CREATE", CALLBACK_URL, ORDERS_FIELDS)
+    stubUpdated(1, "ORDERS_CREATE", CALLBACK_URL, ID_ONLY_FIELDS)
 
     val report = registerShopifyWebhooks(shopify, CALLBACK_URL)
 
@@ -251,7 +260,7 @@ class RegisterShopifyWebhooksTest {
     stubExistingSubscriptions(
       activeAtCallbackUrl(except = "PRODUCTS_UPDATE") + subscription(1, "PRODUCTS_UPDATE", CALLBACK_URL, filter = "vendor:Acme"),
     )
-    stubUpdated(1, "PRODUCTS_UPDATE", CALLBACK_URL, includeFields = emptyList(), filter = "vendor:Acme")
+    stubUpdated(1, "PRODUCTS_UPDATE", CALLBACK_URL, includeFields = ID_ONLY_FIELDS, filter = "vendor:Acme")
 
     val report = registerShopifyWebhooks(shopify, CALLBACK_URL)
 
@@ -267,7 +276,7 @@ class RegisterShopifyWebhooksTest {
         subscription(1, "ORDERS_CREATE", CALLBACK_URL, includeFields = emptyList()) +
         subscription(2, "ORDERS_CREATE", OLD_CALLBACK_URL),
     )
-    stubUpdated(1, "ORDERS_CREATE", CALLBACK_URL, ORDERS_FIELDS)
+    stubUpdated(1, "ORDERS_CREATE", CALLBACK_URL, ID_ONLY_FIELDS)
 
     val report = registerShopifyWebhooks(shopify, CALLBACK_URL)
 
@@ -283,14 +292,14 @@ class RegisterShopifyWebhooksTest {
   @Test
   fun `a missing topic repoints a stale https subscription instead of registering a new one`() = runBlocking {
     stubExistingSubscriptions(activeAtCallbackUrl(except = "ORDERS_CREATE") + subscription(1, "ORDERS_CREATE", OLD_CALLBACK_URL, includeFields = emptyList()))
-    stubUpdated(1, "ORDERS_CREATE", CALLBACK_URL, ORDERS_FIELDS)
+    stubUpdated(1, "ORDERS_CREATE", CALLBACK_URL, ID_ONLY_FIELDS)
 
     val report = registerShopifyWebhooks(shopify, CALLBACK_URL)
 
     val variables = updateCalls().single().variables.jsonObject
     assert(variables["id"]!!.jsonPrimitive.content == "gid://shopify/WebhookSubscription/1")
     assert(variables["uri"]!!.jsonPrimitive.content == CALLBACK_URL)
-    assert(variables["includeFields"]!!.jsonArray.map { it.jsonPrimitive.content } == ORDERS_FIELDS)
+    assert(variables["includeFields"]!!.jsonArray.map { it.jsonPrimitive.content } == ID_ONLY_FIELDS)
     assert(fake.calls.none { it.operationName == "RegisterWebhook" })
     val ordersCreate = report.topics.single { it.topic == "ORDERS_CREATE" }
     assert((ordersCreate.status as WebhookTopicStatus.Repointed).previousUri == OLD_CALLBACK_URL)
@@ -306,7 +315,7 @@ class RegisterShopifyWebhooksTest {
         subscription(1, "PRODUCTS_UPDATE", OLD_CALLBACK_URL) +
         subscription(2, "PRODUCTS_UPDATE", OLDER_CALLBACK_URL),
     )
-    stubUpdated(1, "PRODUCTS_UPDATE", CALLBACK_URL, includeFields = emptyList())
+    stubUpdated(1, "PRODUCTS_UPDATE", CALLBACK_URL, includeFields = ID_ONLY_FIELDS)
 
     val report = registerShopifyWebhooks(shopify, CALLBACK_URL)
 
@@ -334,16 +343,16 @@ class RegisterShopifyWebhooksTest {
   /** A Pub/Sub or EventBridge subscription is a pipeline someone set up on purpose, not an earlier address of this service. */
   @Test
   fun `a stale subscription that is not an https address is never repointed`() = runBlocking {
-    stubExistingSubscriptions(activeAtCallbackUrl(except = "ORDERS_UPDATED") + subscription(1, "ORDERS_UPDATED", PUBSUB_URI))
+    stubExistingSubscriptions(activeAtCallbackUrl(except = "ORDERS_CREATE") + subscription(1, "ORDERS_CREATE", PUBSUB_URI))
     stubRegisterOk()
 
     val report = registerShopifyWebhooks(shopify, CALLBACK_URL)
 
     assert(updateCalls().isEmpty())
     assert(fake.calls.count { it.operationName == "RegisterWebhook" } == 1)
-    val ordersUpdated = report.topics.single { it.topic == "ORDERS_UPDATED" }
-    assert(ordersUpdated.status is WebhookTopicStatus.Added)
-    assert(ordersUpdated.stale.map { it.uri } == listOf(PUBSUB_URI))
+    val ordersCreate = report.topics.single { it.topic == "ORDERS_CREATE" }
+    assert(ordersCreate.status is WebhookTopicStatus.Added)
+    assert(ordersCreate.stale.map { it.uri } == listOf(PUBSUB_URI))
   }
 
   /** The install is there to leave a subscription at our address; a stale one that could not be repointed must not cost the topic that. */
@@ -365,7 +374,7 @@ class RegisterShopifyWebhooksTest {
   @Test
   fun `a repoint Shopify answers at the old address falls back to registering the topic`() = runBlocking {
     stubExistingSubscriptions(activeAtCallbackUrl(except = "ORDERS_CREATE") + subscription(1, "ORDERS_CREATE", OLD_CALLBACK_URL))
-    stubUpdated(1, "ORDERS_CREATE", OLD_CALLBACK_URL, ORDERS_FIELDS)
+    stubUpdated(1, "ORDERS_CREATE", OLD_CALLBACK_URL, ID_ONLY_FIELDS)
     stubRegisterOk()
 
     val report = registerShopifyWebhooks(shopify, CALLBACK_URL)
@@ -381,7 +390,7 @@ class RegisterShopifyWebhooksTest {
     stubExistingSubscriptions(
       activeAtCallbackUrl(except = "ORDERS_CREATE") + subscription(1, "ORDERS_CREATE", OLD_CALLBACK_URL, format = WebhookSubscriptionFormat.XML),
     )
-    stubUpdated(1, "ORDERS_CREATE", CALLBACK_URL, ORDERS_FIELDS, format = WebhookSubscriptionFormat.XML)
+    stubUpdated(1, "ORDERS_CREATE", CALLBACK_URL, ID_ONLY_FIELDS, format = WebhookSubscriptionFormat.XML)
     stubRegisterOk()
 
     val report = registerShopifyWebhooks(shopify, CALLBACK_URL)
@@ -392,18 +401,94 @@ class RegisterShopifyWebhooksTest {
     assert(ordersCreate.stale.map { it.id } == listOf("gid://shopify/WebhookSubscription/1"))
   }
 
-  // ---------- scanning ----------
+  // ---------- deleting what the service no longer handles ----------
+
+  /** Shops installed while the service subscribed to `orders/updated` keep receiving it until the subscription is deleted. */
+  @Test
+  fun `a subscription at our url for a topic the service does not handle is deleted`() = runBlocking {
+    stubExistingSubscriptions(activeAtCallbackUrl() + subscription(1, "ORDERS_UPDATED", CALLBACK_URL))
+    stubDeleted(1)
+
+    val report = registerShopifyWebhooks(shopify, CALLBACK_URL)
+
+    assert(deleteCalls().single().variables.jsonObject["id"]!!.jsonPrimitive.content == "gid://shopify/WebhookSubscription/1")
+    assert(report.obsolete.single().removal == ObsoleteSubscriptionRemoval.Deleted)
+    assert(report.deletedCount == 1)
+    assert(report.obsoleteCount == 0)
+    assert(fake.calls.none { it.operationName == "RegisterWebhook" })
+    assert(updateCalls().isEmpty())
+  }
+
+  /** Another environment or a pipeline someone set up may be what receives it: only our own address is ours to clean. */
+  @Test
+  fun `a subscription elsewhere for a topic the service does not handle is left alone`() = runBlocking {
+    stubExistingSubscriptions(activeAtCallbackUrl() + subscription(1, "ORDERS_UPDATED", OLD_CALLBACK_URL))
+
+    val report = registerShopifyWebhooks(shopify, CALLBACK_URL)
+
+    assert(deleteCalls().isEmpty())
+    assert(report.obsolete.isEmpty())
+    assert(report.staleCount == 0)
+  }
+
+  /** What the run did for the handled topics stands; the subscription that could not be deleted is named. */
+  @Test
+  fun `a deletion Shopify refuses is reported with its user error and keeps counting as obsolete`() = runBlocking {
+    stubExistingSubscriptions(activeAtCallbackUrl(except = "ORDERS_CREATE") + subscription(1, "ORDERS_UPDATED", CALLBACK_URL))
+    stubRegisterOk()
+    stubDeleteRefused("Webhook subscription does not exist")
+
+    val report = registerShopifyWebhooks(shopify, CALLBACK_URL)
+
+    val removal = report.obsolete.single().removal as ObsoleteSubscriptionRemoval.Failed
+    assert("Webhook subscription does not exist" in removal.error)
+    assert(report.obsoleteCount == 1)
+    assert(report.deletedCount == 0)
+    assert(report.topics.single { it.topic == "ORDERS_CREATE" }.status is WebhookTopicStatus.Added)
+    assert(report.failures.isEmpty())
+  }
+
+  // ---------- registering again for a shop installed earlier ----------
 
   @Test
-  fun `the scan asks Shopify for every handled topic without a url filter`() = runBlocking {
+  fun `registering again does what the install does`() = runBlocking {
+    stubExistingSubscriptions(
+      activeAtCallbackUrl(except = "PRODUCTS_UPDATE") +
+        subscription(1, "PRODUCTS_UPDATE", CALLBACK_URL, includeFields = emptyList()) +
+        subscription(2, "ORDERS_UPDATED", CALLBACK_URL),
+    )
+    stubUpdated(1, "PRODUCTS_UPDATE", CALLBACK_URL, ID_ONLY_FIELDS)
+    stubDeleted(2)
+
+    val report = (reregisterShopifyWebhooks(shopify, CALLBACK_URL) as Success).value
+
+    assert(report.topics.single { it.topic == "PRODUCTS_UPDATE" }.status is WebhookTopicStatus.Updated)
+    assert(report.activeCount == 3)
+    assert(report.deletedCount == 1)
+  }
+
+  /** Without the scan every existing topic would come back refused and nothing would be deleted; the caller can ask again. */
+  @Test
+  fun `registering again fails on a failed scan and sends Shopify nothing else`() = runBlocking {
+    fake.stubRaw("GetWebhookSubscriptions", """{"data":null,"errors":[{"message":"Throttled"}]}""")
+    stubRegisterOk()
+
+    val result = reregisterShopifyWebhooks(shopify, CALLBACK_URL)
+
+    assert((result as Failure).reason is ShopifyError.GraphqlError)
+    assert(fake.calls.map { it.operationName } == listOf("GetWebhookSubscriptions"))
+  }
+
+  // ---------- scanning ----------
+
+  /** A filter by topic would hide what an earlier version subscribed to, and a filter by address what an earlier tunnel still receives. */
+  @Test
+  fun `the scan asks Shopify for all of the app's subscriptions without a filter`() = runBlocking {
     stubExistingSubscriptions(emptyList())
 
     scanShopifyWebhooks(shopify, CALLBACK_URL)
 
-    val variables = fake.calls.single { it.operationName == "GetWebhookSubscriptions" }.variables.jsonObject
-    assert(variables["topics"]!!.jsonArray.map { it.jsonPrimitive.content }.toSet() == ALL_TOPICS)
-    // The client leaves out a variable whose value is null, so "no url filter" is a missing key, never a null.
-    assert("uri" !in variables)
+    assert(fake.calls.single { it.operationName == "GetWebhookSubscriptions" }.variables == JsonNull)
   }
 
   @Test
@@ -412,7 +497,7 @@ class RegisterShopifyWebhooksTest {
       listOf(
         subscription(1, "PRODUCTS_CREATE", CALLBACK_URL),
         subscription(2, "PRODUCTS_CREATE", OLD_CALLBACK_URL),
-        subscription(3, "ORDERS_UPDATED", OLD_CALLBACK_URL),
+        subscription(3, "ORDERS_CREATE", OLD_CALLBACK_URL),
       ),
     )
 
@@ -422,10 +507,10 @@ class RegisterShopifyWebhooksTest {
     val productsCreate = report.topics.single { it.topic == "PRODUCTS_CREATE" }
     assert((productsCreate.status as WebhookTopicStatus.Active).subscription.id == "gid://shopify/WebhookSubscription/1")
     assert(productsCreate.stale.map { it.id } == listOf("gid://shopify/WebhookSubscription/2"))
-    val ordersUpdated = report.topics.single { it.topic == "ORDERS_UPDATED" }
-    assert(ordersUpdated.status is WebhookTopicStatus.Missing)
-    assert(ordersUpdated.stale.map { it.uri } == listOf(OLD_CALLBACK_URL))
-    assert(report.missingCount == 4)
+    val ordersCreate = report.topics.single { it.topic == "ORDERS_CREATE" }
+    assert(ordersCreate.status is WebhookTopicStatus.Missing)
+    assert(ordersCreate.stale.map { it.uri } == listOf(OLD_CALLBACK_URL))
+    assert(report.missingCount == 3)
     assert(report.staleCount == 2)
   }
 
@@ -435,8 +520,8 @@ class RegisterShopifyWebhooksTest {
     stubExistingSubscriptions(
       listOf(
         subscription(1, "ORDERS_CREATE", CALLBACK_URL, includeFields = emptyList()),
-        subscription(2, "PRODUCTS_CREATE", CALLBACK_URL, includeFields = emptyList()),
-        subscription(3, "ORDERS_UPDATED", CALLBACK_URL, includeFields = ORDERS_FIELDS.reversed()),
+        subscription(2, "PRODUCTS_DELETE", CALLBACK_URL, includeFields = emptyList()),
+        subscription(3, "PRODUCTS_CREATE", CALLBACK_URL, includeFields = ID_ONLY_FIELDS.reversed()),
       ),
     )
 
@@ -444,9 +529,9 @@ class RegisterShopifyWebhooksTest {
 
     val ordersCreate = report.topics.single { it.topic == "ORDERS_CREATE" }.status as WebhookTopicStatus.Mismatched
     assert(ordersCreate.subscription.includeFields.isEmpty())
-    assert(ordersCreate.expectedIncludeFields == ORDERS_FIELDS)
+    assert(ordersCreate.expectedIncludeFields == ID_ONLY_FIELDS)
+    assert(report.topics.single { it.topic == "PRODUCTS_DELETE" }.status is WebhookTopicStatus.Active)
     assert(report.topics.single { it.topic == "PRODUCTS_CREATE" }.status is WebhookTopicStatus.Active)
-    assert(report.topics.single { it.topic == "ORDERS_UPDATED" }.status is WebhookTopicStatus.Active)
     assert(report.topics.count { it.status is WebhookTopicStatus.Mismatched } == 1)
     assert(updateCalls().isEmpty())
   }
@@ -483,6 +568,27 @@ class RegisterShopifyWebhooksTest {
 
     val ordersCreate = report.topics.single { it.topic == "ORDERS_CREATE" }.status
     assert((ordersCreate as? WebhookTopicStatus.Active)?.subscription?.id == "gid://shopify/WebhookSubscription/2")
+  }
+
+  /** A read-only scan names the subscription an earlier version left behind and deletes nothing. */
+  @Test
+  fun `the scan lists a subscription at our url for a topic the service does not handle as obsolete`() = runBlocking {
+    stubExistingSubscriptions(
+      listOf(
+        subscription(1, "ORDERS_UPDATED", CALLBACK_URL),
+        subscription(2, "ORDERS_UPDATED", OLD_CALLBACK_URL),
+        subscription(3, "PRODUCTS_CREATE", CALLBACK_URL),
+      ),
+    )
+
+    val report = (scanShopifyWebhooks(shopify, CALLBACK_URL) as Success).value
+
+    val obsolete = report.obsolete.single()
+    assert(obsolete.subscription.id == "gid://shopify/WebhookSubscription/1")
+    assert(obsolete.removal == ObsoleteSubscriptionRemoval.NotAttempted)
+    assert(report.obsoleteCount == 1)
+    assert(report.topics.none { it.topic == "ORDERS_UPDATED" })
+    assert(deleteCalls().isEmpty())
   }
 
   @Test
@@ -530,10 +636,23 @@ class RegisterShopifyWebhooksTest {
     )
   }
 
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `a deletion Shopify refuses leaves a warn line naming the subscription`() {
+    stubExistingSubscriptions(activeAtCallbackUrl() + subscription(1, "ORDERS_UPDATED", CALLBACK_URL))
+    stubDeleteRefused("Webhook subscription does not exist")
+
+    val lines = capturingLogs { runBlocking { registerShopifyWebhooks(shopify, CALLBACK_URL) } }
+
+    val failed = lines.single { "Webhook subscription deletion failed" in it }
+    assert(failed.startsWith("WARN Webhook subscription deletion failed topic=ORDERS_UPDATED id=gid://shopify/WebhookSubscription/1 error="))
+  }
+
   // ---------- helpers ----------
 
+  /** A topic the service does not handle declares nothing, so Shopify would report the full payload for it. */
   private fun declaredIncludeFields(topic: String): List<String> =
-    ShopifyWebhookTopic.known.single { it.subscriptionTopic!!.name == topic }.includeFields.orEmpty()
+    ShopifyWebhookTopic.known.singleOrNull { it.subscriptionTopic!!.name == topic }?.includeFields.orEmpty()
 
   private fun subscription(
     id: Int,
@@ -557,6 +676,35 @@ class RegisterShopifyWebhooksTest {
 
   private fun updateCalls(): List<FakeShopifyGraphqlServer.RecordedCall> =
     fake.calls.filter { it.operationName == "UpdateWebhookSubscription" }
+
+  private fun deleteCalls(): List<FakeShopifyGraphqlServer.RecordedCall> =
+    fake.calls.filter { it.operationName == "DeleteWebhookSubscription" }
+
+  private fun stubDeleted(id: Int) {
+    fake.stubData(
+      "DeleteWebhookSubscription",
+      DeleteWebhookSubscription.Result(
+        webhookSubscriptionDelete = WebhookSubscriptionDeletePayload(
+          userErrors = emptyList(),
+          deletedWebhookSubscriptionId = "gid://shopify/WebhookSubscription/$id",
+        ),
+      ),
+      DeleteWebhookSubscription.Result.serializer(),
+    )
+  }
+
+  private fun stubDeleteRefused(message: String) {
+    fake.stubData(
+      "DeleteWebhookSubscription",
+      DeleteWebhookSubscription.Result(
+        webhookSubscriptionDelete = WebhookSubscriptionDeletePayload(
+          userErrors = listOf(DeleteUserError(field = listOf("id"), message = message)),
+          deletedWebhookSubscriptionId = null,
+        ),
+      ),
+      DeleteWebhookSubscription.Result.serializer(),
+    )
+  }
 
   private fun stubExistingSubscriptions(subs: List<ExistingSubscription>) {
     fake.stubData(

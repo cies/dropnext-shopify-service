@@ -15,6 +15,7 @@ import dropnext.dss.domain.ShopifyFulfillmentId
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.domain.WebhookSubscriptionStatus
 import dropnext.dss.lib.shopify.legacyIdFromGid
+import dropnext.graphql.generated.DeleteWebhookSubscription
 import dropnext.graphql.generated.FulfillmentCancelMutation
 import dropnext.graphql.generated.FulfillmentCreateWithLineItems
 import dropnext.graphql.generated.FulfillmentEventCreateMutation
@@ -152,11 +153,8 @@ class HttpShopifyGraphqlService(
     }
   }
 
-  override suspend fun webhookSubscriptions(
-    topics: List<WebhookSubscriptionTopic>,
-    callbackUrl: String?,
-  ): ShopifyResult<List<WebhookSubscriptionStatus>> =
-    execute(GetWebhookSubscriptions(GetWebhookSubscriptions.Variables(topics, callbackUrl))).map { data ->
+  override suspend fun webhookSubscriptions(): ShopifyResult<List<WebhookSubscriptionStatus>> =
+    execute(GetWebhookSubscriptions()).map { data ->
       data.webhookSubscriptions.nodes.map {
         WebhookSubscriptionStatus(it.id, it.topic.name, it.uri, it.includeFields, filter = it.filter, format = it.format.name)
       }
@@ -190,6 +188,17 @@ class HttpShopifyGraphqlService(
         ?: Failure(ShopifyError.GraphqlError("webhook subscription missing in response"))
     }
   }
+
+  override suspend fun deleteWebhookSubscription(subscriptionId: String): ShopifyResult<Unit> =
+    execute(DeleteWebhookSubscription(DeleteWebhookSubscription.Variables(id = subscriptionId))).flatMap { data ->
+      val payload = data.webhookSubscriptionDelete
+      val userErrors = payload?.userErrors.orEmpty().map { fieldPrefixedUserError(it.field, it.message) }
+      if (userErrors.isNotEmpty()) return@flatMap Failure(ShopifyError.UserError(userErrors))
+      if (payload?.deletedWebhookSubscriptionId == null) {
+        return@flatMap Failure(ShopifyError.GraphqlError("deleted webhook subscription id missing in response"))
+      }
+      Success(Unit)
+    }
 
   /** Shopify refuses a webhook input with the path of the field it objects to, which names the culprit on the install page. */
   private fun fieldPrefixedUserError(field: List<String>?, message: String): String {

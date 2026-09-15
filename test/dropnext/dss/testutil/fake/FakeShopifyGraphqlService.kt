@@ -71,7 +71,7 @@ class FakeShopifyGraphqlService(
   val createFulfillmentEventCalls: MutableList<RecordedFulfillmentEventCall> = mutableListOf()
 
   var webhookSubscriptionsResult: ShopifyResult<List<WebhookSubscriptionStatus>> = Success(emptyList())
-  val webhookSubscriptionsCalls: MutableList<List<WebhookSubscriptionTopic>> = mutableListOf()
+  val webhookSubscriptionsCalls: MutableList<Unit> = mutableListOf()
 
   var registerWebhookResult: ShopifyResult<String> = Success("gid://shopify/WebhookSubscription/1")
 
@@ -81,6 +81,9 @@ class FakeShopifyGraphqlService(
   var updateWebhookSubscriptionResult: ShopifyResult<WebhookSubscriptionStatus> =
     Failure(ShopifyError.GraphqlError("webhook subscription missing in response"))
   val updateWebhookSubscriptionCalls: MutableList<RecordedUpdateWebhookSubscriptionCall> = mutableListOf()
+
+  var deleteWebhookSubscriptionResult: ShopifyResult<Unit> = Success(Unit)
+  val deleteWebhookSubscriptionCalls: MutableList<String> = mutableListOf()
 
   // ---------- interface impls ----------
 
@@ -138,11 +141,8 @@ class FakeShopifyGraphqlService(
     return createFulfillmentEventResult
   }
 
-  override suspend fun webhookSubscriptions(
-    topics: List<WebhookSubscriptionTopic>,
-    callbackUrl: String?,
-  ): ShopifyResult<List<WebhookSubscriptionStatus>> {
-    webhookSubscriptionsCalls.add(topics)
+  override suspend fun webhookSubscriptions(): ShopifyResult<List<WebhookSubscriptionStatus>> {
+    webhookSubscriptionsCalls.add(Unit)
     return webhookSubscriptionsResult
   }
 
@@ -164,6 +164,11 @@ class FakeShopifyGraphqlService(
     return updateWebhookSubscriptionResult
   }
 
+  override suspend fun deleteWebhookSubscription(subscriptionId: String): ShopifyResult<Unit> {
+    deleteWebhookSubscriptionCalls.add(subscriptionId)
+    return deleteWebhookSubscriptionResult
+  }
+
   override fun clear() {
     shopIdentityCalls.clear()
     productCountCalls.clear()
@@ -179,6 +184,7 @@ class FakeShopifyGraphqlService(
     webhookSubscriptionsCalls.clear()
     registerWebhookCalls.clear()
     updateWebhookSubscriptionCalls.clear()
+    deleteWebhookSubscriptionCalls.clear()
   }
 }
 

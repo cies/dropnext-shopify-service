@@ -249,7 +249,7 @@ class MonolithWebhookHandlersTest {
   fun `sync-shipments re-send answers 200 with only the new shipment's fulfillment id`() {
     val fakeShopify = FakeShopifyGraphqlService()
     fakeShopify.orderForDssResult = Success(
-      orderWithFoQuantities(remaining = 1, total = 2).copy(fulfillments = listOf(fulfillment(5001L, listOf("TRK-A")))),
+      orderWithFoQuantities(remaining = 1).copy(fulfillments = listOf(fulfillment(5001L, listOf("TRK-A")))),
     )
     fakeShopify.createFulfillmentResult = Success(ShopifyFulfillmentId(5002L))
     withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->

@@ -180,7 +180,8 @@ Webhooks and internal REST routes resolve the per-shop Admin token through the i
   because at a quarter vCPU the first outbound HTTPS call alone takes longer than a webhook's whole budget. It makes one
   store lookup on the monolith (for a placeholder shop it answers `404` for) and, once its socket is bound, two requests
   to itself over `127.0.0.1`: `GET /api/check` and a
-  self-signed `orders/updated` delivery with webhook id `warm-up`, so the inbound pipeline has run once end to end.
+  self-signed delivery for `orders/updated` (a topic the service does not subscribe to) with webhook id `warm-up`, so the
+  inbound pipeline has run once end to end.
   `/health` answers `503 {"status":"warming_up"}` meanwhile and `200 {"status":"ok"}` after, at the latest about
   twenty seconds after start whatever the upstreams did; the load balancer's `200` matcher keeps the task out of
   rotation until then while the task it replaces keeps serving. Two log lines, `Warm-up outbound done …` and
@@ -193,9 +194,13 @@ Webhooks and internal REST routes resolve the per-shop Admin token through the i
 Subscriptions all use the same HTTPS callback: `{DSS_BASE_URL}/webhooks/shopify`.
 
 * `PRODUCTS_CREATE`, `PRODUCTS_UPDATE`, `PRODUCTS_DELETE`
-* `ORDERS_CREATE`, `ORDERS_UPDATED`
+* `ORDERS_CREATE`
 
-On `products/create` and `products/update`, the app parses the webhook body for the resource id and runs `GetProductById`. On `orders/create`, it runs `GetOrderForDss` and POSTs to the monolith. On `orders/updated`, the webhook is acknowledged but not mirrored to monolith.
+On `products/create` and `products/update`, the app parses the webhook body for the resource id and runs `GetProductById`. On `orders/create`, it runs `GetOrderForDss` and POSTs to the monolith. All three are subscribed id-only (`id`, `admin_graphql_api_id`), because the resource is loaded right after; `products/delete` carries only the id anyway.
+
+The install leaves nothing else subscribed at the callback URL: a subscription there for a topic the service does not handle (such as `orders/updated`, which earlier versions registered) is deleted. A shop installed before a change to these topics or their fields gets it through `POST /api/webhooks/register?shop=` (bearer `MONOLITH_TO_DSS_API_KEY`), which runs the same registration without the merchant; `GET /api/check?shop=` shows what would change.
+
+**Compliance webhooks:** the app is custom-distributed, not public, so Shopify's mandatory compliance topics (`customers/data_request`, `customers/redact`, `shop/redact`) are not required: they are neither subscribed nor handled, and no customer data is redacted automatically. Shopify's API Terms still require deleting a merchant's data within 30 days of an uninstall or an enforceable deletion request. Going public is a new Shopify app, and these topics come first then.
 
 **Shop domain:** webhooks use `X-Shopify-Shop-Domain` (forward this header through your reverse proxy). DSS logs include a per-request `trace_id` (Ktor's `CallId` plugin, put in the Logback MDC by `CallLogging` and kept across coroutine suspensions); a caller's `X-Request-Id` or `X-Trace-Id` is adopted, every response carries it as `X-Trace-Id`, and every call to the monolith forwards it as `X-Trace-Id`. A monolith error body carries the monolith's own trace id, logged as `monolith_trace_id`. Every line of a request also carries `route` and `method` in the MDC, every line of a webhook delivery `topic` and `webhook_id`, and every line logged once a handler has resolved the shop `shop`; the events shipped to Logflare add `service` (`dss`) and `version`.
 

@@ -279,8 +279,9 @@ class ShopifyWebhookHandlersTest {
     }
   }
 
+  /** A shop installed before the service stopped subscribing to `orders/updated` keeps delivering it until it is registered again. */
   @Test
-  fun `orders_updated does not POST to the monolith`() {
+  fun `a delivery for a topic the service no longer subscribes to is acknowledged without work`() {
     val monolith = FakeMonolithService()
     val shopify = FakeShopifyGraphqlService()
     withDssApp(deps(monolith = monolith, shopify = shopify)) { client ->
@@ -290,7 +291,7 @@ class ShopifyWebhookHandlersTest {
       )
       assert(r.status == HttpStatusCode.OK)
       assert(monolith.createOrderCalls.isEmpty())
-      // With sync disabled, the handler also skips the Graphql fetch.
+      assert(r.body<WebhookDeliveryResponse>().reason == "topic_not_mirrored")
       assert(shopify.orderForDssCalls.isEmpty())
     }
   }

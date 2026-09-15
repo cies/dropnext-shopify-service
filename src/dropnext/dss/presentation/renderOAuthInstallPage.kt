@@ -1,6 +1,8 @@
 package dropnext.dss.presentation
 
 import dropnext.dss.domain.MonolithPersistOutcome
+import dropnext.dss.domain.ObsoleteSubscriptionRemoval
+import dropnext.dss.domain.ObsoleteWebhookSubscription
 import dropnext.dss.domain.ProductCount
 import dropnext.dss.domain.ShopInstallReport
 import dropnext.dss.domain.WebhookRegistrationReport
@@ -29,6 +31,9 @@ fun renderOAuthInstallPage(report: ShopInstallReport): String = StringBuilder("<
     renderWebhookTable(report.webhooks.topics)
     if (report.webhooks.failures.isNotEmpty()) {
       renderFailedTopics(report.webhooks.failures)
+    }
+    if (report.webhooks.obsolete.isNotEmpty()) {
+      renderObsoleteSubscriptions(report.webhooks.obsolete)
     }
   }
 }.toString()
@@ -60,7 +65,8 @@ private fun FlowContent.renderMonolithPersistBlock(outcome: MonolithPersistOutco
 private fun FlowContent.renderWebhookSummary(report: WebhookRegistrationReport) {
   val summary = "Webhook subscriptions: ${report.activeCount} already active, ${report.addedCount} added, " +
     "${report.updatedCount} updated and ${report.repointedCount} repointed from another URL in this install, " +
-    "${report.failures.size} failed, ${report.staleCount} pointing elsewhere."
+    "${report.failures.size} failed, ${report.staleCount} pointing elsewhere, " +
+    "${report.deletedCount} deleted for a topic the service no longer handles."
   p { +summary }
 }
 
@@ -155,6 +161,30 @@ private fun FlowContent.renderDeliveryComparison(subscription: WebhookSubscripti
 
 /** Shopify reports the full payload as an empty list, which would otherwise read as no fields at all. */
 private fun describeIncludeFields(fields: List<String>): String = if (fields.isEmpty()) "all fields" else fields.joinToString(", ")
+
+/** What is subscribed at our callback URL for a topic the service does not handle, and whether this run got rid of it. */
+private fun FlowContent.renderObsoleteSubscriptions(obsolete: List<ObsoleteWebhookSubscription>) {
+  p { +"Subscriptions at the webhook callback URL for a topic the service no longer handles:" }
+  ul {
+    obsolete.forEach { row ->
+      li {
+        code { +row.subscription.topic }
+        +" (id "
+        code { +row.subscription.id }
+        +"): "
+        when (val removal = row.removal) {
+          is ObsoleteSubscriptionRemoval.Deleted -> span { style = "color:green"; +"deleted" }
+          is ObsoleteSubscriptionRemoval.NotAttempted -> span { style = "color:#b45309"; +"still subscribed" }
+          is ObsoleteSubscriptionRemoval.Failed -> span {
+            style = "color:red"
+            strong { +"deletion failed: " }
+            +removal.error
+          }
+        }
+      }
+    }
+  }
+}
 
 private fun FlowContent.renderFailedTopics(failures: List<WebhookTopicRegistration>) {
   p {

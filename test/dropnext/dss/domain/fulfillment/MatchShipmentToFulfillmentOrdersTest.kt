@@ -187,7 +187,7 @@ class MatchShipmentToFulfillmentOrdersTest {
   fun `cross-shipment over-allocation vs remainingQuantity fails dry-run`() {
     // remaining already reduced; payload must not use post-cancel totalQuantity
     val order =
-      orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 1, total = 2))
+      orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 1))
     val shipments = listOf(
       shipment(tracking = "TRK-1", variantId = 101L, quantity = 1),
       shipment(tracking = "TRK-2", variantId = 101L, quantity = 1),
@@ -198,7 +198,7 @@ class MatchShipmentToFulfillmentOrdersTest {
 
   @Test
   fun `two qty-1 shipments match when remaining is 2`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 2, total = 2))
+    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 2))
     val shipments = listOf(
       shipment(tracking = "TRK-1", variantId = 101L, quantity = 1),
       shipment(tracking = "TRK-2", variantId = 101L, quantity = 1),
@@ -211,7 +211,7 @@ class MatchShipmentToFulfillmentOrdersTest {
 
   @Test
   fun `zero remainingQuantity skips as ZERO_REMAINING`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 0, total = 1))
+    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 0))
     val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 1))
     val ok = result as ShipmentMatchResult.Ok
     assert(ok.groups.isEmpty())
@@ -236,9 +236,7 @@ class MatchShipmentToFulfillmentOrdersTest {
       FulfillmentOrderLineItem(
         id = "gid://shopify/FulfillmentOrderLineItem/401",
         remainingQuantity = 5,
-        totalQuantity = 5,
         variant = ProductVariant(
-          id = "gid://shopify/ProductVariant/101",
           legacyResourceId = "not-a-number",
         ),
       )
@@ -370,7 +368,7 @@ class MatchShipmentToFulfillmentOrdersTest {
    */
   @Test
   fun `a unit an earlier shipment of the payload claimed is an error, not a zero_remaining skip`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 1, total = 2))
+    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 1))
     val shipments = listOf(
       shipment(tracking = "TRK-1", variantId = 101L, quantity = 1),
       shipment(tracking = "TRK-2", variantId = 101L, quantity = 1),
@@ -443,7 +441,7 @@ class MatchShipmentToFulfillmentOrdersTest {
 
   @Test
   fun `the same variant on two lines of one open fulfillment order takes the line with more remaining`() {
-    val variant = ProductVariant(id = "gid://shopify/ProductVariant/101", legacyResourceId = "101")
+    val variant = ProductVariant(legacyResourceId = "101")
     val fulfillmentOrder = FulfillmentOrder(
       id = "gid://shopify/FulfillmentOrder/301",
       status = FulfillmentOrderStatus.OPEN,
@@ -453,7 +451,6 @@ class MatchShipmentToFulfillmentOrdersTest {
             node = FulfillmentOrderLineItem(
               id = "gid://shopify/FulfillmentOrderLineItem/401",
               remainingQuantity = 1,
-              totalQuantity = 1,
               variant = variant
             )
           ),
@@ -461,7 +458,6 @@ class MatchShipmentToFulfillmentOrdersTest {
             node = FulfillmentOrderLineItem(
               id = "gid://shopify/FulfillmentOrderLineItem/402",
               remainingQuantity = 4,
-              totalQuantity = 4,
               variant = variant
             )
           ),
@@ -484,9 +480,7 @@ class MatchShipmentToFulfillmentOrdersTest {
     val unreadable = FulfillmentOrderLineItem(
       id = "gid://shopify/FulfillmentOrderLineItem/401",
       remainingQuantity = 5,
-      totalQuantity = 5,
       variant = ProductVariant(
-        id = "gid://shopify/ProductVariant/101",
         legacyResourceId = "not-a-number"
       ),
     )
@@ -514,7 +508,7 @@ class MatchShipmentToFulfillmentOrdersTest {
 
   @Test
   fun `a shipment whose tracking number is on a live fulfillment is skipped whole and plans nothing`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 1, total = 2))
+    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 1))
       .copy(fulfillments = listOf(fulfillment(8000L, listOf("TRK-A"))))
     val result = dryRunAllShipments(order, listOf(shipment(tracking = "TRK-A", variantId = 101L, quantity = 1))) as DryRunResult.Ok
     val skipped = result.perShipment.single()
@@ -526,7 +520,7 @@ class MatchShipmentToFulfillmentOrdersTest {
   /** The re-send the monolith makes after a partial failure: the shipment already synced must not take the unit the next one needs. */
   @Test
   fun `a shipment skipped by its tracking number claims no quantity from a later shipment of the payload`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 1, total = 2))
+    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 1))
       .copy(fulfillments = listOf(fulfillment(8000L, listOf("TRK-A"))))
     val shipments = listOf(
       shipment(tracking = "TRK-A", variantId = 101L, quantity = 1),
@@ -538,7 +532,7 @@ class MatchShipmentToFulfillmentOrdersTest {
 
   @Test
   fun `a shipment on a live fulfillment is skipped rather than refused for a quantity no longer left`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 1, total = 3))
+    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 1))
       .copy(fulfillments = listOf(fulfillment(8000L, listOf("TRK-A"))))
     val result = dryRunAllShipments(order, listOf(shipment(tracking = "TRK-A", variantId = 101L, quantity = 2)))
     assert(result is DryRunResult.Ok)
@@ -557,7 +551,6 @@ class MatchShipmentToFulfillmentOrdersTest {
   private fun openFo(
     variantId: Long,
     remaining: Int,
-    total: Int = remaining,
     foId: Long = 301L,
     lineItemId: Long = 401L,
   ): FulfillmentOrder = openFulfillmentOrder(
@@ -565,42 +558,35 @@ class MatchShipmentToFulfillmentOrdersTest {
     lineItemId = lineItemId,
     variantId = variantId,
     remaining = remaining,
-    total = total
   )
 
   private fun foLineItems(
     variantId: Long,
     remaining: Int,
-    total: Int = remaining,
-  ): FulfillmentOrderLineItemConnection = foLineItems(401L, variantId, remaining, total)
+  ): FulfillmentOrderLineItemConnection = foLineItems(401L, variantId, remaining)
 
   private fun foLineItems(
     lineItemId: Long,
     variantId: Long,
     remaining: Int,
-    total: Int = remaining,
   ): FulfillmentOrderLineItemConnection = foLineItems(
     lineItemId,
     ProductVariant(
-      id = "gid://shopify/ProductVariant/$variantId",
       legacyResourceId = variantId.toString(),
     ),
     remaining,
-    total,
   )
 
   private fun foLineItems(
     lineItemId: Long,
     variant: ProductVariant,
     remaining: Int,
-    total: Int = remaining,
   ) = FulfillmentOrderLineItemConnection(
     edges = listOf(
       FulfillmentOrderLineItemEdge(
         node = FulfillmentOrderLineItem(
           id = "gid://shopify/FulfillmentOrderLineItem/$lineItemId",
           remainingQuantity = remaining,
-          totalQuantity = total,
           variant = variant,
         ),
       ),

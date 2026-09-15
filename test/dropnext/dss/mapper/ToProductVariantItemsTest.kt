@@ -76,6 +76,7 @@ class ToProductVariantItemsTest {
     assert(items.single().priceAsString == "n/a")
   }
 
+  /** `ExternalVideo` exists only because the query selects it so that such a product decodes at all; the mapper skips it. */
   @Test
   fun `collects image urls from MediaImage and skips non-image media`() {
     val media = listOf(
@@ -141,13 +142,11 @@ class ToProductVariantItemsTest {
     selectedOptions: List<SelectedOption> = emptyList(),
   ): ProductVariant =
     ProductVariant(
-      id = "gid://shopify/ProductVariant/$id",
       legacyResourceId = id,
       title = title,
       sku = "SKU-$id",
       barcode = null,
       price = price,
-      updatedAt = "2026-04-01T00:00:00Z",
       selectedOptions = selectedOptions,
       media = MediaConnection(edges = media.map { MediaEdge(node = it) }),
     )
@@ -159,7 +158,6 @@ class ToProductVariantItemsTest {
     media: List<Media> = emptyList(),
   ): Product =
     Product(
-      id = "gid://shopify/Product/$legacyResourceId",
       legacyResourceId = legacyResourceId,
       title = "T-Shirt",
       description = "Soft cotton tee",

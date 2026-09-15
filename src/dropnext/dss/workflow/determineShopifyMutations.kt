@@ -8,6 +8,7 @@ import dropnext.dss.domain.fulfillment.SkipReason
 import dropnext.dss.domain.fulfillment.SkippedShipmentLine
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlService
 import dropnext.dss.lib.shopify.graphql.ShopifyResult
+import dropnext.dss.lib.shopify.legacyIdFromGid
 import dropnext.dss.lib.shopify.orderGid
 import io.github.oshai.kotlinlogging.KotlinLogging
 
@@ -57,7 +58,7 @@ private fun logSkips(shopifyOrderId: ShopifyOrderId, shipments: List<Shipment>, 
  */
 private fun logAlreadyFulfilled(orderId: ShopifyOrderId, skipped: AlreadyFulfilledShipment) {
   val line = "sync-shipments skipped shipment orderId=$orderId tracking=${skipped.shipment.trackingNumber} " +
-    "reason=already_fulfilled fulfillmentIds=${skipped.fulfillments.map { it.legacyResourceId }}"
+    "reason=already_fulfilled fulfillmentIds=${skipped.fulfillments.map { legacyIdFromGid(it.id) }}"
   if (skipped.fulfillments.size == 1) log.info { line } else log.warn { line }
 }
 

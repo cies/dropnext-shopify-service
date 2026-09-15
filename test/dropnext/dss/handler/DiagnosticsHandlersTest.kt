@@ -1,24 +1,15 @@
 package dropnext.dss.handler
 
-import dev.forkhandles.result4k.Failure
-import dev.forkhandles.result4k.Success
 import dropnext.dss.DssDependencies
 import dropnext.dss.boot.config.Config
 import dropnext.dss.boot.warmup.WarmUp
-import dropnext.dss.contract.ApiError
-import dropnext.dss.domain.ShopDomain
-import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.dssDependencies
-import dropnext.dss.lib.json.AppJson
-import dropnext.dss.lib.ktor.DssError
-import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.lib.shopify.token.InMemoryShopTokenStore
 import dropnext.dss.path.Paths
 import dropnext.dss.testutil.fake.FakeMonolithService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlServiceFactory
 import dropnext.dss.testutil.fixture.testConfig
-import dropnext.dss.testutil.fixture.webhookSubscriptionStatus
 import dropnext.dss.testutil.helper.withDssApp
 import io.ktor.client.call.body
 import io.ktor.client.request.get
@@ -27,21 +18,17 @@ import io.ktor.http.HttpStatusCode
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Test
 
 
-private val acmeShop = ShopDomain.parse("acme.myshopify.com")!!
 private val monolithToDssApiKey = "d".repeat(32)
 
 
 /**
- * The diagnostic endpoints. All but the per-shop check are unauthenticated and reachable from
- * anywhere the service is, so what they must *not* say matters as much as what they do: `/api`
- * renders a configuration summary, and a field added there carelessly would publish a secret. The
- * per-shop check drives a monolith lookup and a Shopify query, so it sits behind the bearer auth.
+ * The diagnostic endpoints, unauthenticated and reachable from anywhere the service is, so what they
+ * must *not* say matters as much as what they do: `/api` renders a configuration summary, and a field
+ * added there carelessly would publish a secret.
  */
 class DiagnosticsHandlersTest {
 
@@ -53,6 +40,7 @@ class DiagnosticsHandlersTest {
     assert(Paths.syncShipmentsWithFulfillments in body)
     assert(Paths.trackingUpdate in body)
     assert(Paths.storesApiKey in body)
+    assert(Paths.apiWebhooksRegister in body)
   }
 
   @Test
@@ -108,138 +96,6 @@ class DiagnosticsHandlersTest {
   }
 
   @Test
-  fun `api check without the bearer token is a 401 before anything is looked up`() {
-    val monolith = FakeMonolithService()
-    withDssApp(deps(monolith = monolith)) { client ->
-      val r = client.get("${Paths.apiCheck}?shop=acme.myshopify.com")
-      assert(r.status == HttpStatusCode.Unauthorized)
-      assert(monolith.getStoreCalls.isEmpty())
-    }
-  }
-
-  @Test
-  fun `api check without a shop parameter is a 400`() = withDssApp(deps(), authenticateAsMonolith = true) { client ->
-    val r = client.get(Paths.apiCheck)
-    assert(r.status == HttpStatusCode.BadRequest)
-    assert(r.body<ApiError>().error == "Missing shop")
-  }
-
-  @Test
-  fun `api check with a malformed shop is a 400`() = withDssApp(deps(), authenticateAsMonolith = true) { client ->
-    val r = client.get("${Paths.apiCheck}?shop=!!invalid!!")
-    assert(r.status == HttpStatusCode.BadRequest)
-    assert("shop" in r.body<ApiError>().error)
-  }
-
-  @Test
-  fun `api check answers 401 for a shop with no resolvable token`() =
-    withDssApp(deps(shopify = null), authenticateAsMonolith = true) { client ->
-      val r = client.get("${Paths.apiCheck}?shop=acme.myshopify.com")
-      assert(r.status == HttpStatusCode.Unauthorized)
-      assert("missing Shopify Admin token" in r.body<ApiError>().error)
-    }
-
-  /** The lookup behind the check got no answer from the monolith: a 502 to retry, not the 401 of a shop without a token. */
-  @Test
-  fun `api check answers 502 when the token lookup could not reach the monolith`() =
-    withDssApp(deps(tokenSourceUnavailable = true), authenticateAsMonolith = true) { client ->
-      val r = client.get("${Paths.apiCheck}?shop=acme.myshopify.com")
-      assert(r.status == HttpStatusCode.BadGateway)
-      assert(r.body<ApiError>().error == DssError.ShopifyAdminTokenUnavailable.message)
-    }
-
-  @Test
-  fun `api check answers 200 for a shop whose token resolves`() {
-    val tokens = InMemoryShopTokenStore(mapOf(acmeShop to ShopifyAdminToken("shpat_test")))
-    withDssApp(deps(tokens = tokens), authenticateAsMonolith = true) { client ->
-      val r = client.get("${Paths.apiCheck}?shop=acme.myshopify.com")
-      assert(r.status == HttpStatusCode.OK)
-      val body = r.bodyAsText()
-      assert("\"shop\":\"acme.myshopify.com\"" in body)
-      assert("\"hasTokenMappedForShop\":true" in body)
-      // The check reports that a token exists; it never reports the token.
-      assert("shpat_test" !in body)
-    }
-  }
-
-  /** The scan is read-only: the check says what Shopify has per handled topic and registers nothing. */
-  @Test
-  fun `api check reports each handled topic as active or missing, with stale subscriptions`() {
-    val tokens = InMemoryShopTokenStore(mapOf(acmeShop to ShopifyAdminToken("shpat_test")))
-    val shopify = FakeShopifyGraphqlService().apply {
-      webhookSubscriptionsResult = Success(
-        listOf(
-          webhookSubscriptionStatus(1, "PRODUCTS_CREATE"),
-          webhookSubscriptionStatus(2, "ORDERS_CREATE", uri = "https://old.example/webhooks/shopify"),
-        ),
-      )
-    }
-    withDssApp(deps(tokens = tokens, shopify = shopify), authenticateAsMonolith = true) { client ->
-      val r = client.get("${Paths.apiCheck}?shop=acme.myshopify.com")
-      assert(r.status == HttpStatusCode.OK)
-      val webhooks = AppJson.parseToJsonElement(r.bodyAsText()).jsonObject["webhooks"]!!.jsonArray.map { it.jsonObject }
-      assert(webhooks.size == 5)
-      val productsCreate = webhooks.single { it["topic"]!!.jsonPrimitive.content == "PRODUCTS_CREATE" }
-      assert(productsCreate["status"]!!.jsonPrimitive.content == "active")
-      assert(productsCreate["id"]!!.jsonPrimitive.content == "gid://shopify/WebhookSubscription/1")
-      val ordersCreate = webhooks.single { it["topic"]!!.jsonPrimitive.content == "ORDERS_CREATE" }
-      assert(ordersCreate["status"]!!.jsonPrimitive.content == "missing")
-      assert(ordersCreate["stale"]!!.jsonArray.single().jsonObject["uri"]!!.jsonPrimitive.content == "https://old.example/webhooks/shopify")
-      assert(shopify.registerWebhookCalls.isEmpty())
-    }
-  }
-
-  /** Subscribed at our URL is not enough to be `active`: a subscription sending other payload fields is named with both lists. */
-  @Test
-  fun `api check reports a subscription at our url with other payload fields as mismatched`() {
-    val tokens = InMemoryShopTokenStore(mapOf(acmeShop to ShopifyAdminToken("shpat_test")))
-    val shopify = FakeShopifyGraphqlService().apply {
-      webhookSubscriptionsResult = Success(
-        listOf(webhookSubscriptionStatus(3, "ORDERS_CREATE")),
-      )
-    }
-    withDssApp(deps(tokens = tokens, shopify = shopify), authenticateAsMonolith = true) { client ->
-      val r = client.get("${Paths.apiCheck}?shop=acme.myshopify.com")
-      assert(r.status == HttpStatusCode.OK)
-      val webhooks = r.body<JsonObject>()["webhooks"]!!.jsonArray.map { it.jsonObject }
-      val ordersCreate = webhooks.single { it["topic"]!!.jsonPrimitive.content == "ORDERS_CREATE" }
-      assert(ordersCreate["status"]!!.jsonPrimitive.content == "mismatched")
-      assert(ordersCreate["id"]!!.jsonPrimitive.content == "gid://shopify/WebhookSubscription/3")
-      assert(ordersCreate["includeFields"]!!.jsonArray.isEmpty())
-      assert(ordersCreate["expectedIncludeFields"]!!.jsonArray.map { it.jsonPrimitive.content } == listOf("id", "admin_graphql_api_id"))
-      assert(shopify.registerWebhookCalls.isEmpty())
-      assert(shopify.updateWebhookSubscriptionCalls.isEmpty())
-    }
-  }
-
-  @Test
-  fun `api check names the filter and the format of a mismatched subscription`() {
-    val tokens = InMemoryShopTokenStore(mapOf(acmeShop to ShopifyAdminToken("shpat_test")))
-    val shopify = FakeShopifyGraphqlService().apply {
-      webhookSubscriptionsResult = Success(listOf(webhookSubscriptionStatus(4, "PRODUCTS_UPDATE", filter = "vendor:Acme", format = "XML")))
-    }
-    withDssApp(deps(tokens = tokens, shopify = shopify), authenticateAsMonolith = true) { client ->
-      val r = client.get("${Paths.apiCheck}?shop=acme.myshopify.com")
-      assert(r.status == HttpStatusCode.OK)
-      val webhooks = r.body<JsonObject>()["webhooks"]!!.jsonArray.map { it.jsonObject }
-      val productsUpdate = webhooks.single { it["topic"]!!.jsonPrimitive.content == "PRODUCTS_UPDATE" }
-      assert(productsUpdate["status"]!!.jsonPrimitive.content == "mismatched")
-      assert(productsUpdate["filter"]!!.jsonPrimitive.content == "vendor:Acme")
-      assert(productsUpdate["format"]!!.jsonPrimitive.content == "XML")
-    }
-  }
-
-  @Test
-  fun `api check answers 502 when Shopify cannot list the subscriptions`() {
-    val tokens = InMemoryShopTokenStore(mapOf(acmeShop to ShopifyAdminToken("shpat_test")))
-    val shopify = FakeShopifyGraphqlService().apply { webhookSubscriptionsResult = Failure(ShopifyError.HttpError(503)) }
-    withDssApp(deps(tokens = tokens, shopify = shopify), authenticateAsMonolith = true) { client ->
-      val r = client.get("${Paths.apiCheck}?shop=acme.myshopify.com")
-      assert(r.status == HttpStatusCode.BadGateway)
-    }
-  }
-
-  @Test
   fun `the redirect url endpoint answers the url Shopify is configured to call back`() =
     withDssApp(deps()) { client ->
       val r = client.get(Paths.apiRedirectUrl)
@@ -249,21 +105,14 @@ class DiagnosticsHandlersTest {
 
   // ---------- helpers ----------
 
-  /** The factory is given the token store, so a check finds a service only for a shop whose token resolves, as in production. */
-  private fun deps(
-    config: Config = testConfig(monolithToDssApiKey = monolithToDssApiKey),
-    tokens: InMemoryShopTokenStore = InMemoryShopTokenStore(),
-    monolith: FakeMonolithService = FakeMonolithService(),
-    shopify: FakeShopifyGraphqlService? = FakeShopifyGraphqlService(),
-    tokenSourceUnavailable: Boolean = false,
-  ): DssDependencies = dssDependencies(
-    config = config,
-    monolithService = monolith,
-    shopTokens = tokens,
-    shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(
-      service = shopify,
-      tokens = tokens,
-      tokenSourceUnavailable = tokenSourceUnavailable,
-    ),
-  )
+  /** Diagnostics look nothing up for a shop; the fakes only keep the graph from building clients that reach out. */
+  private fun deps(config: Config = testConfig(monolithToDssApiKey = monolithToDssApiKey)): DssDependencies {
+    val tokens = InMemoryShopTokenStore()
+    return dssDependencies(
+      config = config,
+      monolithService = FakeMonolithService(),
+      shopTokens = tokens,
+      shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = FakeShopifyGraphqlService(), tokens = tokens),
+    )
+  }
 }

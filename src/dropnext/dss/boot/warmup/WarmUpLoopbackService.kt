@@ -14,6 +14,6 @@ interface WarmUpLoopbackService {
   /** `GET /api/check?shop=` with the monolith's bearer: the token store, and for a shop with a token the read-only subscriptions scan. */
   suspend fun apiCheck(shop: ShopDomain, traceId: String): Int?
 
-  /** A self-signed `orders/updated` delivery, which the handler acknowledges without work: the request shape the load balancer sends first. */
+  /** A self-signed delivery for a topic the service does not subscribe to, which the handler acknowledges without work: the request shape the load balancer sends first. */
   suspend fun webhookDelivery(shop: ShopDomain, traceId: String): Int?
 }

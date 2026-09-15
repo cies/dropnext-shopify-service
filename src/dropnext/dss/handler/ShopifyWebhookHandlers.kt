@@ -186,9 +186,6 @@ class ShopifyWebhookHandlers(
         syncShopifyOrderToMonolith(shopify, monolith, gid, topic.raw)
       }
 
-      // The `create` already carried the order; an update is acknowledged, not mirrored.
-      ShopifyWebhookTopic.OrdersUpdated -> skipped(WebhookSkipReason.TOPIC_NOT_MIRRORED)
-
       is ShopifyWebhookTopic.Other -> skipped(WebhookSkipReason.TOPIC_NOT_MIRRORED)
     }
 

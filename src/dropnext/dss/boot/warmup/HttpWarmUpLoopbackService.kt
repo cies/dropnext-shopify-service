@@ -45,8 +45,8 @@ class HttpWarmUpLoopbackService(
   }
 
   override suspend fun webhookDelivery(shop: ShopDomain, traceId: String): Int? {
-    // The shape of an `orders/updated` delivery with the fields the subscription projects. The handler acknowledges
-    // the topic without loading anything, so the ids need not exist; the signature is over these exact bytes.
+    // An id-only delivery for `orders/updated`, a topic the service does not subscribe to: the handler acknowledges it
+    // without loading anything, so the ids need not exist. The signature is over these exact bytes.
     val body = """{"id":0,"admin_graphql_api_id":"gid://shopify/Order/0"}""".toByteArray(Charsets.UTF_8)
     return statusOrNull {
       httpClient.post("$origin${Paths.webhooksShopify}") {
