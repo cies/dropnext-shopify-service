@@ -1,0 +1,22 @@
+# The `= null` default is what sends a null: the client leaves out a variable whose value is null, and an
+# `includeFields` left out of the input would keep the subscription's fields instead of resetting them.
+# `filter` and `format` are literals: the service reads every event, and JSON only, whatever the subscription had.
+mutation UpdateWebhookSubscription($id: ID!, $uri: String!, $includeFields: [String!] = null) {
+  webhookSubscriptionUpdate(
+    id: $id,
+    webhookSubscription: { uri: $uri, includeFields: $includeFields, filter: null, format: JSON }
+  ) {
+    userErrors {
+      field
+      message
+    }
+    webhookSubscription {
+      id
+      topic
+      uri
+      includeFields
+      filter
+      format
+    }
+  }
+}

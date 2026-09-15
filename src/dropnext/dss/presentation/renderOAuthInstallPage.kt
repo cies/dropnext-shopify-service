@@ -4,6 +4,7 @@ import dropnext.dss.domain.MonolithPersistOutcome
 import dropnext.dss.domain.ProductCount
 import dropnext.dss.domain.ShopInstallReport
 import dropnext.dss.domain.WebhookRegistrationReport
+import dropnext.dss.domain.WebhookSubscriptionStatus
 import dropnext.dss.domain.WebhookTopicRegistration
 import dropnext.dss.domain.WebhookTopicStatus
 import kotlinx.html.*
@@ -57,7 +58,8 @@ private fun FlowContent.renderMonolithPersistBlock(outcome: MonolithPersistOutco
 }
 
 private fun FlowContent.renderWebhookSummary(report: WebhookRegistrationReport) {
-  val summary = "Webhook subscriptions: ${report.activeCount} already active, ${report.addedCount} added in this install, " +
+  val summary = "Webhook subscriptions: ${report.activeCount} already active, ${report.addedCount} added, " +
+    "${report.updatedCount} updated and ${report.repointedCount} repointed from another URL in this install, " +
     "${report.failures.size} failed, ${report.staleCount} pointing elsewhere."
   p { +summary }
 }
@@ -101,31 +103,63 @@ private fun FlowContent.renderStatus(status: WebhookTopicStatus) {
   when (status) {
     is WebhookTopicStatus.Active -> span { style = "color:green"; +"active" }
     is WebhookTopicStatus.Added -> span { style = "color:green"; strong { +"added" } }
+    is WebhookTopicStatus.Updated -> span { style = "color:green"; strong { +"updated" } }
+    is WebhookTopicStatus.Repointed -> span { style = "color:green"; strong { +"repointed" } }
+    is WebhookTopicStatus.Mismatched -> span { style = "color:#b45309"; +"mismatched" }
     is WebhookTopicStatus.Missing -> span { style = "color:#b45309"; +"missing" }
+    is WebhookTopicStatus.NotApplied -> span { style = "color:red"; strong { +"not applied" } }
     is WebhookTopicStatus.Failed -> span { style = "color:red"; strong { +"failed" } }
   }
 }
 
 private fun FlowContent.renderSubscription(status: WebhookTopicStatus) {
-  val subscription = when (status) {
-    is WebhookTopicStatus.Active -> status.subscription
-    is WebhookTopicStatus.Added -> status.subscription
-    is WebhookTopicStatus.Missing, is WebhookTopicStatus.Failed -> null
+  when (status) {
+    is WebhookTopicStatus.Active -> renderSubscriptionAddress(status.subscription)
+    is WebhookTopicStatus.Added -> renderSubscriptionAddress(status.subscription)
+    is WebhookTopicStatus.Updated -> renderSubscriptionAddress(status.subscription)
+    is WebhookTopicStatus.Repointed -> {
+      renderSubscriptionAddress(status.subscription)
+      +" (was "
+      code { +status.previousUri }
+      +")"
+    }
+    is WebhookTopicStatus.Mismatched -> renderDeliveryComparison(status.subscription, status.expectedIncludeFields)
+    is WebhookTopicStatus.NotApplied -> renderDeliveryComparison(status.answered, status.expectedIncludeFields)
+    is WebhookTopicStatus.Missing, is WebhookTopicStatus.Failed -> +"-"
   }
-  if (subscription == null) {
-    +"-"
-    return
-  }
+}
+
+private fun FlowContent.renderSubscriptionAddress(subscription: WebhookSubscriptionStatus) {
   code { +subscription.uri }
   +" (id "
   code { +subscription.id }
   +")"
 }
 
+private fun FlowContent.renderDeliveryComparison(subscription: WebhookSubscriptionStatus, expectedIncludeFields: List<String>) {
+  renderSubscriptionAddress(subscription)
+  +", fields: "
+  code { +describeIncludeFields(subscription.includeFields) }
+  +", expected: "
+  code { +describeIncludeFields(expectedIncludeFields) }
+  // The service sets neither, so only one someone else set is worth naming.
+  if (subscription.hasFilter) {
+    +", filter: "
+    code { +subscription.filter.orEmpty() }
+  }
+  if (!subscription.isJson) {
+    +", format: "
+    code { +subscription.format }
+  }
+}
+
+/** Shopify reports the full payload as an empty list, which would otherwise read as no fields at all. */
+private fun describeIncludeFields(fields: List<String>): String = if (fields.isEmpty()) "all fields" else fields.joinToString(", ")
+
 private fun FlowContent.renderFailedTopics(failures: List<WebhookTopicRegistration>) {
   p {
     style = "color:red"
-    strong { +"Webhook registrations that failed (check app scopes in Partner Dashboard):" }
+    strong { +"Webhook subscriptions that could not be registered or updated:" }
   }
   ul {
     failures.forEach { row ->
@@ -133,7 +167,10 @@ private fun FlowContent.renderFailedTopics(failures: List<WebhookTopicRegistrati
         style = "color:red"
         code { +row.topic }
         +" — "
-        +(row.status as WebhookTopicStatus.Failed).error
+        when (val status = row.status as WebhookTopicStatus.Unsuccessful) {
+          is WebhookTopicStatus.Failed -> +status.error
+          is WebhookTopicStatus.NotApplied -> +"Shopify accepted the update but did not apply it."
+        }
       }
     }
   }

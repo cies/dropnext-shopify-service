@@ -10,6 +10,7 @@ import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.domain.ShopifyFulfillmentEventId
 import dropnext.dss.domain.ShopifyFulfillmentId
 import dropnext.dss.domain.ShopifyShopId
+import dropnext.dss.domain.WebhookSubscriptionStatus
 import dropnext.dss.testutil.fake.FakeFlakyServer
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlServer
 import dropnext.dss.testutil.fixture.fulfillment
@@ -28,10 +29,12 @@ import dropnext.graphql.generated.GetWebhookSubscriptions
 import dropnext.graphql.generated.ProductsCount
 import dropnext.graphql.generated.RegisterWebhook
 import dropnext.graphql.generated.ShopIdentity
+import dropnext.graphql.generated.UpdateWebhookSubscription
 import dropnext.graphql.generated.enums.CountPrecision
 import dropnext.graphql.generated.enums.CurrencyCode
 import dropnext.graphql.generated.enums.FulfillmentEventStatus
 import dropnext.graphql.generated.enums.FulfillmentStatus
+import dropnext.graphql.generated.enums.WebhookSubscriptionFormat
 import dropnext.graphql.generated.enums.WebhookSubscriptionTopic
 import dropnext.graphql.generated.fulfillmentcancelmutation.Fulfillment as CancelledFulfillment
 import dropnext.graphql.generated.fulfillmentcancelmutation.FulfillmentCancelPayload
@@ -51,6 +54,9 @@ import dropnext.graphql.generated.registerwebhook.UserError as RegisterUserError
 import dropnext.graphql.generated.registerwebhook.WebhookSubscription as CreatedSubscription
 import dropnext.graphql.generated.registerwebhook.WebhookSubscriptionCreatePayload
 import dropnext.graphql.generated.shopidentity.Shop as ShopIdentityShop
+import dropnext.graphql.generated.updatewebhooksubscription.UserError as UpdateUserError
+import dropnext.graphql.generated.updatewebhooksubscription.WebhookSubscription as UpdatedSubscription
+import dropnext.graphql.generated.updatewebhooksubscription.WebhookSubscriptionUpdatePayload
 import io.ktor.client.HttpClient
 import io.ktor.http.HttpStatusCode
 import java.net.URI
@@ -448,8 +454,21 @@ class HttpShopifyGraphqlServiceTest {
       GetWebhookSubscriptions.Result(
         webhookSubscriptions = WebhookSubscriptionConnection(
           nodes = listOf(
-            ExistingSubscription(id = "gid://shopify/WebhookSubscription/1", topic = WebhookSubscriptionTopic.ORDERS_CREATE, uri = CALLBACK_URL),
-            ExistingSubscription(id = "gid://shopify/WebhookSubscription/2", topic = WebhookSubscriptionTopic.PRODUCTS_UPDATE, uri = CALLBACK_URL),
+            ExistingSubscription(
+              id = "gid://shopify/WebhookSubscription/1",
+              topic = WebhookSubscriptionTopic.ORDERS_CREATE,
+              uri = CALLBACK_URL,
+              includeFields = listOf("id", "admin_graphql_api_id"),
+              filter = "vendor:Acme",
+              format = WebhookSubscriptionFormat.JSON,
+            ),
+            ExistingSubscription(
+              id = "gid://shopify/WebhookSubscription/2",
+              topic = WebhookSubscriptionTopic.PRODUCTS_UPDATE,
+              uri = CALLBACK_URL,
+              includeFields = emptyList(),
+              format = WebhookSubscriptionFormat.XML,
+            ),
           ),
         ),
       ),
@@ -462,6 +481,9 @@ class HttpShopifyGraphqlServiceTest {
     assert(result is Success)
     assert((result as Success).value.map { it.topic } == listOf("ORDERS_CREATE", "PRODUCTS_UPDATE"))
     assert(result.value.first().id == "gid://shopify/WebhookSubscription/1")
+    assert(result.value.map { it.includeFields } == listOf(listOf("id", "admin_graphql_api_id"), emptyList()))
+    assert(result.value.map { it.filter } == listOf("vendor:Acme", null))
+    assert(result.value.map { it.format } == listOf("JSON", "XML"))
   }
 
   @Test
@@ -616,7 +638,88 @@ class HttpShopifyGraphqlServiceTest {
     assert((result as Failure).reason is ShopifyError.GraphqlError)
   }
 
+  @Test
+  fun `updateWebhookSubscription sends the id, the callback url and the fields, and answers the updated subscription`() = runBlocking {
+    stubUpdatedSubscription(includeFields = listOf("id", "admin_graphql_api_id"))
+
+    val result = shopify.updateWebhookSubscription("gid://shopify/WebhookSubscription/7", CALLBACK_URL, listOf("id", "admin_graphql_api_id"))
+
+    val expected = WebhookSubscriptionStatus(
+      id = "gid://shopify/WebhookSubscription/7",
+      topic = "ORDERS_CREATE",
+      uri = CALLBACK_URL,
+      includeFields = listOf("id", "admin_graphql_api_id"),
+      filter = null,
+      format = "JSON",
+    )
+    assert(result == Success(expected))
+    val variables = fake.calls.single().variables.jsonObject
+    assert(variables["id"]?.jsonPrimitive?.content == "gid://shopify/WebhookSubscription/7")
+    assert(variables["uri"]?.jsonPrimitive?.content == CALLBACK_URL)
+    assert(variables["includeFields"]?.jsonArray?.map { it.jsonPrimitive.content } == listOf("id", "admin_graphql_api_id"))
+  }
+
+  /**
+   * The client leaves out a variable whose value is null, and an `includeFields` left out of the input would keep the
+   * subscription's fields: the operation's `= null` default is what turns the missing variable into the reset.
+   */
+  @Test
+  fun `updateWebhookSubscription with null fields leaves the variable to the operation's null default`() = runBlocking {
+    stubUpdatedSubscription(includeFields = emptyList())
+
+    shopify.updateWebhookSubscription("gid://shopify/WebhookSubscription/7", CALLBACK_URL, includeFields = null)
+
+    val call = fake.calls.single()
+    assert("includeFields" !in call.variables.jsonObject)
+    assert("\$includeFields: [String!] = null" in call.rawBody)
+  }
+
+  /** The service reads every event, and JSON only, so every update resets both whatever the subscription had. */
+  @Test
+  fun `updateWebhookSubscription resets the filter and the format in the operation itself`() = runBlocking {
+    stubUpdatedSubscription(includeFields = emptyList())
+
+    shopify.updateWebhookSubscription("gid://shopify/WebhookSubscription/7", CALLBACK_URL, includeFields = null)
+
+    assert("filter: null, format: JSON" in fake.calls.single().rawBody)
+  }
+
+  @Test
+  fun `updateWebhookSubscription prefixes a user error with the field it names`() = runBlocking {
+    fake.stubData(
+      "UpdateWebhookSubscription",
+      UpdateWebhookSubscription.Result(
+        webhookSubscriptionUpdate = WebhookSubscriptionUpdatePayload(
+          userErrors = listOf(UpdateUserError(field = listOf("id"), message = "Webhook subscription does not exist")),
+          webhookSubscription = null,
+        ),
+      ),
+      UpdateWebhookSubscription.Result.serializer(),
+    )
+    val result = shopify.updateWebhookSubscription("gid://shopify/WebhookSubscription/7", CALLBACK_URL, includeFields = null)
+    assert((result as Failure).reason == ShopifyError.UserError(listOf("id: Webhook subscription does not exist")))
+  }
+
   // ---------- helpers ----------
+
+  private fun stubUpdatedSubscription(includeFields: List<String>) {
+    fake.stubData(
+      "UpdateWebhookSubscription",
+      UpdateWebhookSubscription.Result(
+        webhookSubscriptionUpdate = WebhookSubscriptionUpdatePayload(
+          userErrors = emptyList(),
+          webhookSubscription = UpdatedSubscription(
+            id = "gid://shopify/WebhookSubscription/7",
+            topic = WebhookSubscriptionTopic.ORDERS_CREATE,
+            uri = CALLBACK_URL,
+            includeFields = includeFields,
+            format = WebhookSubscriptionFormat.JSON,
+          ),
+        ),
+      ),
+      UpdateWebhookSubscription.Result.serializer(),
+    )
+  }
 
   private fun stubShopIdentity(
 id: String = "gid://shopify/Shop/1", domain: String = "acme.myshopify.com") {

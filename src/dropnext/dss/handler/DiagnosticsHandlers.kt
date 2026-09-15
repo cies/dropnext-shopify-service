@@ -145,13 +145,21 @@ private data class ApiCheckDetails(
   val hasTokenMappedForShop: Boolean,
 )
 
-/** One handled topic: `active` or `missing` at our callback URL (a scan never registers), plus what points elsewhere. */
+/**
+ * One handled topic: `active`, `mismatched` or `missing` at our callback URL (a scan never registers), plus what points
+ * elsewhere. A mismatched topic is subscribed there without delivering as it declares (its payload fields, no filter,
+ * JSON), so it names what Shopify has; `[]` is the full payload in both field lists.
+ */
 @Serializable
 private data class ApiCheckWebhook(
   val topic: String,
   val status: String,
   val id: String? = null,
   val uri: String? = null,
+  val includeFields: List<String>? = null,
+  val expectedIncludeFields: List<String>? = null,
+  val filter: String? = null,
+  val format: String? = null,
   val stale: List<ApiCheckStaleSubscription> = emptyList(),
 )
 
@@ -163,12 +171,23 @@ private data class ApiCheckStaleSubscription(
 
 private fun WebhookRegistrationReport.toApiCheckWebhooks(): List<ApiCheckWebhook> =
   topics.map { row ->
-    val subscription = (row.status as? WebhookTopicStatus.Active)?.subscription
-    ApiCheckWebhook(
-      topic = row.topic,
-      status = if (subscription != null) "active" else "missing",
-      id = subscription?.id,
-      uri = subscription?.uri,
-      stale = row.stale.map { ApiCheckStaleSubscription(id = it.id, uri = it.uri) },
-    )
+    val stale = row.stale.map { ApiCheckStaleSubscription(id = it.id, uri = it.uri) }
+    when (val status = row.status) {
+      is WebhookTopicStatus.Active ->
+        ApiCheckWebhook(row.topic, "active", id = status.subscription.id, uri = status.subscription.uri, stale = stale)
+      is WebhookTopicStatus.Mismatched -> ApiCheckWebhook(
+        topic = row.topic,
+        status = "mismatched",
+        id = status.subscription.id,
+        uri = status.subscription.uri,
+        includeFields = status.subscription.includeFields,
+        expectedIncludeFields = status.expectedIncludeFields,
+        filter = status.subscription.filter,
+        format = status.subscription.format,
+        stale = stale,
+      )
+      // A read-only scan answers none of the statuses an install produces; they keep the answer every other row gets.
+      is WebhookTopicStatus.Missing, is WebhookTopicStatus.Added, is WebhookTopicStatus.Updated,
+      is WebhookTopicStatus.Repointed, is WebhookTopicStatus.Unsuccessful -> ApiCheckWebhook(row.topic, "missing", stale = stale)
+    }
   }

@@ -56,6 +56,10 @@ deprecated API use").
   `response.errors`.
 - A method answers our own types where it can (`ShopIdentityInfo`, `ShopifyFulfillmentId`, `WebhookSubscriptionStatus`)
   and a generated snapshot only where a mapper needs the whole thing (`Order`, `Product`).
+- The client never sends a nullable variable whose value is `null`: graphql-kotlin's serializer sets
+  `encodeDefaults = false` after applying any configuration of ours, and an input field left out is, to Shopify, a
+  field not provided, which an update keeps as it is. Where a `null` must reach Shopify as a `null`, such as clearing
+  an input field, declare the variable with a `= null` default in the operation (`UpdateWebhookSubscription`).
 - Outside `lib/shopify/`, only the layers `ArchitectureTest.graphqlGeneratedAllowList` names may import
   `dropnext.graphql.generated.*`: `domain/fulfillment/` (the matcher), `mapper/` and `workflow/`, which walk the
   snapshots the interface answers. Handlers, routing and presentation program against the interface's own types; a

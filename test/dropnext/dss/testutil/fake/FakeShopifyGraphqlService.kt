@@ -78,6 +78,10 @@ class FakeShopifyGraphqlService(
   /** Each entry is the `(topic, callbackUrl, includeFields)` that was sent to `registerWebhook`. */
   val registerWebhookCalls: MutableList<Triple<WebhookSubscriptionTopic, String, List<String>?>> = mutableListOf()
 
+  var updateWebhookSubscriptionResult: ShopifyResult<WebhookSubscriptionStatus> =
+    Failure(ShopifyError.GraphqlError("webhook subscription missing in response"))
+  val updateWebhookSubscriptionCalls: MutableList<RecordedUpdateWebhookSubscriptionCall> = mutableListOf()
+
   // ---------- interface impls ----------
 
   override suspend fun shopIdentity(): ShopifyResult<ShopIdentityInfo> {
@@ -151,6 +155,15 @@ class FakeShopifyGraphqlService(
     return registerWebhookResult
   }
 
+  override suspend fun updateWebhookSubscription(
+    subscriptionId: String,
+    callbackUrl: String,
+    includeFields: List<String>?,
+  ): ShopifyResult<WebhookSubscriptionStatus> {
+    updateWebhookSubscriptionCalls.add(RecordedUpdateWebhookSubscriptionCall(subscriptionId, callbackUrl, includeFields))
+    return updateWebhookSubscriptionResult
+  }
+
   override fun clear() {
     shopIdentityCalls.clear()
     productCountCalls.clear()
@@ -165,12 +178,19 @@ class FakeShopifyGraphqlService(
     createFulfillmentEventCalls.clear()
     webhookSubscriptionsCalls.clear()
     registerWebhookCalls.clear()
+    updateWebhookSubscriptionCalls.clear()
   }
 }
 
 data class RecordedCreateFulfillmentCall(
   val lines: List<FulfillmentLine>,
   val tracking: FulfillmentTracking,
+)
+
+data class RecordedUpdateWebhookSubscriptionCall(
+  val subscriptionId: String,
+  val callbackUrl: String,
+  val includeFields: List<String>?,
 )
 
 data class RecordedFulfillmentEventCall(

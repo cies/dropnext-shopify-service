@@ -1,5 +1,6 @@
 package dropnext.dss.lib.shopify.webhook
 
+import dropnext.dss.domain.WebhookSubscriptionStatus
 import dropnext.graphql.generated.enums.WebhookSubscriptionTopic
 
 
@@ -26,8 +27,21 @@ sealed interface ShopifyWebhookTopic {
   /** Admin Graphql enum value used for outbound subscription registration. `null` for [Other]. */
   val subscriptionTopic: WebhookSubscriptionTopic?
 
-  /** The payload fields the subscription is restricted to; `null` means the full payload. */
+  /**
+   * The payload fields the subscription is restricted to; `null` means the full payload, both when a subscription is
+   * created and when one is updated back to it.
+   */
   val includeFields: List<String>? get() = null
+
+  /** Shopify reports a full-payload subscription as `[]` and keeps no order of the names, so `null` matches `[]` and the names compare as a set. */
+  fun matchesIncludeFields(reported: List<String>): Boolean = reported.toSet() == includeFields.orEmpty().toSet()
+
+  /**
+   * The subscription delivers what this topic's handler reads: the declared payload fields, every event (a filter would
+   * drop some) and JSON, the only format the webhook parsers read. Its URI is compared on its own.
+   */
+  fun matchesSubscription(subscription: WebhookSubscriptionStatus): Boolean =
+    matchesIncludeFields(subscription.includeFields) && !subscription.hasFilter && subscription.isJson
 
   data object ProductsCreate : ShopifyWebhookTopic {
     override val raw = "products/create"

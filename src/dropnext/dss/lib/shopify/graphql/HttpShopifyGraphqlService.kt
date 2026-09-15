@@ -24,6 +24,7 @@ import dropnext.graphql.generated.GetWebhookSubscriptions
 import dropnext.graphql.generated.ProductsCount
 import dropnext.graphql.generated.RegisterWebhook
 import dropnext.graphql.generated.ShopIdentity
+import dropnext.graphql.generated.UpdateWebhookSubscription
 import dropnext.graphql.generated.enums.CountPrecision
 import dropnext.graphql.generated.enums.FulfillmentEventStatus
 import dropnext.graphql.generated.enums.FulfillmentStatus
@@ -156,7 +157,9 @@ class HttpShopifyGraphqlService(
     callbackUrl: String?,
   ): ShopifyResult<List<WebhookSubscriptionStatus>> =
     execute(GetWebhookSubscriptions(GetWebhookSubscriptions.Variables(topics, callbackUrl))).map { data ->
-      data.webhookSubscriptions.nodes.map { WebhookSubscriptionStatus(id = it.id, topic = it.topic.name, uri = it.uri) }
+      data.webhookSubscriptions.nodes.map {
+        WebhookSubscriptionStatus(it.id, it.topic.name, it.uri, it.includeFields, filter = it.filter, format = it.format.name)
+      }
     }
 
   override suspend fun registerWebhook(
@@ -166,14 +169,33 @@ class HttpShopifyGraphqlService(
   ): ShopifyResult<String> =
     execute(RegisterWebhook(RegisterWebhook.Variables(topic = topic, uri = callbackUrl, includeFields = includeFields))).flatMap { data ->
       val payload = data.webhookSubscriptionCreate
-      val userErrors = payload?.userErrors.orEmpty().map { userError ->
-        val field = userError.field.orEmpty().joinToString(",")
-        if (field.isNotBlank()) "$field: ${userError.message}" else userError.message
-      }
+      val userErrors = payload?.userErrors.orEmpty().map { fieldPrefixedUserError(it.field, it.message) }
       if (userErrors.isNotEmpty()) return@flatMap Failure(ShopifyError.UserError(userErrors))
       payload?.webhookSubscription?.id?.let { Success(it) }
         ?: Failure(ShopifyError.GraphqlError("webhook subscription missing in response"))
     }
+
+  override suspend fun updateWebhookSubscription(
+    subscriptionId: String,
+    callbackUrl: String,
+    includeFields: List<String>?,
+  ): ShopifyResult<WebhookSubscriptionStatus> {
+    val variables = UpdateWebhookSubscription.Variables(id = subscriptionId, uri = callbackUrl, includeFields = includeFields)
+    return execute(UpdateWebhookSubscription(variables)).flatMap { data ->
+      val payload = data.webhookSubscriptionUpdate
+      val userErrors = payload?.userErrors.orEmpty().map { fieldPrefixedUserError(it.field, it.message) }
+      if (userErrors.isNotEmpty()) return@flatMap Failure(ShopifyError.UserError(userErrors))
+      payload?.webhookSubscription
+        ?.let { Success(WebhookSubscriptionStatus(it.id, it.topic.name, it.uri, it.includeFields, filter = it.filter, format = it.format.name)) }
+        ?: Failure(ShopifyError.GraphqlError("webhook subscription missing in response"))
+    }
+  }
+
+  /** Shopify refuses a webhook input with the path of the field it objects to, which names the culprit on the install page. */
+  private fun fieldPrefixedUserError(field: List<String>?, message: String): String {
+    val path = field.orEmpty().joinToString(",")
+    return if (path.isNotBlank()) "$path: $message" else message
+  }
 
   /**
    * The single point that runs an operation: injects the per-shop `X-Shopify-Access-Token` header

@@ -8,7 +8,6 @@ import dropnext.dss.boot.warmup.WarmUp
 import dropnext.dss.contract.ApiError
 import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopifyAdminToken
-import dropnext.dss.domain.WebhookSubscriptionStatus
 import dropnext.dss.dssDependencies
 import dropnext.dss.lib.json.AppJson
 import dropnext.dss.lib.ktor.DssError
@@ -19,6 +18,7 @@ import dropnext.dss.testutil.fake.FakeMonolithService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlServiceFactory
 import dropnext.dss.testutil.fixture.testConfig
+import dropnext.dss.testutil.fixture.webhookSubscriptionStatus
 import dropnext.dss.testutil.helper.withDssApp
 import io.ktor.client.call.body
 import io.ktor.client.request.get
@@ -169,8 +169,8 @@ class DiagnosticsHandlersTest {
     val shopify = FakeShopifyGraphqlService().apply {
       webhookSubscriptionsResult = Success(
         listOf(
-          WebhookSubscriptionStatus("gid://shopify/WebhookSubscription/1", "PRODUCTS_CREATE", "https://dss.test/webhooks/shopify"),
-          WebhookSubscriptionStatus("gid://shopify/WebhookSubscription/2", "ORDERS_CREATE", "https://old.example/webhooks/shopify"),
+          webhookSubscriptionStatus(1, "PRODUCTS_CREATE"),
+          webhookSubscriptionStatus(2, "ORDERS_CREATE", uri = "https://old.example/webhooks/shopify"),
         ),
       )
     }
@@ -186,6 +186,46 @@ class DiagnosticsHandlersTest {
       assert(ordersCreate["status"]!!.jsonPrimitive.content == "missing")
       assert(ordersCreate["stale"]!!.jsonArray.single().jsonObject["uri"]!!.jsonPrimitive.content == "https://old.example/webhooks/shopify")
       assert(shopify.registerWebhookCalls.isEmpty())
+    }
+  }
+
+  /** Subscribed at our URL is not enough to be `active`: a subscription sending other payload fields is named with both lists. */
+  @Test
+  fun `api check reports a subscription at our url with other payload fields as mismatched`() {
+    val tokens = InMemoryShopTokenStore(mapOf(acmeShop to ShopifyAdminToken("shpat_test")))
+    val shopify = FakeShopifyGraphqlService().apply {
+      webhookSubscriptionsResult = Success(
+        listOf(webhookSubscriptionStatus(3, "ORDERS_CREATE")),
+      )
+    }
+    withDssApp(deps(tokens = tokens, shopify = shopify), authenticateAsMonolith = true) { client ->
+      val r = client.get("${Paths.apiCheck}?shop=acme.myshopify.com")
+      assert(r.status == HttpStatusCode.OK)
+      val webhooks = r.body<JsonObject>()["webhooks"]!!.jsonArray.map { it.jsonObject }
+      val ordersCreate = webhooks.single { it["topic"]!!.jsonPrimitive.content == "ORDERS_CREATE" }
+      assert(ordersCreate["status"]!!.jsonPrimitive.content == "mismatched")
+      assert(ordersCreate["id"]!!.jsonPrimitive.content == "gid://shopify/WebhookSubscription/3")
+      assert(ordersCreate["includeFields"]!!.jsonArray.isEmpty())
+      assert(ordersCreate["expectedIncludeFields"]!!.jsonArray.map { it.jsonPrimitive.content } == listOf("id", "admin_graphql_api_id"))
+      assert(shopify.registerWebhookCalls.isEmpty())
+      assert(shopify.updateWebhookSubscriptionCalls.isEmpty())
+    }
+  }
+
+  @Test
+  fun `api check names the filter and the format of a mismatched subscription`() {
+    val tokens = InMemoryShopTokenStore(mapOf(acmeShop to ShopifyAdminToken("shpat_test")))
+    val shopify = FakeShopifyGraphqlService().apply {
+      webhookSubscriptionsResult = Success(listOf(webhookSubscriptionStatus(4, "PRODUCTS_UPDATE", filter = "vendor:Acme", format = "XML")))
+    }
+    withDssApp(deps(tokens = tokens, shopify = shopify), authenticateAsMonolith = true) { client ->
+      val r = client.get("${Paths.apiCheck}?shop=acme.myshopify.com")
+      assert(r.status == HttpStatusCode.OK)
+      val webhooks = r.body<JsonObject>()["webhooks"]!!.jsonArray.map { it.jsonObject }
+      val productsUpdate = webhooks.single { it["topic"]!!.jsonPrimitive.content == "PRODUCTS_UPDATE" }
+      assert(productsUpdate["status"]!!.jsonPrimitive.content == "mismatched")
+      assert(productsUpdate["filter"]!!.jsonPrimitive.content == "vendor:Acme")
+      assert(productsUpdate["format"]!!.jsonPrimitive.content == "XML")
     }
   }
 

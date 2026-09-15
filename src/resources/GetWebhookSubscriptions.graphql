@@ -4,6 +4,9 @@ query GetWebhookSubscriptions($topics: [WebhookSubscriptionTopic!], $uri: String
       id
       topic
       uri
+      includeFields
+      filter
+      format
     }
   }
 }

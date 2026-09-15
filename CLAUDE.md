@@ -186,8 +186,9 @@ The other inbound routes are the OAuth pair (`/install`, `/oauth/callback`) and 
 `503` with `status=warming_up` until the warm-up is done (see "Warm-up and readiness") and `200` with `status=ok`
 after; it is the one route the readiness gate touches. `/api/check?shop=`
 is the one diagnostics route behind the bearer auth: it answers whether the shop's token resolves and, from a
-read-only `scanShopifyWebhooks`, one row per handled webhook topic (`active` or `missing` at our callback URL, plus
-stale subscriptions pointing elsewhere), so "is this shop still subscribed" can be asked without a reinstall.
+read-only `scanShopifyWebhooks`, one row per handled webhook topic (`active` at our callback URL with the payload
+fields the topic declares, no filter and JSON, `mismatched` when subscribed there otherwise, or `missing`, plus stale
+subscriptions pointing elsewhere), so "is this shop still subscribed" can be asked without a reinstall.
 
 The canonical contract is the monolith's `/openapi.json`, checked in here as `src/resources/monolith-dss-openapi.json`;
 the DTOs (`dropnext.dss.contract`) and `OutBoundMonolithPaths` are generated from it — never
@@ -208,10 +209,11 @@ holds a line; do not add precision there.
 callback HMAC and the state, exchanges the code for an Admin token (`ShopifyOAuthService`) and hands the rest to the
 `installShop` workflow: learn the shop's canonical domain and id, remember the token in the `ShopTokenStore`, persist
 it to the monolith (`putStoreApiKey`), count the catalogue, register the webhook subscriptions
-(`registerShopifyWebhooks`: scans what exists, registers the handled topics with the fields each topic declares,
-reports active/added/failed) and answer a `ShopInstallReport` that `renderOAuthInstallPage` renders. Nothing after
-the exchange fails the install; each step reports on the page instead. Failures in this flow are plain-text errors
-(`respondTextError`), not JSON.
+(`registerShopifyWebhooks`: scans what exists, updates a subscription at our URL whose payload fields, filter or
+format differ, repoints one stale HTTPS subscription per missing topic to our URL (resetting the same three), registers
+the topics still missing with the fields each topic declares, and reports active/added/updated/repointed/not applied/failed) and answer a `ShopInstallReport` that
+`renderOAuthInstallPage` renders. Nothing after the exchange fails the install; each step reports on the page instead.
+Failures in this flow are plain-text errors (`respondTextError`), not JSON.
 
 ## Outbound monolith integration
 `HttpMonolithService` is the single HTTP boundary to the monolith; `MonolithService` is its interface and

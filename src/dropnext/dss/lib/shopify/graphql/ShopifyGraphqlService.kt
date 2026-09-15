@@ -80,6 +80,17 @@ interface ShopifyGraphqlService {
     callbackUrl: String,
     includeFields: List<String>?,
   ): ShopifyResult<String>
+
+  /**
+   * `UpdateWebhookSubscription` — points an existing subscription at [callbackUrl] with [includeFields] and answers it as
+   * Shopify reports it afterwards. [includeFields] `null` resets it to the full payload: the client leaves out a variable
+   * whose value is `null`, so the operation declares `= null` as the variable's default, which is what Shopify then reads.
+   */
+  suspend fun updateWebhookSubscription(
+    subscriptionId: String,
+    callbackUrl: String,
+    includeFields: List<String>?,
+  ): ShopifyResult<WebhookSubscriptionStatus>
 }
 
 /** What every [ShopifyGraphqlService] call returns. */

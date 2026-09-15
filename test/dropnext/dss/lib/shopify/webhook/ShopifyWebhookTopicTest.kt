@@ -1,5 +1,6 @@
 package dropnext.dss.lib.shopify.webhook
 
+import dropnext.dss.testutil.fixture.webhookSubscriptionStatus
 import kotlin.test.Test
 
 class ShopifyWebhookTopicTest {
@@ -39,5 +40,33 @@ class ShopifyWebhookTopicTest {
   fun `is case sensitive — uppercase is not equivalent to canonical`() {
     val parsed = ShopifyWebhookTopic.parse("ORDERS/CREATE")
     assert(parsed is ShopifyWebhookTopic.Other)
+  }
+
+  /** Shopify reports a full-payload subscription as `[]` and keeps no order of the names. */
+  @Test
+  fun `a topic's include fields match Shopify's report as a set, with the full payload reported as empty`() {
+    assert(ShopifyWebhookTopic.OrdersCreate.matchesIncludeFields(listOf("admin_graphql_api_id", "id")))
+    assert(ShopifyWebhookTopic.ProductsCreate.matchesIncludeFields(emptyList()))
+  }
+
+  @Test
+  fun `other include fields than a topic declares do not match`() {
+    assert(!ShopifyWebhookTopic.OrdersCreate.matchesIncludeFields(emptyList()))
+    assert(!ShopifyWebhookTopic.OrdersCreate.matchesIncludeFields(listOf("id")))
+    assert(!ShopifyWebhookTopic.ProductsUpdate.matchesIncludeFields(listOf("id")))
+  }
+
+  @Test
+  fun `a subscription matches a topic with the declared fields, no filter and json`() {
+    assert(ShopifyWebhookTopic.OrdersCreate.matchesSubscription(webhookSubscriptionStatus(includeFields = listOf("id", "admin_graphql_api_id"))))
+    assert(ShopifyWebhookTopic.ProductsCreate.matchesSubscription(webhookSubscriptionStatus(filter = "")))
+  }
+
+  /** A filter drops events, and XML is a body the webhook parsers cannot read. */
+  @Test
+  fun `a subscription with a filter, in xml or with other fields does not match`() {
+    assert(!ShopifyWebhookTopic.ProductsCreate.matchesSubscription(webhookSubscriptionStatus(filter = "vendor:Acme")))
+    assert(!ShopifyWebhookTopic.ProductsCreate.matchesSubscription(webhookSubscriptionStatus(format = "XML")))
+    assert(!ShopifyWebhookTopic.OrdersCreate.matchesSubscription(webhookSubscriptionStatus(includeFields = emptyList())))
   }
 }
