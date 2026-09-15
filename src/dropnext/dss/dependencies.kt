@@ -114,7 +114,7 @@ fun dssDependencies(
     } else {
       monolithService
     },
-  shopTokens: ShopTokenStore = InMemoryShopTokenStore(config.shopAccessTokens) { shop ->
+  shopTokens: ShopTokenStore = InMemoryShopTokenStore { shop ->
     resolveShopTokenFromMonolith(monolithService, shop)
   },
   shopifyGraphqlServiceFactory: ShopifyGraphqlServiceFactory = HttpShopifyGraphqlServiceFactory(
@@ -126,7 +126,6 @@ fun dssDependencies(
     httpClient = httpClient,
     clientId = config.appClientId,
     clientSecret = config.appClientSecret,
-    scopes = config.scopes,
     redirectUrl = config.redirectUrl,
   ),
   shopifyHmacVerifierService: ShopifyHmacVerifierService = ShopifyHmacVerifierService(config.appClientSecret),
@@ -175,9 +174,7 @@ fun dssDependencies(
   warmUp = WarmUp(budget = WARM_UP_BUDGET + 1.seconds) { serverBound ->
     warmUpBeforeTakingTraffic(
       monolith = webhookMonolithService,
-      shopifyGraphqlServiceFactory = shopifyGraphqlServiceFactory,
       loopback = warmUpLoopback,
-      seededShop = config.shopAccessTokens.keys.firstOrNull(),
       serverBound = serverBound,
       budget = WARM_UP_BUDGET,
     )

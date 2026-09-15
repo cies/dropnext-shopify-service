@@ -31,6 +31,20 @@ import kotlinx.serialization.Serializable
 private const val OAUTH_STATE_TTL_SECONDS = 300L
 
 /**
+ * What the installation asks the merchant to grant.
+ * Since changing this takes a deployment, we hardcode it instead of making it a setting.
+ *
+ * **NOTE**: Mirror it in the Shopify Partner Dashboard configuration page for this (test) "App".
+ */
+private val SHOPIFY_ACCESS_SCOPES: List<String> = listOf(
+  "read_products",
+  "read_orders",
+  "write_webhooks",
+  "write_merchant_managed_fulfillment_orders",
+  "read_merchant_managed_fulfillment_orders",
+)
+
+/**
  * The [ShopifyOAuthService] that talks to Shopify. The `state` is an HMAC over `shop|expiry|nonce` with the
  * app secret, so it needs no storage: a callback is trusted when its state verifies and has not expired.
  *
@@ -41,7 +55,6 @@ class HttpShopifyOAuthService(
   private val httpClient: HttpClient,
   private val clientId: String,
   private val clientSecret: ShopifyAppSecret,
-  private val scopes: String,
   private val redirectUrl: String,
 ) : ShopifyOAuthService {
 
@@ -52,7 +65,7 @@ class HttpShopifyOAuthService(
       append(shop.normalizedShopifyHost)
       append(OutBoundShopifyOAuthPaths.adminOAuthAuthorize)
       append("?client_id=").append(enc(clientId))
-      append("&scope=").append(enc(scopes))
+      append("&scope=").append(enc(SHOPIFY_ACCESS_SCOPES.joinToString(",")))
       append("&redirect_uri=").append(enc(redirectUrl))
       append("&state=").append(enc(state))
     }

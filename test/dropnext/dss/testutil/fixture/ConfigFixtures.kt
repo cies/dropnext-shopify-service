@@ -4,8 +4,6 @@ import dropnext.dss.boot.config.Config
 import dropnext.dss.boot.config.DssMode
 import dropnext.dss.domain.DssToMonolithApiKey
 import dropnext.dss.domain.MonolithToDssApiKey
-import dropnext.dss.domain.ShopDomain
-import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.domain.ShopifyAppSecret
 
 
@@ -14,13 +12,11 @@ fun testConfig(
   monolithToDssApiKey: String = "x".repeat(32),
   monolithBaseUrl: String = "https://monolith.test",
   dssToMonolithApiKey: String? = null,
-  shopAccessTokens: Map<ShopDomain, ShopifyAdminToken> = emptyMap(),
   mode: DssMode = DssMode.PROD,
 ): Config =
   Config(
     appClientId = "client-id-test",
     appClientSecret = ShopifyAppSecret(appClientSecret),
-    scopes = "read_orders",
     dssBaseUrl = "https://dss.test",
     oauthRedirectPath = "/oauth/callback",
     serverPort = 8080,
@@ -29,7 +25,6 @@ fun testConfig(
     dssToMonolithApiKey = dssToMonolithApiKey?.let(::DssToMonolithApiKey),
     allowInsecureMonolithUrl = true,
     monolithToDssApiKey = MonolithToDssApiKey(monolithToDssApiKey),
-    shopAccessTokens = shopAccessTokens,
     // Log shipping stays off in tests: an appender would try to reach Logflare from the flush thread.
     logflareSourceName = null,
     logflareApiKey = null,

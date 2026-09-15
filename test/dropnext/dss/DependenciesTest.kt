@@ -5,6 +5,7 @@ import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.handler.WEBHOOK_MONOLITH_MAX_RETRIES
 import dropnext.dss.lib.ktor.MONOLITH_MAX_RETRIES
 import dropnext.dss.lib.ktor.createMonolithHttpClient
+import dropnext.dss.lib.shopify.token.InMemoryShopTokenStore
 import dropnext.dss.path.Paths
 import dropnext.dss.testutil.fake.FakeMonolithHttpServer
 import dropnext.dss.testutil.fake.FakeMonolithService
@@ -35,29 +36,13 @@ private const val APP_SECRET = "shpss_app_secret"
 
 /**
  * The defaults of `dssDependencies`, which every other test overrides. What is pinned is the
- * production token store: seeded from `DSS_SHOP_ACCESS_TOKENS`, and asking the monolith once on a
- * miss, which is how a restarted instance gets its tokens back.
+ * production token store: empty at start, and asking the monolith once on a miss, which is how a
+ * restarted instance gets its tokens back.
  */
 class DependenciesTest {
 
   @Test
-  fun `a token seeded from the configuration answers the readiness check without asking the monolith`() =
-    withFakeShopify { rewritingClient ->
-      val monolith = FakeMonolithService().apply { getStoreReturnsNotFound = true }
-      val deps = dssDependencies(
-        config = testConfig(shopAccessTokens = mapOf(acmeShop to ShopifyAdminToken("shpat_seeded"))),
-        httpClient = rewritingClient,
-        monolithService = monolith,
-      )
-      withDssApp(deps, authenticateAsMonolith = true) { client ->
-        val r = client.get("${Paths.apiCheck}?shop=acme.myshopify.com")
-        assert(r.status == HttpStatusCode.OK)
-        assert(monolith.getStoreCalls.isEmpty())
-      }
-    }
-
-  @Test
-  fun `a shop the configuration does not know is looked up on the monolith once and then remembered`() =
+  fun `a shop is looked up on the monolith once and then remembered`() =
     withFakeShopify { rewritingClient ->
       val monolith = FakeMonolithService().apply { getStoreToken = ShopifyAdminToken("shpat_from_monolith") }
       val deps = dssDependencies(config = testConfig(), httpClient = rewritingClient, monolithService = monolith)
@@ -69,7 +54,7 @@ class DependenciesTest {
     }
 
   @Test
-  fun `a shop neither the configuration nor the monolith knows has no token`() =
+  fun `a shop the monolith does not know has no token`() =
     withFakeShopify { rewritingClient ->
       val monolith = FakeMonolithService().apply { getStoreReturnsNotFound = true }
       val deps = dssDependencies(config = testConfig(), httpClient = rewritingClient, monolithService = monolith)
@@ -125,12 +110,10 @@ class DependenciesTest {
     try {
       shopifyServer.stubData("GetOrderForDss", GetOrderForDss.Result(order = minimalOrder()), GetOrderForDss.Result.serializer())
       val deps = dssDependencies(
-        config = testConfig(
-          appClientSecret = APP_SECRET,
-          monolithBaseUrl = "http://localhost:$monolithPort",
-          shopAccessTokens = mapOf(acmeShop to ShopifyAdminToken("shpat_seeded")),
-        ),
+        config = testConfig(appClientSecret = APP_SECRET, monolithBaseUrl = "http://localhost:$monolithPort"),
         httpClient = rewritingClient,
+        // A token in hand: the monolith that is down would otherwise stop the webhook at its token lookup.
+        shopTokens = InMemoryShopTokenStore(mapOf(acmeShop to ShopifyAdminToken("shpat_test"))),
         // The production retry counts over a backoff a test need not wait out.
         monolithHttpClient = createMonolithHttpClient(rewritingClient, retryBaseDelayMillis = 5),
         webhookMonolithHttpClient = createMonolithHttpClient(rewritingClient, retryBaseDelayMillis = 5, maxRetries = WEBHOOK_MONOLITH_MAX_RETRIES),
@@ -160,22 +143,19 @@ class DependenciesTest {
   }
 
   /**
-   * The seeded token has to reach Shopify itself, through the production factory: the readiness
-   * check alone would pass with a store that never hands the token out.
+   * The token the monolith hands out has to reach Shopify itself, through the production store and
+   * factory: the readiness check alone would pass with a store that never hands the token out.
    */
   @Test
-  fun `the seeded token is what a webhook presents to Shopify`() {
+  fun `the token the monolith hands out is what a webhook presents to Shopify`() {
     val shopifyServer = FakeShopifyGraphqlServer()
     val rewritingClient = shopifyRewritingHttpClient(shopifyServer.start())
     try {
       shopifyServer.stubData("GetOrderForDss", GetOrderForDss.Result(order = null), GetOrderForDss.Result.serializer())
       val deps = dssDependencies(
-        config = testConfig(
-          appClientSecret = APP_SECRET,
-          shopAccessTokens = mapOf(acmeShop to ShopifyAdminToken("shpat_seeded")),
-        ),
+        config = testConfig(appClientSecret = APP_SECRET),
         httpClient = rewritingClient,
-        monolithService = FakeMonolithService().apply { getStoreReturnsNotFound = true },
+        monolithService = FakeMonolithService().apply { getStoreToken = ShopifyAdminToken("shpat_from_monolith") },
       )
       withDssApp(deps) { client ->
         val body = """{"id":1001,"admin_graphql_api_id":"gid://shopify/Order/1001"}"""
@@ -189,7 +169,7 @@ class DependenciesTest {
       }
       val call = shopifyServer.calls.single()
       assert(call.operationName == "GetOrderForDss")
-      assert(call.authorization == "shpat_seeded")
+      assert(call.authorization == "shpat_from_monolith")
     } finally {
       // The application closes the client it was given when it stops; the server is ours to stop.
       shopifyServer.stop()

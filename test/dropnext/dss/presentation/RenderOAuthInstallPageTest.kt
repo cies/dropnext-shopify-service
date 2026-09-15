@@ -156,7 +156,7 @@ class RenderOAuthInstallPageTest {
     assert("ORDERS_UPDATED" in html)
     assert("permission denied" in html)
     assert("scope missing" in html)
-    assert("SHOPIFY_SCOPES" in html)
+    assert("Reinstall the app after fixing." in html)
   }
 
   @Test

@@ -3,8 +3,6 @@ package dropnext.dss.boot.config
 import dropnext.dss.domain.DssToMonolithApiKey
 import dropnext.dss.domain.LogflareApiKey
 import dropnext.dss.domain.MonolithToDssApiKey
-import dropnext.dss.domain.ShopDomain
-import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.domain.ShopifyAppSecret
 import dropnext.dss.path.Paths
 import java.net.URI
@@ -17,7 +15,6 @@ import java.net.URI
 data class Config(
   val appClientId: String,
   val appClientSecret: ShopifyAppSecret,
-  val scopes: String,
   val dssBaseUrl: String,
   val oauthRedirectPath: String,
   val serverPort: Int,
@@ -26,7 +23,6 @@ data class Config(
   val dssToMonolithApiKey: DssToMonolithApiKey?,
   val allowInsecureMonolithUrl: Boolean,
   val monolithToDssApiKey: MonolithToDssApiKey,
-  val shopAccessTokens: Map<ShopDomain, ShopifyAdminToken>,
   val logflareSourceName: String?,
   val logflareApiKey: LogflareApiKey?,
   val logflareEndpoint: String?,
@@ -55,7 +51,6 @@ data class Config(
 
       val appClientId = required("SHOPIFY_APP_CLIENT_ID")
       val appClientSecret = required("SHOPIFY_APP_CLIENT_SECRET")
-      val scopes = required("SHOPIFY_SCOPES")
       val dssBaseUrl = required("DSS_BASE_URL")
       val monolithBaseUrl = required("MONOLITH_BASE_URL")
       val monolithToDssApiKey = required("MONOLITH_TO_DSS_API_KEY")
@@ -111,7 +106,6 @@ data class Config(
       return Config(
         appClientId = appClientId,
         appClientSecret = ShopifyAppSecret(appClientSecret),
-        scopes = scopes,
         dssBaseUrl = dssBaseUrl.trimEnd('/'),
         oauthRedirectPath = oauthRedirectPath,
         serverPort = resolveServerPort(env["PORT"]),
@@ -120,7 +114,6 @@ data class Config(
         dssToMonolithApiKey = dssToMonolithApiKey?.let(::DssToMonolithApiKey),
         allowInsecureMonolithUrl = allowInsecureMonolithUrl,
         monolithToDssApiKey = MonolithToDssApiKey(monolithToDssApiKey),
-        shopAccessTokens = parseShopAccessTokens(value("DSS_SHOP_ACCESS_TOKENS")),
         logflareSourceName = value("LOGFLARE_SOURCE_NAME"),
         logflareApiKey = value("LOGFLARE_API_KEY")?.let(::LogflareApiKey),
         logflareEndpoint = logflareEndpoint,
@@ -152,22 +145,6 @@ data class Config(
         else -> 8080
       }
     }
-
-    /**
-     * `DSS_SHOP_ACCESS_TOKENS`: comma-separated `shop|token` pairs. An entry that does not parse fails the boot rather
-     * than being skipped: a skipped entry left that shop's webhooks unanswered with no line saying why. The message
-     * names the entry by position only, because either half of a mistyped entry may be the token.
-     */
-    private fun parseShopAccessTokens(raw: String?): Map<ShopDomain, ShopifyAdminToken> =
-      raw.orEmpty().split(',').map { it.trim() }.filter { it.isNotEmpty() }.mapIndexed { index, entry ->
-        val separator = entry.indexOf('|')
-        if (separator <= 0 || separator == entry.length - 1) {
-          error("DSS_SHOP_ACCESS_TOKENS: entry ${index + 1} is not a shop|token pair.")
-        }
-        val shop = ShopDomain.parse(entry.substring(0, separator).trim())
-          ?: error("DSS_SHOP_ACCESS_TOKENS: entry ${index + 1} does not name a Shopify domain before its '|'.")
-        shop to ShopifyAdminToken(entry.substring(separator + 1).trim())
-      }.toMap()
   }
 }
 

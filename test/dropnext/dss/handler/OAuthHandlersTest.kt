@@ -397,7 +397,6 @@ class OAuthHandlersTest {
       httpClient = client,
       clientId = config.appClientId,
       clientSecret = config.appClientSecret,
-      scopes = config.scopes,
       redirectUrl = config.redirectUrl,
     )
 }

@@ -18,7 +18,7 @@ class ReadDotEnvFileTest {
       writeText(
         """
         # a comment
-        SHOPIFY_SCOPES=read_orders,write_fulfillments
+        SHOPIFY_APP_CLIENT_ID=client-id
 
         export PORT=9999
         MONOLITH_BASE_URL="https://monolith.example"
@@ -28,7 +28,7 @@ class ReadDotEnvFileTest {
     }
     val env = readDotEnvFile(file)
     assert(env == mapOf(
-      "SHOPIFY_SCOPES" to "read_orders,write_fulfillments",
+      "SHOPIFY_APP_CLIENT_ID" to "client-id",
       "PORT" to "9999",
       "MONOLITH_BASE_URL" to "\"https://monolith.example\"",
     ))

@@ -39,8 +39,8 @@ enum class WebhookSkipReason {
   NO_SHOP_DOMAIN,
 
   /**
-   * No Admin token in memory nor at the monolith. Every delivery of the shop ends here until someone configures
-   * `DSS_SHOP_ACCESS_TOKENS`, completes the OAuth install or persists a token through `PUT /stores/api-key`.
+   * No Admin token in memory nor at the monolith. Every delivery of the shop ends here until someone completes the
+   * OAuth install or persists a token through `PUT /stores/api-key`.
    */
   NO_ADMIN_TOKEN,
 

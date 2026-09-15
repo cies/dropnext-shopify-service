@@ -3,8 +3,6 @@ package dropnext.dss.boot.config
 import dropnext.dss.domain.DssToMonolithApiKey
 import dropnext.dss.domain.LogflareApiKey
 import dropnext.dss.domain.MonolithToDssApiKey
-import dropnext.dss.domain.ShopDomain
-import dropnext.dss.domain.ShopifyAdminToken
 import kotlin.test.Test
 
 
@@ -12,7 +10,6 @@ import kotlin.test.Test
 private fun requiredEnv(): Map<String, String> = mapOf(
   "SHOPIFY_APP_CLIENT_ID" to "good-id",
   "SHOPIFY_APP_CLIENT_SECRET" to "good-secret",
-  "SHOPIFY_SCOPES" to "read_orders",
   "DSS_BASE_URL" to "https://dss.example.org/",
   "MONOLITH_BASE_URL" to "https://monolith.example.org",
   "MONOLITH_TO_DSS_API_KEY" to "x".repeat(32),
@@ -24,13 +21,11 @@ class ConfigTest {
   fun `reads the required variables and applies the defaults`() {
     val config = Config.from(requiredEnv())
     assert(config.appClientId == "good-id")
-    assert(config.scopes == "read_orders")
     assert(config.oauthRedirectPath == "/oauth/callback")
     assert(config.serverPort == 8080)
     assert(config.monolithApiPrefix == null)
     assert(config.dssToMonolithApiKey == null)
     assert(!config.allowInsecureMonolithUrl)
-    assert(config.shopAccessTokens.isEmpty())
     assert(!config.logflareEnabled)
     assert(config.mode == DssMode.PROD)
   }
@@ -114,8 +109,8 @@ class ConfigTest {
 
   @Test
   fun `quoted values are unwrapped`() {
-    val config = Config.from(requiredEnv() + ("SHOPIFY_SCOPES" to "\"read_orders,write_fulfillments\""))
-    assert(config.scopes == "read_orders,write_fulfillments")
+    val config = Config.from(requiredEnv() + ("SHOPIFY_APP_CLIENT_ID" to "\"quoted-id\""))
+    assert(config.appClientId == "quoted-id")
   }
 
   // ---------- validation ----------
@@ -242,32 +237,12 @@ class ConfigTest {
     assert(Config.from(requiredEnv() + ("PORT" to "not-a-number")).serverPort == 8080)
   }
 
-  // ---------- monolith prefix and token map ----------
+  // ---------- monolith prefix ----------
 
   @Test
   fun `monolith api prefix is trimmed of slashes and blank means none`() {
     assert(Config.from(requiredEnv() + ("MONOLITH_API_PREFIX" to "/api/v1/")).monolithApiPrefix == "api/v1")
     assert(Config.from(requiredEnv() + ("MONOLITH_API_PREFIX" to "/")).monolithApiPrefix == null)
-  }
-
-  @Test
-  fun `shop access tokens are parsed as canonical domains, and a trailing comma is not an entry`() {
-    val env = requiredEnv() + ("DSS_SHOP_ACCESS_TOKENS" to "Acme.myshopify.com|shpat_a, other|shpat_b,")
-    val tokens = Config.from(env).shopAccessTokens
-    assert(tokens.size == 2)
-    assert(tokens[ShopDomain.parse("acme.myshopify.com")!!] == ShopifyAdminToken("shpat_a"))
-    assert(tokens[ShopDomain.parse("other.myshopify.com")!!] == ShopifyAdminToken("shpat_b"))
-  }
-
-  /** A skipped entry left that shop's webhooks unanswered with no line saying why; the message names no half of it. */
-  @Test
-  fun `a shop access token entry that is not a shop and token pair refuses to boot without printing it`() {
-    listOf("broken", "|shpat_secret", "acme.myshopify.com|", "shpat_secret|acme.myshopify.com").forEach { entry ->
-      val failure = runCatching { Config.from(requiredEnv() + ("DSS_SHOP_ACCESS_TOKENS" to "good|shpat_a, $entry")) }.exceptionOrNull()
-      assert(failure is IllegalStateException)
-      assert("DSS_SHOP_ACCESS_TOKENS: entry 2" in failure!!.message.orEmpty())
-      assert("shpat_secret" !in failure.message.orEmpty())
-    }
   }
 
   // ---------- the value normalisation every variable goes through ----------

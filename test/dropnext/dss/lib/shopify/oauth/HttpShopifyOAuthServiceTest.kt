@@ -32,7 +32,6 @@ class HttpShopifyOAuthServiceTest {
     httpClient = httpClient,
     clientId = "client-id-123",
     clientSecret = ShopifyAppSecret(secret),
-    scopes = "read_orders,write_products",
     redirectUrl = "https://dss.example.com/oauth/callback",
   )
 
@@ -43,7 +42,7 @@ class HttpShopifyOAuthServiceTest {
     val url = client.authorizeUrl(shop, "state-xyz")
     assert(url.startsWith("https://acme.myshopify.com/admin/oauth/authorize?"))
     assert("client_id=client-id-123" in url)
-    assert("scope=read_orders%2Cwrite_products" in url)
+    assert("scope=read_products%2Cread_orders%2Cwrite_webhooks%2Cwrite_merchant_managed_fulfillment_orders%2Cread_merchant_managed_fulfillment_orders" in url)
     assert("redirect_uri=https%3A%2F%2Fdss.example.com%2Foauth%2Fcallback" in url)
     assert("state=state-xyz" in url)
   }
@@ -173,7 +172,7 @@ class HttpShopifyOAuthServiceTest {
   @Test
   fun `exchangeCode lets a failure that is not a transport failure propagate`() = runBlocking {
     throwingHttpClient(IllegalStateException("client misconfigured")).use { broken ->
-      val service = HttpShopifyOAuthService(broken, "client-id-123", ShopifyAppSecret("s"), "read_orders", "https://dss.example.com/oauth/callback")
+      val service = HttpShopifyOAuthService(broken, "client-id-123", ShopifyAppSecret("s"), "https://dss.example.com/oauth/callback")
       val thrown = runCatching { service.exchangeCode(shop, "abc-code") }.exceptionOrNull()
       assert(thrown is IllegalStateException)
     }
@@ -199,7 +198,6 @@ class HttpShopifyOAuthServiceTest {
         httpClient = rewritingClient,
         clientId = "client-id-123",
         clientSecret = ShopifyAppSecret("client-secret-xyz"),
-        scopes = "read_orders,write_products",
         redirectUrl = "https://dss.example.com/oauth/callback",
       )
       runBlocking { block(server, service) }

@@ -138,11 +138,7 @@ private fun FlowContent.renderFailedTopics(failures: List<WebhookTopicRegistrati
     }
   }
   p {
-    +"Make sure "
-    code { +"SHOPIFY_SCOPES" }
-    +" includes "
-    code { +"read_orders,write_fulfillments" }
-    +" and that your Shopify Partner Dashboard app has "
-    +"Orders API access enabled. Reinstall the app after fixing."
+    +"Make sure your Shopify Partner Dashboard app has Orders API access enabled and grants the scopes the install "
+    +"requests. Reinstall the app after fixing."
   }
 }

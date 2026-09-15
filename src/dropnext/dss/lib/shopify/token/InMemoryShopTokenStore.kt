@@ -10,8 +10,8 @@ import kotlinx.coroutines.sync.withLock
 /**
  * In-memory [ShopTokenStore], as the DSS has no database (it is stateless): basically a cache.
  *
- * Seeded from `DSS_SHOP_ACCESS_TOKENS`, filled by the OAuth callback and `PUT /stores/api-key`,
- * and —on a miss— by [fallback], which production wires to a monolith lookup so a restarted instance recovers its tokens.
+ * Filled by the OAuth callback and `PUT /stores/api-key`, and —on a miss— by [fallback], which production wires to a
+ * monolith lookup so a restarted instance recovers its tokens.
  *
  * Backed by a [ConcurrentHashMap] so callbacks, webhook handlers and the fallback can write concurrently.
  * Keys are canonical [ShopDomain] values, so case-insensitive lookups are unnecessary.

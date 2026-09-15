@@ -55,15 +55,15 @@ credentials, so the human developer starts it — see "Operational boundary".
 
 # Development environment
 
-- Copy `.env.example` to `.env` and fill in `SHOPIFY_APP_CLIENT_ID`, `SHOPIFY_APP_CLIENT_SECRET`, `SHOPIFY_SCOPES`
+- Copy `.env.example` to `.env` and fill in `SHOPIFY_APP_CLIENT_ID`, `SHOPIFY_APP_CLIENT_SECRET`
   and `DSS_BASE_URL` (a public HTTPS origin, e.g. an [ngrok](https://ngrok.com/) tunnel: Shopify requires HTTPS for
   OAuth and webhook callbacks).
 - The full env-var table is in [README.md](./README.md) ("Environment variables"); `Config.from(env)` in
   `boot/config/Config.kt` is the one place that reads it (`main` layers the local `.env` file over the process environment,
   `ArchitectureTest` forbids reading the environment anywhere else). A variable not read there is not a variable.
 - The service is stateless: no database, no migrations. Per-shop Shopify Admin tokens live in an in-memory
-  `InMemoryShopTokenStore` (the `ShopTokenStore` interface), seeded from `DSS_SHOP_ACCESS_TOKENS`, filled by the OAuth
-  installation or by the monolith through `PUT /stores/api-key`, with a fallback lookup on the monolith (`GET /stores`) on a miss.
+  `InMemoryShopTokenStore` (the `ShopTokenStore` interface), filled by the OAuth installation
+  or by the monolith through `PUT /stores/api-key`, with a fallback lookup on the monolith (`GET /stores`) on a miss.
   One lookup per shop at a time, so a burst of deliveries after a restart asks the monolith once.
 
 
@@ -194,8 +194,17 @@ the DTOs (`dropnext.dss.contract`) and `OutBoundMonolithPaths` are generated fro
 hand-write either (`ArchitectureTest` checks). Refreshing the copy is a manual step done in the same work session as
 the monolith change (see `../CLAUDE.md`, "Cross-repo couplings").
 
+## Fulfillment orders
+DropNext does not model Shopify's fulfillment orders. It supplies every order line whose variant, shipping region and
+currency match an active quotation for the retailer, wherever Shopify routes that line. Fulfillment orders exist in
+this service only because Shopify's fulfillment API is built on them: the shipment sync reads them live from Shopify
+when it creates fulfillments, and matches by variant because the monolith names shipment lines by
+`product_variant_id`, not by Shopify line id. Nothing on the order-ingest side needs to know which fulfillment order
+holds a line; do not add precision there.
+
 ## OAuth install flow
-`GET /install?shop=…` redirects to Shopify's authorize URL with a signed `state`. `GET /oauth/callback` verifies the
+`GET /install?shop=…` redirects to Shopify's authorize URL with a signed `state` and the scopes in
+`SHOPIFY_ACCESS_SCOPES` (not a setting: changing them takes a deploy either way). `GET /oauth/callback` verifies the
 callback HMAC and the state, exchanges the code for an Admin token (`ShopifyOAuthService`) and hands the rest to the
 `installShop` workflow: learn the shop's canonical domain and id, remember the token in the `ShopTokenStore`, persist
 it to the monolith (`putStoreApiKey`), count the catalogue, register the webhook subscriptions
@@ -259,12 +268,11 @@ There is no request context and no service locator; everything reaches a handler
 At a quarter vCPU the first outbound HTTPS call of the JVM costs seconds, more than a webhook's budget, so a fresh task
 used to fail its first `orders/create`. `warmUpBeforeTakingTraffic` (`boot/warmup/`) pays that before the task takes
 traffic, in two parts that each end in one log line: the **outbound** part (one `getStore` through the webhook monolith
-service, one `shopIdentity` for the first seeded shop when there is one) needs only the dependency graph and starts on
+service) needs only the dependency graph and starts on
 Ktor's `ApplicationStarted`; the **inbound** part waits for `ServerReady` (the socket is bound) and sends the service
 two requests over `127.0.0.1` through `HttpWarmUpLoopbackService` (`boot/warmup/`): `GET /api/check` with the monolith's
 bearer, and a self-signed `orders/updated` delivery with webhook id `warm-up`, so every plugin and the HMAC have run
-once. Nothing is seeded in production, so both parts name `WARM_UP_PLACEHOLDER_SHOP` there, which the monolith answers
-`404` for. The warm-up changes nothing and never throws for an upstream failure; a step it cannot run is `skipped`
+once. Both parts name `WARM_UP_PLACEHOLDER_SHOP`, which the monolith answers `404` for. The warm-up changes nothing and never throws for an upstream failure; a step it cannot run is `skipped`
 with a reason, a step that goes wrong is `failed` with a countable label.
 
 - `Readiness` (`boot/warmup/`) is the flag `/health` reads; `startWarmUp` (same package, called by `dssModule`) marks it in a `finally` when the `WarmUp` returns,
@@ -405,8 +413,8 @@ Shared with the monolith, so a line from either service reads the same way in Lo
 
 
 # Operational boundary
-A developer machine's `.env` can hold real Shopify Admin tokens (`DSS_SHOP_ACCESS_TOKENS`) and a staging or production
-`MONOLITH_BASE_URL`. Anything that would act on a real shop or a remote monolith is **human-only**; Claude (and any
+A developer machine's `.env` can hold real Shopify app credentials and a staging or production
+`MONOLITH_BASE_URL`, which hands out real shops' Admin tokens. Anything that would act on a real shop or a remote monolith is **human-only**; Claude (and any
 other automation) must not:
 
 * start the service (`./gradlew run`, `docker compose up`, the container) or send requests to a running instance,

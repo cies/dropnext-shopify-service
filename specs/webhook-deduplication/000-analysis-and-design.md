@@ -42,6 +42,9 @@ Shopify guarantees at-least-once delivery. The same delivery reaches `/webhooks/
 Separately, a shop with two subscriptions to one topic at our callback URL receives one delivery per subscription.
 `registerShopifyWebhooks` registers one per topic, so that only happens through a subscription made by hand.
 
+
+## The reason why we have not implemented this, yet...
+
 The *correctness* defect is absorbed by the monolith's idempotency for every topic mirrored today. The *efficiency*
 defect is real but modest: each duplicate `orders/create` costs a `GetOrderForDss` and a monolith round trip, each
 duplicate product webhook a `GetProductById` and an upsert, and Shopify's retries are eight per failure. What is

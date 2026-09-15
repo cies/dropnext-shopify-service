@@ -89,8 +89,7 @@ private fun logConfigSummary(config: Config) {
   val prefixNote = config.monolithApiPrefix?.let { " MONOLITH_API_PREFIX=$it" }.orEmpty()
   log.info {
     "[monolith] Outbound enabled: MONOLITH_BASE_URL=${config.monolithBaseUrl}$prefixNote " +
-      "(DSS_TO_MONOLITH_API_KEY Bearer configured: ${config.dssToMonolithApiKey != null}, " +
-      "shops with a seeded token: ${config.shopAccessTokens.size})."
+      "(DSS_TO_MONOLITH_API_KEY Bearer configured: ${config.dssToMonolithApiKey != null})."
   }
   log.info {
     "[logging] Mode: ${config.mode}, Logflare shipping: ${if (config.logflareEnabled) "on" else "off (stdout only)"}, " +

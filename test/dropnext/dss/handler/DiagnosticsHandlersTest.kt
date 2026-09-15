@@ -98,13 +98,11 @@ class DiagnosticsHandlersTest {
       appClientSecret = "shpss_app_secret_value",
       monolithToDssApiKey = monolithToDssApiKey,
       dssToMonolithApiKey = "mono_api_key_value",
-      shopAccessTokens = mapOf(acmeShop to ShopifyAdminToken("shpat_seeded_token")),
     )
     withDssApp(deps(config = config)) { client ->
       val body = client.get(Paths.api).bodyAsText()
       assert("shpss_app_secret_value" !in body)
       assert("mono_api_key_value" !in body)
-      assert("shpat_seeded_token" !in body)
       assert(monolithToDssApiKey !in body)
     }
   }

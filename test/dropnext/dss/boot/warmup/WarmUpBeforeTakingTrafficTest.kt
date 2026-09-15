@@ -3,10 +3,7 @@ package dropnext.dss.boot.warmup
 import dropnext.dss.boot.warmup.WarmUpStepOutcome.Failed
 import dropnext.dss.boot.warmup.WarmUpStepOutcome.Ok
 import dropnext.dss.boot.warmup.WarmUpStepOutcome.Skipped
-import dropnext.dss.domain.ShopDomain
 import dropnext.dss.testutil.fake.FakeMonolithService
-import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
-import dropnext.dss.testutil.fake.FakeShopifyGraphqlServiceFactory
 import dropnext.dss.testutil.fake.FakeWarmUpLoopbackService
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
 import dropnext.dss.testutil.helper.capturingLogs
@@ -18,9 +15,6 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.parallel.ResourceLock
 
 
-private val acmeShop = ShopDomain.parse("acme.myshopify.com")!!
-
-
 /**
  * The warm-up pays the JVM's one-time costs before the task takes traffic. What matters is not that the fakes were
  * called but what it does with what it finds: which shop it names, what it makes of a failure, and what it skips when
@@ -30,57 +24,33 @@ class WarmUpBeforeTakingTrafficTest {
 
   private val serverBound = CompletableDeferred(Unit)
 
+  /** The monolith cannot know the placeholder shop; its `404` has paid for the connection all the same. */
   @Test
-  fun `a seeded shop is asked of the monolith by subdomain and of Shopify by its identity`() = runBlocking {
-    val monolith = FakeMonolithService()
-    val shopify = FakeShopifyGraphqlService(acmeShop)
-    val report = warmUp(monolith = monolith, shopify = shopify, seededShop = acmeShop)
-    assert(monolith.getStoreCalls == listOf("acme"))
-    assert(shopify.shopIdentityCalls.size == 1)
-    assert(report.outbound.monolith == Ok())
-    assert(report.outbound.shopify == Ok())
-  }
-
-  /** Nothing is seeded in production: the monolith is still asked, for a shop it cannot know, and Shopify is left alone. */
-  @Test
-  fun `without a seeded shop the placeholder shop is looked up and the Shopify step is skipped`() = runBlocking {
+  fun `the placeholder shop is asked of the monolith by subdomain, and a 404 is as good as a hit`() = runBlocking {
     val monolith = FakeMonolithService().apply { getStoreReturnsNotFound = true }
-    val shopify = FakeShopifyGraphqlService(acmeShop)
-    val loopback = FakeWarmUpLoopbackService()
-    val report = warmUp(monolith = monolith, shopify = shopify, loopback = loopback, seededShop = null)
+    val report = warmUp(monolith = monolith)
     assert(monolith.getStoreCalls == listOf(WARM_UP_PLACEHOLDER_SHOP.subdomainOnly))
-    assert(shopify.shopIdentityCalls.isEmpty())
     assert(report.outbound.monolith == Ok())
-    assert(report.outbound.shopify == Skipped("no_seeded_shop"))
-    assert(loopback.apiCheckCalls.single().shop == WARM_UP_PLACEHOLDER_SHOP)
   }
 
   @Test
   fun `a monolith that does not answer fails its step and the rest still runs`() = runBlocking {
     val monolith = FakeMonolithService().apply { getStoreTransportFailure = true }
     val loopback = FakeWarmUpLoopbackService()
-    val report = warmUp(monolith = monolith, loopback = loopback, seededShop = acmeShop)
+    val report = warmUp(monolith = monolith, loopback = loopback)
     assert(report.outbound.monolith == Failed("monolith_transport"))
-    assert(report.outbound.shopify == Ok())
     assert(loopback.apiCheckCalls.size == 1)
     assert(loopback.webhookDeliveryCalls.size == 1)
   }
 
   @Test
-  fun `a seeded shop whose token the monolith cannot be asked for fails the Shopify step`() = runBlocking {
-    val factory = FakeShopifyGraphqlServiceFactory(tokenSourceUnavailable = true)
-    val report = warmUpBeforeTakingTraffic(FakeMonolithService(), factory, FakeWarmUpLoopbackService(), acmeShop, serverBound)
-    assert(report.outbound.shopify == Failed("token_unavailable"))
-  }
-
-  @Test
-  fun `both requests to ourselves name the same shop and carry the same trace id`() = runBlocking {
+  fun `both requests to ourselves name the placeholder shop and carry the same trace id`() = runBlocking {
     val loopback = FakeWarmUpLoopbackService()
-    warmUp(loopback = loopback, seededShop = acmeShop)
+    warmUp(loopback = loopback)
     val check = loopback.apiCheckCalls.single()
     val delivery = loopback.webhookDeliveryCalls.single()
-    assert(check.shop == acmeShop)
-    assert(delivery.shop == acmeShop)
+    assert(check.shop == WARM_UP_PLACEHOLDER_SHOP)
+    assert(delivery.shop == WARM_UP_PLACEHOLDER_SHOP)
     assert(check.traceId == delivery.traceId)
     assert(check.traceId.isNotBlank())
   }
@@ -98,7 +68,7 @@ class WarmUpBeforeTakingTrafficTest {
   @Test
   fun `a server that never binds its socket leaves the inbound part skipped and the outbound part done`() = runBlocking {
     val loopback = FakeWarmUpLoopbackService()
-    val report = warmUp(loopback = loopback, seededShop = acmeShop, serverBound = CompletableDeferred(), budget = 200.milliseconds)
+    val report = warmUp(loopback = loopback, serverBound = CompletableDeferred(), budget = 200.milliseconds)
     assert(report.outbound.monolith == Ok())
     assert(report.inbound.apiCheck == Skipped("server_not_bound"))
     assert(report.inbound.webhook == Skipped("server_not_bound"))
@@ -109,10 +79,9 @@ class WarmUpBeforeTakingTrafficTest {
   @Test
   fun `a step the budget never reaches is skipped for that reason`() = runBlocking {
     val monolith = FakeMonolithService()
-    val report = warmUp(monolith = monolith, seededShop = acmeShop, budget = Duration.ZERO)
+    val report = warmUp(monolith = monolith, budget = Duration.ZERO)
     assert(monolith.getStoreCalls.isEmpty())
     assert(report.outbound.monolith == Skipped("budget"))
-    assert(report.outbound.shopify == Skipped("budget"))
     assert(report.inbound.apiCheck == Skipped("budget"))
     assert(report.inbound.webhook == Skipped("budget"))
   }
@@ -122,10 +91,9 @@ class WarmUpBeforeTakingTrafficTest {
     val report = warmUp(
       monolith = FakeMonolithService().apply { getStoreTransportFailure = true },
       loopback = FakeWarmUpLoopbackService().apply { apiCheckStatus = 401 },
-      seededShop = null,
     )
     assert(report.outbound.logLine().startsWith("Warm-up outbound done took_ms="))
-    assert(report.outbound.logLine().endsWith(" monolith=failed error=monolith_transport shopify=skipped reason=no_seeded_shop"))
+    assert(report.outbound.logLine().endsWith(" monolith=failed error=monolith_transport"))
     assert(report.inbound.logLine().startsWith("Warm-up inbound done took_ms="))
     assert(report.inbound.logLine().endsWith(" api_check=401 webhook=200"))
     assert(report.anyFailed)
@@ -152,17 +120,8 @@ class WarmUpBeforeTakingTrafficTest {
 
   private suspend fun warmUp(
     monolith: FakeMonolithService = FakeMonolithService(),
-    shopify: FakeShopifyGraphqlService = FakeShopifyGraphqlService(acmeShop),
     loopback: FakeWarmUpLoopbackService = FakeWarmUpLoopbackService(),
-    seededShop: ShopDomain? = acmeShop,
     serverBound: CompletableDeferred<Unit> = this.serverBound,
     budget: Duration = WARM_UP_BUDGET,
-  ) = warmUpBeforeTakingTraffic(
-    monolith = monolith,
-    shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(shopify),
-    loopback = loopback,
-    seededShop = seededShop,
-    serverBound = serverBound,
-    budget = budget,
-  )
+  ) = warmUpBeforeTakingTraffic(monolith = monolith, loopback = loopback, serverBound = serverBound, budget = budget)
 }

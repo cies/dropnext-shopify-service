@@ -10,9 +10,9 @@ data class WarmUpReport(val outbound: WarmUpOutboundReport, val inbound: WarmUpI
   val anyFailed: Boolean get() = outbound.anyFailed || inbound.anyFailed
 }
 
-data class WarmUpOutboundReport(val monolith: WarmUpStepOutcome, val shopify: WarmUpStepOutcome, val tookMillis: Long) {
-  /** A step that failed asks for a look; a skipped one is the normal shape of things (nothing seeded, no time left). */
-  val anyFailed: Boolean get() = listOf(monolith, shopify).any { it is WarmUpStepOutcome.Failed }
+data class WarmUpOutboundReport(val monolith: WarmUpStepOutcome, val tookMillis: Long) {
+  /** A step that failed asks for a look; a skipped one is the normal shape of things (no time left). */
+  val anyFailed: Boolean get() = monolith is WarmUpStepOutcome.Failed
 }
 
 data class WarmUpInboundReport(val apiCheck: WarmUpStepOutcome, val webhook: WarmUpStepOutcome, val tookMillis: Long) {
