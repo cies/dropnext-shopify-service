@@ -102,7 +102,7 @@ The sync is additive: it never cancels or changes an existing fulfillment.
 validate the request
   → load the order (GetOrderForDss)
   → match every shipment against the live remaining quantity of the open fulfillment-order lines,
-    with one quantity ledger across the whole payload
+    each shipment against what the earlier shipments of the payload already claimed
   → any quantity error: 400, nothing created
   → one fulfillmentCreate per shipment with at least one matched line, in payload order,
     stopping at the first failure
@@ -112,10 +112,10 @@ Matching rules:
 
 - Duplicate `product_variant_id` rows within one shipment are summed first.
 - A line matches an open fulfillment-order line of the same variant. When several carry it, the one with the most
-  left in the ledger wins, the first in Graphql order on a tie.
+  left once the plan so far is honored wins, the first in Graphql order on a tie.
 - A variant on no open fulfillment order is skipped (`no_open_fo`); a variant whose open lines have nothing
   remaining is skipped (`zero_remaining`).
-- A quantity above what is left, on the line or in the ledger after earlier shipments of the same payload, is an
+- A quantity above what is left, on the line or after earlier shipments of the same payload claimed it, is an
   error for the whole payload.
 
 ### Partial match (unmatched variants)
@@ -207,7 +207,7 @@ These are what the temporary note at the top refers to.
 ./gradlew test
 ```
 
-Covers the fulfillment path end to end: request validation, fulfillment-order matching and the quantity ledger,
+Covers the fulfillment path end to end: request validation, the open-line index and fulfillment-order matching,
 the `calculate` → `determine` → `effect` mutation planning, the Shopify Graphql wire format for every operation the
 sync uses, and `POST /sync-shipments-with-fulfillments` and `POST /tracking-update` through the production
 application module. The manual checks above are for what only a real shop can show: that Shopify accepts the

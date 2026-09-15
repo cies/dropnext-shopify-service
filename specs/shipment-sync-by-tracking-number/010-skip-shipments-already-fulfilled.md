@@ -33,14 +33,16 @@ monolith already promises"), and `docs/FULFILLMENT_VERIFICATION.md` lists the du
 - `domain/fulfillment/`: one lookup, "the live fulfillments of this order that carry this tracking number". It
   trims both sides, compares case-sensitively, and ignores fulfillments whose status is `CANCELLED`. The sync and
   `syncShopifyTrackingEvent` both use it; see "Edge cases" for what that changes on `/tracking-update`.
-- `domain/fulfillment/`: a shipment-level skip, decided before the ledger matching runs. A shipment whose
-  tracking number the lookup finds is skipped as a whole, with a new reason `ALREADY_FULFILLED`. Its lines never
-  touch the ledger, so they cannot make a later shipment in the same payload fail for want of quantity.
+- `domain/fulfillment/`: a shipment-level skip, decided before the quantity matching runs. A shipment whose
+  tracking number the lookup finds is skipped as a whole, with a new reason `ALREADY_FULFILLED`. It contributes
+  nothing to the plan, so its lines cannot make a later shipment in the same payload fail for want of quantity.
 - `workflow/calculateShopifyMutations.kt`: no `FulfillmentCreate` for a skipped shipment. The skip travels in the
   plan that `matcher-cleanup/010` introduces, beside the skipped lines.
 - `workflow/determineShopifyMutations.kt`: the skip log line gains `reason=already_fulfilled` and the existing
-  fulfillment's id, so a Logflare search by tracking number finds the fulfillment it landed on; the summary line
-  counts the skip in `skippedShipments`.
+  fulfillment's id, so a Logflare search by tracking number finds the fulfillment it landed on.
+- `workflow/syncShopifyShipmentsToFulfillments.kt`: the summary line's `skippedShipments` is read from the plan
+  (the shipments skipped by tracking number plus `unmatchedShipments`) instead of computed as the payload size
+  minus the creates. The two agree today; once there are two kinds of skipped shipment, the plan is the one source.
 - Response: unchanged in this spec. A skipped shipment is simply absent from `new_fulfillment_ids`; `030`
   makes it visible.
 
@@ -103,7 +105,7 @@ monolith already promises"), and `docs/FULFILLMENT_VERIFICATION.md` lists the du
 Test-first, cheapest flavour first.
 
 - **Pure** (a test beside the lookup, and `MatchShipmentToFulfillmentOrdersTest` for the skip): live fulfillment
-  with the tracking number → skipped, ledger untouched; cancelled fulfillment with it → not skipped; two live
+  with the tracking number → skipped, nothing planned for it; cancelled fulfillment with it → not skipped; two live
   fulfillments with it → skipped; trimmed match; a fulfillment with two tracking numbers.
 - **Fake-backed** (`CalculateShopifyMutationsTest`, `SyncShopifyShipmentsToFulfillmentsTest`): the re-send
   scenario from "Problem" with remaining quantity left → one create for B, none for A; an all-fulfilled

@@ -166,8 +166,8 @@ of it. What can still be checked before the first mutation is whether the new sh
 - `ShopifyGraphqlService.orderForDss` for the reload; `FakeShopifyGraphqlService.orderForDssResultQueue` serves the
   order before and after the cancels.
 - The live-fulfillment-by-tracking-number lookup and the shipment skip from `010`.
-- `FulfillmentQuantityLedger`'s `init`, which reads the live remaining quantity of every open line, for the
-  per-variant totals of the feasibility check.
+- `openFulfillmentLines(order)` in `domain/fulfillment/openFulfillmentLines.kt`, which indexes every open line
+  with its live remaining quantity by variant, for the per-variant totals of the feasibility check.
 - `validateSyncShipmentsRequest.kt`'s `validateDuplicateTrackingNumbers` shows the validator style for the new list.
 - Monolith: `db/sql/portal/supplier/shipmentSplitWrite.kt` sets `replaced_at`; `shipmentSplitRead.kt` already
   filters on it, so the column and its meaning exist.

@@ -4,6 +4,7 @@ import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
 import dropnext.dss.contract.Shipment
 import dropnext.dss.domain.fulfillment.DryRunResult
+import dropnext.dss.domain.fulfillment.ShipmentMatchResult
 import dropnext.dss.domain.fulfillment.dryRunAllShipments
 import dropnext.dss.lib.shopify.graphql.FulfillmentLine
 import dropnext.dss.lib.shopify.graphql.ShopifyError
@@ -15,29 +16,36 @@ import dropnext.graphql.generated.getorderfordss.Order
 fun calculateShopifyMutations(
   order: Order,
   shipments: List<Shipment>,
-): ShopifyResult<List<ShopifyMutation>> =
+): ShopifyResult<ShipmentPlan> =
   when (val match = dryRunAllShipments(order, shipments)) {
     is DryRunResult.UserError -> Failure(ShopifyError.UserError(match.messages))
-    is DryRunResult.Ok -> Success(
-      match.perShipment.mapIndexedNotNull { index, shipmentMatch ->
-        if (shipmentMatch.groups.isEmpty()) return@mapIndexedNotNull null
-        val shipment = shipments[index]
-        val lineItems = shipmentMatch.groups.flatMap { (fulfillmentOrder, inputs) ->
-          inputs.map { input ->
-            FulfillmentLine(
-              fulfillmentOrderId = fulfillmentOrder.id,
-              lineItemId = input.id,
-              quantity = input.quantity,
-            )
-          }
-        }
-        ShopifyMutation.FulfillmentCreate(
-          lineItems = lineItems,
-          trackingNumber = shipment.trackingNumber,
-          carrier = shipment.carrier,
-          trackingUrl = shipment.trackingUrl,
-          notifyCustomer = false,
-        )
-      },
-    )
+    is DryRunResult.Ok -> {
+      val matched = shipments.zip(match.perShipment)
+      Success(
+        ShipmentPlan(
+          mutations = matched.mapNotNull { (shipment, shipmentMatch) -> fulfillmentCreate(shipment, shipmentMatch) },
+          skippedLines = match.perShipment.flatMap { it.skipped },
+          unmatchedShipments = matched.filter { (_, shipmentMatch) -> shipmentMatch.groups.isEmpty() }.map { it.first },
+        ),
+      )
+    }
   }
+
+private fun fulfillmentCreate(shipment: Shipment, shipmentMatch: ShipmentMatchResult.Ok): ShopifyMutation.FulfillmentCreate? {
+  if (shipmentMatch.groups.isEmpty()) return null
+  return ShopifyMutation.FulfillmentCreate(
+    lineItems = shipmentMatch.groups.flatMap { (fulfillmentOrderId, inputs) ->
+      inputs.map { input ->
+        FulfillmentLine(
+          fulfillmentOrderId = fulfillmentOrderId,
+          lineItemId = input.id,
+          quantity = input.quantity,
+        )
+      }
+    },
+    trackingNumber = shipment.trackingNumber,
+    carrier = shipment.carrier,
+    trackingUrl = shipment.trackingUrl,
+    notifyCustomer = false,
+  )
+}

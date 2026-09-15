@@ -2,14 +2,11 @@ package dropnext.dss.domain.fulfillment
 
 import dropnext.dss.contract.Shipment
 import dropnext.dss.contract.ShipmentLineItem
-import dropnext.graphql.generated.getorderfordss.FulfillmentOrder
-import dropnext.graphql.generated.getorderfordss.FulfillmentOrderLineItem
 import dropnext.graphql.generated.getorderfordss.Order
 import dropnext.graphql.generated.inputs.FulfillmentOrderLineItemInput
 
 enum class SkipReason {
   NO_OPEN_FO,
-  VARIANT_NOT_FOUND,
   ZERO_REMAINING,
 }
 
@@ -22,8 +19,9 @@ data class SkippedShipmentLine(
 
 /** Result of matching a monolith [Shipment] to open Shopify fulfillment order line items. */
 sealed interface ShipmentMatchResult {
+  /** [groups] is keyed by the fulfillment order's gid, in the order the fulfillment orders were first matched. */
   data class Ok(
-    val groups: Map<FulfillmentOrder, List<FulfillmentOrderLineItemInput>>,
+    val groups: Map<String, List<FulfillmentOrderLineItemInput>>,
     val skipped: List<SkippedShipmentLine>,
   ) : ShipmentMatchResult
 
@@ -31,10 +29,7 @@ sealed interface ShipmentMatchResult {
 }
 
 sealed interface DryRunResult {
-  data class Ok(
-    val perShipment: List<ShipmentMatchResult.Ok>,
-    val totalSkipped: Int,
-  ) : DryRunResult
+  data class Ok(val perShipment: List<ShipmentMatchResult.Ok>) : DryRunResult
 
   data class UserError(val messages: List<String>) : DryRunResult
 }
@@ -51,43 +46,37 @@ fun normalizeShipmentLineItems(shipment: Shipment): List<ShipmentLineItem> =
     }
 
 /**
- * Matches all shipments against a single in-memory quantity ledger.
- * Catches cross-shipment over-allocation before any Shopify mutations.
+ * Matches all shipments against one plan: each shipment is matched against what the earlier ones already
+ * claimed, so cross-shipment over-allocation is caught before any Shopify mutation.
  */
 fun dryRunAllShipments(currentShopifyOrder: Order, shipments: List<Shipment>): DryRunResult {
-  val ledger = FulfillmentQuantityLedger(currentShopifyOrder)
+  val lines = openFulfillmentLines(currentShopifyOrder)
   val perShipment = mutableListOf<ShipmentMatchResult.Ok>()
-  var totalSkipped = 0
 
   shipments.forEach { shipment ->
-    when (val result = matchShipmentToFulfillmentOrders(currentShopifyOrder, shipment, ledger)) {
-      is ShipmentMatchResult.Ok -> {
-        perShipment.add(result)
-        totalSkipped += result.skipped.size
-      }
-
+    val planned = perShipment.flatMap { it.groups.values.flatten() }
+    when (val result = matchShipmentToFulfillmentOrders(shipment, lines, planned)) {
+      is ShipmentMatchResult.Ok -> perShipment += result
       is ShipmentMatchResult.UserError -> return DryRunResult.UserError(result.messages)
     }
   }
-  return DryRunResult.Ok(perShipment, totalSkipped)
+  return DryRunResult.Ok(perShipment)
 }
 
 /**
- * Maps shipment line items to open fulfillment orders.
- * Unmatched variants are skipped (partial match).
+ * Maps shipment line items to open fulfillment orders. Unmatched variants are skipped (partial match).
  *
- * Returns [ShipmentMatchResult.UserError] when requested quantity exceeds available remaining.
- * Matching always uses live remaining quantity.
+ * Returns [ShipmentMatchResult.UserError] when the requested quantity exceeds what is available once
+ * [alreadyPlanned] is honored.
  */
 fun matchShipmentToFulfillmentOrders(
-  order: Order,
   shipment: Shipment,
-  ledger: FulfillmentQuantityLedger? = null,
+  lines: Map<Long, List<OpenFulfillmentLine>>,
+  alreadyPlanned: List<FulfillmentOrderLineItemInput>,
 ): ShipmentMatchResult {
-  val quantityLedger = ledger ?: FulfillmentQuantityLedger(order)
-  val fulfillmentOrderGroups =
-    mutableMapOf<FulfillmentOrder, MutableList<FulfillmentOrderLineItemInput>>()
+  val groups = LinkedHashMap<String, MutableList<FulfillmentOrderLineItemInput>>()
   val skipped = mutableListOf<SkippedShipmentLine>()
+  var planned = alreadyPlanned
 
   normalizeShipmentLineItems(shipment).forEach { shipmentLineItem ->
     if (shipmentLineItem.quantity <= 0) {
@@ -96,21 +85,19 @@ fun matchShipmentToFulfillmentOrders(
       )
     }
 
-    when (val lineResult = matchShipmentLineItem(order, shipmentLineItem, quantityLedger)) {
+    val candidates = lines[shipmentLineItem.productVariantId].orEmpty()
+    when (val lineResult = matchShipmentLineItem(shipmentLineItem, candidates, planned)) {
       is LineMatchResult.Matched -> {
-        fulfillmentOrderGroups
-          .getOrPut(lineResult.fulfillmentOrder) { mutableListOf() }
-          .add(lineResult.input)
+        groups.getOrPut(lineResult.fulfillmentOrderId) { mutableListOf() } += lineResult.input
+        planned = planned + lineResult.input
       }
 
       is LineMatchResult.Skip ->
-        skipped.add(
-          SkippedShipmentLine(
-            productVariantId = shipmentLineItem.productVariantId,
-            quantity = shipmentLineItem.quantity,
-            reason = lineResult.reason,
-            trackingNumber = shipment.trackingNumber,
-          ),
+        skipped += SkippedShipmentLine(
+          productVariantId = shipmentLineItem.productVariantId,
+          quantity = shipmentLineItem.quantity,
+          reason = lineResult.reason,
+          trackingNumber = shipment.trackingNumber,
         )
 
       is LineMatchResult.UserError ->
@@ -118,12 +105,12 @@ fun matchShipmentToFulfillmentOrders(
     }
   }
 
-  return ShipmentMatchResult.Ok(fulfillmentOrderGroups, skipped)
+  return ShipmentMatchResult.Ok(groups, skipped)
 }
 
 private sealed interface LineMatchResult {
   data class Matched(
-    val fulfillmentOrder: FulfillmentOrder,
+    val fulfillmentOrderId: String,
     val input: FulfillmentOrderLineItemInput,
   ) : LineMatchResult
 
@@ -132,140 +119,38 @@ private sealed interface LineMatchResult {
   data class UserError(val messages: List<String>) : LineMatchResult
 }
 
-private data class FulfillmentOrderLineCandidate(
-  val fulfillmentOrder: FulfillmentOrder,
-  val lineItem: FulfillmentOrderLineItem,
-  val availableQuantity: Int,
-)
-
+/**
+ * Files the line under the candidate with the most available quantity, first in Graphql order on a tie.
+ * A line is never split over two candidates, so two half-empty lines cannot together serve it.
+ */
 private fun matchShipmentLineItem(
-  order: Order,
   shipmentLineItem: ShipmentLineItem,
-  ledger: FulfillmentQuantityLedger,
+  candidates: List<OpenFulfillmentLine>,
+  planned: List<FulfillmentOrderLineItemInput>,
 ): LineMatchResult {
-  val openLines = findOpenFulfillmentOrderLinesForVariant(order, shipmentLineItem.productVariantId)
-  if (openLines.isEmpty()) {
-    return LineMatchResult.Skip(determineSkipReason(order, shipmentLineItem.productVariantId))
-  }
+  if (candidates.isEmpty()) return LineMatchResult.Skip(SkipReason.NO_OPEN_FO)
 
-  // Matching always uses live remaining quantity.
-  if (openLines.all { it.remainingQuantity <= 0 }) {
-    return LineMatchResult.Skip(SkipReason.ZERO_REMAINING)
-  }
+  // The skip reads Shopify's snapshot and the errors below read the plan: a line Shopify already fulfilled is
+  // a skip, a unit an earlier shipment of this same payload claimed is a payload problem to refuse.
+  if (candidates.all { it.line.remainingQuantity <= 0 }) return LineMatchResult.Skip(SkipReason.ZERO_REMAINING)
 
-  val candidate =
-    findBestFulfillmentOrderLineCandidate(order, shipmentLineItem.productVariantId, ledger)
-      ?: return LineMatchResult.UserError(
-        listOf(
-          "variant ${shipmentLineItem.productVariantId} requested quantity ${shipmentLineItem.quantity} exceeds " +
-            "remaining 0 on fulfillment order",
-        )
-      )
+  // maxByOrNull answers the first of equals, which keeps the Graphql-order tie-break.
+  val (best, available) = candidates
+    .map { it to it.availableGiven(planned) }
+    .filter { (_, available) -> available > 0 }
+    .maxByOrNull { (_, available) -> available }
+    ?: return LineMatchResult.UserError(listOf(exceedsRemaining(shipmentLineItem, remaining = 0)))
 
-  if (shipmentLineItem.quantity > candidate.availableQuantity) {
-    return LineMatchResult.UserError(
-      listOf(
-        "variant ${shipmentLineItem.productVariantId} requested quantity ${shipmentLineItem.quantity} exceeds " +
-          "remaining ${candidate.availableQuantity} on fulfillment order",
-      )
-    )
-  }
-
-  if (!ledger.tryConsume(candidate.lineItem.id, shipmentLineItem.quantity)) {
-    return LineMatchResult.UserError(
-      listOf(
-        "variant ${shipmentLineItem.productVariantId} requested quantity ${shipmentLineItem.quantity} exceeds " +
-          "remaining ${ledger.available(candidate.lineItem.id)} on fulfillment order",
-      ),
-    )
+  if (shipmentLineItem.quantity > available) {
+    return LineMatchResult.UserError(listOf(exceedsRemaining(shipmentLineItem, available)))
   }
 
   return LineMatchResult.Matched(
-    fulfillmentOrder = candidate.fulfillmentOrder,
-    input = FulfillmentOrderLineItemInput(
-      id = candidate.lineItem.id,
-      quantity = shipmentLineItem.quantity
-    ),
+    fulfillmentOrderId = best.fulfillmentOrderId,
+    input = FulfillmentOrderLineItemInput(id = best.line.id, quantity = shipmentLineItem.quantity),
   )
 }
 
-private fun findOpenFulfillmentOrderLinesForVariant(
-  order: Order,
-  variantId: Long,
-): List<FulfillmentOrderLineItem> {
-  val lines = mutableListOf<FulfillmentOrderLineItem>()
-  order.fulfillmentOrders.edges.forEach { fulfillmentOrderEdge ->
-    val fulfillmentOrder = fulfillmentOrderEdge.node
-    if (!fulfillmentOrder.status.isOpenForFulfillment()) return@forEach
-    fulfillmentOrder.lineItems.edges.forEach { lineEdge ->
-      val node = lineEdge.node
-      if (node.variant?.legacyResourceId?.toLongOrNull() == variantId) {
-        lines.add(node)
-      }
-    }
-  }
-  return lines
-}
-
-/**
- * Prefers the open fulfillment-order line with the highest available quantity when the same
- * variant appears in multiple open fulfillment orders. Tie-break: first candidate in Graphql
- * order (strictly greater wins). Availability comes from live remaining quantity.
- */
-private fun findBestFulfillmentOrderLineCandidate(
-  order: Order,
-  variantId: Long,
-  ledger: FulfillmentQuantityLedger,
-): FulfillmentOrderLineCandidate? {
-  var best: FulfillmentOrderLineCandidate? = null
-
-  for (fulfillmentOrderEdge in order.fulfillmentOrders.edges) {
-    val fulfillmentOrder = fulfillmentOrderEdge.node
-    if (!fulfillmentOrder.status.isOpenForFulfillment()) continue
-    for (lineEdge in fulfillmentOrder.lineItems.edges) {
-      val node = lineEdge.node
-      val nodeVariantId = node.variant?.legacyResourceId?.toLongOrNull() ?: continue
-      if (nodeVariantId != variantId) continue
-
-      val available = ledger.available(node.id)
-      if (available <= 0) continue
-
-      val candidate = FulfillmentOrderLineCandidate(fulfillmentOrder, node, available)
-      if (best == null || candidate.availableQuantity > best.availableQuantity) {
-        best = candidate
-      }
-    }
-  }
-
-  return best
-}
-
-private fun determineSkipReason(
-  order: Order,
-  variantId: Long,
-): SkipReason {
-  var seenOnOpenFulfillmentOrder = false
-  var allZeroCapacity = true
-
-  order.fulfillmentOrders.edges.forEach { fulfillmentOrderEdge ->
-    val fulfillmentOrder = fulfillmentOrderEdge.node
-    if (!fulfillmentOrder.status.isOpenForFulfillment()) return@forEach
-    for (lineEdge in fulfillmentOrder.lineItems.edges) {
-      val node = lineEdge.node
-      // A line whose variant id cannot be read says nothing about *this* variant: counting it as
-      // "seen" reported ZERO_REMAINING for a variant that is on no open fulfillment order at all.
-      val nodeVariantId = node.variant?.legacyResourceId?.toLongOrNull() ?: continue
-      if (nodeVariantId != variantId) continue
-
-      seenOnOpenFulfillmentOrder = true
-      if (node.remainingQuantity > 0) {
-        allZeroCapacity = false
-      }
-    }
-  }
-
-  return when {
-    seenOnOpenFulfillmentOrder && allZeroCapacity -> SkipReason.ZERO_REMAINING
-    else -> SkipReason.NO_OPEN_FO
-  }
-}
+private fun exceedsRemaining(shipmentLineItem: ShipmentLineItem, remaining: Int): String =
+  "variant ${shipmentLineItem.productVariantId} requested quantity ${shipmentLineItem.quantity} exceeds " +
+    "remaining $remaining on fulfillment order"

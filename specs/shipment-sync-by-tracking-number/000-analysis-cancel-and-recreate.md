@@ -13,12 +13,12 @@ The sync reconciles by tracking number: a shipment is a fulfillment with that tr
 name fulfillments by it. Option B below is the target, reached through option A, in four steps that each
 leave the system consistent:
 
-| Spec | What it lands | Contract change |
-|------|---------------|-----------------|
+| Spec                                      | What it lands                                                                                                                                                                                           | Contract change |
+|-------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------|
 | `010-skip-shipments-already-fulfilled.md` | A shipment whose tracking number is already on a live fulfillment is skipped, never created twice. Builds on `specs/matcher-cleanup/010-one-walk-per-variant.md`, which makes the plan carry the skips. | None (DSS only). |
-| `020-cancel-replaced-fulfillments.md` | The monolith names the tracking numbers it replaced; the DSS checks that the new shipments fit, cancels exactly those fulfillments, reloads the order, then creates. | `replaced_tracking_numbers` on the request. |
-| `030-report-per-shipment-outcomes.md` | The response says, per tracking number, what happened, on success and on failure. | Response shape. |
-| `040-rewrite-the-fulfillment-docs.md` | The verification doc, `CLAUDE.md` and the monolith's comments describe this design. | None. |
+| `020-cancel-replaced-fulfillments.md`     | The monolith names the tracking numbers it replaced; the DSS checks that the new shipments fit, cancels exactly those fulfillments, reloads the order, then creates.                                    | `replaced_tracking_numbers` on the request. |
+| `030-report-per-shipment-outcomes.md`     | The response says, per tracking number, what happened, on success and on failure.                                                                                                                       | Response shape. |
+| `040-rewrite-the-fulfillment-docs.md`     | The verification doc, `CLAUDE.md` and the monolith's comments describe this design.                                                                                                                     | None. |
 
 The cancel plumbing (`ShopifyMutation.FulfillmentCancel`, `cancelFulfillment`, `FulfillmentCancelMutation.graphql`)
 stays: 020 is its producer. The separate spec that proposed removing it (`specs/remove-fulfillment-cancel/`)
@@ -91,8 +91,8 @@ cancelling only those.
 
 ## Timeline
 
-| When | What | Where |
-|------|------|-------|
+| When       | What | Where |
+|------------|------|-------|
 | 2026-07-03 | Spec approved: cancel every fulfillment, recreate from the payload, match against `totalQuantity` (the capacity after the cancels). It assumes the monolith always sends the full set of shipments. | `specs/fulfillment-shipment-fo-mapping.md`, deleted on 2026-09-11; its glossary and boundary diagram now live in `docs/FULFILLMENT_VERIFICATION.md`. |
 | 2026-08-31 | Cancel planning removed from `calculateShopifyMutations`; the ledger switched to live `remainingQuantity`. Tests added for a second item shipped later and for partial failure recovery. Commit message: "Remove unnecessary fulfillment cancellation logic". | commit `d2f24d7` |
 | 2026-09-10 | The cancel plumbing is still there and tested, but nothing plans a cancel. | `workflow/effectShopifyMutations.kt`, `src/resources/FulfillmentCancelMutation.graphql` |

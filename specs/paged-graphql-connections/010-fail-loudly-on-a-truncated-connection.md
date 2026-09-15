@@ -15,15 +15,15 @@ Repos: DSS only.
 Every Graphql connection the service reads is fetched with a fixed `first` and no `pageInfo`, so nothing can
 tell a complete list from the first page of a longer one:
 
-| Operation | Connection | `first` | What silently happens past the limit |
-|---|---|---|---|
-| `GetProductById` | `product.variants` | 100 | The `products/create` and `products/update` webhooks upsert the first 100 variants; the rest never reach the monolith. Shopify allows 2048 variants per product. |
-| `GetProductById` | `product.media` | 20 | Images beyond the twentieth are not sent. Cosmetic. |
-| `GetOrderForDss` | `order.lineItems` | 100 | The `orders/create` webhook creates the order with its first 100 lines. |
-| `GetOrderForDss` | `order.fulfillmentOrders` | 50 | The matcher reports "no open fulfillment order" for lines that live on a fulfillment order it never saw, and `/sync-shipments-with-fulfillments` skips them as unmatched. |
-| `GetOrderForDss` | `fulfillmentOrders.lineItems` | 100 | Same, per fulfillment order. |
-| `GetOrderForDss` | `order.fulfillments` | 50 | Not a connection (`fulfillments(first:)` answers a plain list), so it has no `pageInfo`; a tracking number on the fifty-first fulfillment is not found, and `/tracking-update` answers `404`. |
-| `GetWebhookSubscriptions` | `webhookSubscriptions` | 100 | Filtered to our topics and our callback URI, so a handful at most. No change. |
+| Operation                 | Connection                    | `first`   | What silently happens past the limit                                                                                                                                                          |
+|---------------------------|-------------------------------|-----------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `GetProductById`          | `product.variants`            | 100       | The `products/create` and `products/update` webhooks upsert the first 100 variants; the rest never reach the monolith. Shopify allows 2048 variants per product.                              |
+| `GetProductById`          | `product.media`               | 20        | Images beyond the twentieth are not sent. Cosmetic.                                                                                                                                           |
+| `GetOrderForDss`          | `order.lineItems`             | 100       | The `orders/create` webhook creates the order with its first 100 lines.                                                                                                                       |
+| `GetOrderForDss`          | `order.fulfillmentOrders`     | 50        | The matcher reports "no open fulfillment order" for lines that live on a fulfillment order it never saw, and `/sync-shipments-with-fulfillments` skips them as unmatched.                     |
+| `GetOrderForDss`          | `fulfillmentOrders.lineItems` | 100       | Same, per fulfillment order.                                                                                                                                                                  |
+| `GetOrderForDss`          | `order.fulfillments`          | 50        | Not a connection (`fulfillments(first:)` answers a plain list), so it has no `pageInfo`; a tracking number on the fifty-first fulfillment is not found, and `/tracking-update` answers `404`. |
+| `GetWebhookSubscriptions` | `webhookSubscriptions`        | 100       | Filtered to our topics and our callback URI, so a handful at most. No change.                                                                                                                 |
 
 `GetOrderForDss` has three readers, and all three inherit its limits: the `orders/create` webhook
 (`syncShopifyOrderToMonolith`), `/sync-shipments-with-fulfillments` (`determineShopifyMutations`) and

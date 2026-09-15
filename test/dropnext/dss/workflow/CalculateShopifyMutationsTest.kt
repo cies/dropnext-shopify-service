@@ -2,6 +2,7 @@ package dropnext.dss.workflow
 
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
+import dropnext.dss.domain.fulfillment.SkipReason
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.testutil.fixture.minimalOrder
 import dropnext.dss.testutil.fixture.orderWithFoQuantities
@@ -18,7 +19,7 @@ class CalculateShopifyMutationsTest {
   fun `plans a create when the order has no existing fulfillments`() {
     val result = calculateShopifyMutations(minimalOrder(), listOf(shipment()))
     assert(result is Success)
-    val mutations = (result as Success).value
+    val mutations = (result as Success).value.mutations
     assert(mutations.size == 1)
     val create = mutations.single() as ShopifyMutation.FulfillmentCreate
     assert(create.trackingNumber == "1Z999")
@@ -33,7 +34,7 @@ class CalculateShopifyMutationsTest {
   fun `does not plan cancels when fulfillments already exist`() {
     val order = orderWithFulfillment(8000L)
     val result = calculateShopifyMutations(order, listOf(shipment()))
-    val mutations = (result as Success).value
+    val mutations = (result as Success).value.mutations
     assert(mutations.none { it is ShopifyMutation.FulfillmentCancel })
     assert(mutations.single() is ShopifyMutation.FulfillmentCreate)
   }
@@ -50,7 +51,7 @@ class CalculateShopifyMutationsTest {
   fun `unmatched shipment is omitted from the mutation list`() {
     val result = calculateShopifyMutations(minimalOrder(), listOf(shipment(variantId = 999L)))
     assert(result is Success)
-    assert((result as Success).value.isEmpty())
+    assert((result as Success).value.mutations.isEmpty())
   }
 
   @Test
@@ -103,7 +104,7 @@ class CalculateShopifyMutationsTest {
       ),
     )
     val result = calculateShopifyMutations(order, listOf(shipment(variantId = 202L, tracking = "TRK-O2")))
-    val mutations = (result as Success).value
+    val mutations = (result as Success).value.mutations
     assert(mutations.none { it is ShopifyMutation.FulfillmentCancel })
     val create = mutations.single() as ShopifyMutation.FulfillmentCreate
     assert(create.trackingNumber == "TRK-O2")
@@ -114,7 +115,7 @@ class CalculateShopifyMutationsTest {
   fun `same variant remaining quantity plans a create without cancel`() {
     val order = orderWithFoQuantities(remaining = 2, total = 2)
     val result = calculateShopifyMutations(order, listOf(shipment(quantity = 1)))
-    val mutations = (result as Success).value
+    val mutations = (result as Success).value.mutations
     assert(mutations.none { it is ShopifyMutation.FulfillmentCancel })
     val create = mutations.single() as ShopifyMutation.FulfillmentCreate
     assert(create.lineItems.single().quantity == 1)
@@ -133,7 +134,7 @@ class CalculateShopifyMutationsTest {
     )
     val result = calculateShopifyMutations(order, listOf(shipment(quantity = 1)))
     assert(result is Success)
-    assert((result as Success).value.isEmpty())
+    assert((result as Success).value.mutations.isEmpty())
   }
 
   @Test
@@ -159,10 +160,38 @@ class CalculateShopifyMutationsTest {
       shipment(variantId = 202L, tracking = "TRK-O"),
     )
     val result = calculateShopifyMutations(order, shipments)
-    val mutations = (result as Success).value
+    val mutations = (result as Success).value.mutations
     assert(mutations.none { it is ShopifyMutation.FulfillmentCancel })
     val create = mutations.single() as ShopifyMutation.FulfillmentCreate
     assert(create.trackingNumber == "TRK-O")
+  }
+
+  @Test
+  fun `the plan carries the skipped lines and the shipments that matched nothing`() {
+    val order = orderWithTwoVariantFulfillmentOrders(
+      firstVariantId = 101L,
+      firstRemaining = 0,
+      firstTotal = 1,
+      secondVariantId = 202L,
+      secondRemaining = 1,
+      secondTotal = 1,
+    )
+    val shipments = listOf(
+      shipment(variantId = 101L, tracking = "TRK-H"),
+      shipment(variantId = 999L, tracking = "TRK-U"),
+      shipment(variantId = 202L, tracking = "TRK-O"),
+    )
+    val plan = (calculateShopifyMutations(order, shipments) as Success).value
+    assert(plan.mutations.size == 1)
+    assert(plan.skippedLines.map { it.trackingNumber to it.reason } == listOf("TRK-H" to SkipReason.ZERO_REMAINING, "TRK-U" to SkipReason.NO_OPEN_FO))
+    assert(plan.unmatchedShipments.map { it.trackingNumber } == listOf("TRK-H", "TRK-U"))
+  }
+
+  @Test
+  fun `a fully matched payload plans no skips`() {
+    val plan = (calculateShopifyMutations(minimalOrder(), listOf(shipment())) as Success).value
+    assert(plan.skippedLines.isEmpty())
+    assert(plan.unmatchedShipments.isEmpty())
   }
 
 }

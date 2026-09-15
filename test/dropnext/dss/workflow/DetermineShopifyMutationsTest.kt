@@ -6,10 +6,14 @@ import dropnext.dss.domain.ShopifyOrderId
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
 import dropnext.dss.testutil.fixture.minimalOrder
+import dropnext.dss.testutil.fixture.orderWithTwoVariantFulfillmentOrders
 import dropnext.dss.testutil.fixture.shipment
+import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
+import dropnext.dss.testutil.helper.capturingLogs
 import dropnext.graphql.generated.getorderfordss.Fulfillment
 import kotlin.test.Test
 import kotlinx.coroutines.runBlocking
+import org.junit.jupiter.api.parallel.ResourceLock
 
 
 class DetermineShopifyMutationsTest {
@@ -74,11 +78,53 @@ class DetermineShopifyMutationsTest {
       ),
     )
     val result = determineShopifyMutations(fake, ShopifyOrderId(1001L), shipments = listOf(shipment()))
-    val mutations = (result as Success).value
+    val mutations = (result as Success).value.mutations
     assert(mutations.none { it is ShopifyMutation.FulfillmentCancel })
     assert(mutations.single() is ShopifyMutation.FulfillmentCreate)
     assert(fake.cancelFulfillmentCalls.isEmpty())
     assert(fake.createFulfillmentCalls.isEmpty())
+  }
+
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `logs every skipped line and every unmatched shipment from the plan`() {
+    val fake = FakeShopifyGraphqlService()
+    fake.orderForDssResult = Success(
+      orderWithTwoVariantFulfillmentOrders(
+        firstVariantId = 101L,
+        firstRemaining = 0,
+        firstTotal = 1,
+        secondVariantId = 202L,
+        secondRemaining = 1,
+        secondTotal = 1,
+      ),
+    )
+    val shipments = listOf(
+      shipment(variantId = 101L, tracking = "TRK-H"),
+      shipment(variantId = 999L, tracking = "TRK-U", quantity = 2),
+      shipment(variantId = 202L, tracking = "TRK-O"),
+    )
+    val lines = capturingLogs {
+      runBlocking { determineShopifyMutations(fake, ShopifyOrderId(1001L), shipments) }
+    }
+    val skipLines = lines.filter { "sync-shipments skipped " in it }
+    assert(skipLines.size == 4)
+    assert(skipLines[0].startsWith("WARN sync-shipments skipped line orderId=1001 tracking=TRK-H variant=101 reason=zero_remaining qty=1"))
+    assert(skipLines[1].startsWith("WARN sync-shipments skipped shipment orderId=1001 tracking=TRK-H reason=all_lines_unmatched"))
+    assert(skipLines[2].startsWith("WARN sync-shipments skipped line orderId=1001 tracking=TRK-U variant=999 reason=no_open_fo qty=2"))
+    assert(skipLines[3].startsWith("WARN sync-shipments skipped shipment orderId=1001 tracking=TRK-U reason=all_lines_unmatched"))
+    assert(fake.orderForDssCalls.size == 1)
+  }
+
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `a refused plan logs no skips`() {
+    val fake = FakeShopifyGraphqlService()
+    fake.orderForDssResult = Success(minimalOrder())
+    val lines = capturingLogs {
+      runBlocking { determineShopifyMutations(fake, ShopifyOrderId(1001L), listOf(shipment(quantity = 99))) }
+    }
+    assert(lines.none { "sync-shipments skipped " in it })
   }
 
 }

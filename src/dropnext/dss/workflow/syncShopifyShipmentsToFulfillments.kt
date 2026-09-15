@@ -28,7 +28,7 @@ suspend fun syncShopifyShipmentsToFulfillments(
   val shopifyOrderId = ShopifyOrderId(payload.shopifyOrderId)
   val mutations = when (val determined = determineShopifyMutations(shopifyGqlService, shopifyOrderId, payload.shipments)) {
     is Failure -> return determined
-    is Success -> determined.value
+    is Success -> determined.value.mutations
   }
   val effected = effectShopifyMutations(shopifyGqlService, mutations)
   if (effected is Success) {

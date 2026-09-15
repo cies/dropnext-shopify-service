@@ -102,7 +102,7 @@ credentials, so the human developer starts it — see "Operational boundary".
 │   ├── config/                  # `Config.from(env)` (one flat data class holding every env var, secrets wrapped) and the `.env` reader
 │   └── warmup/                  # The warm-up before taking traffic: the workflow, its report, the `Readiness` flag `/health` reads, `WarmUp` + `startWarmUp` (the Ktor trigger), and the loopback client it sends itself requests with
 ├── domain/                      # The vocabulary every layer shares, depending on nothing of ours: `ShopDomain`, the ids and secrets (value classes), the reports the install page renders
-│   └── fulfillment/             # Pure logic over an order snapshot: the fulfillment-order matcher and quantity ledger, request validation
+│   └── fulfillment/             # Pure logic over an order snapshot: the open-line index and the fulfillment-order matcher, request validation
 ├── handler/                     # Ktor handlers, one `*Handlers` class per route family: receive the (already decoded and validated) request, resolve the shop, call a workflow, map its answer (`toDssError`) onto the response
 ├── routing/                     # One `Route.*Routes(handlers)` per handler family; nothing but path ↔ handler bindings
 ├── path/                        # `Paths`: every inbound path constant (routes, log lines and the webhook callback URL all read it)
@@ -550,6 +550,7 @@ Since code contains a lot of natural language text (mostly in comments, but also
 * Full sentences: starting with a capital letter and ending with a dot (".")
 * No capitalization of every major word in headings and titles (so "Code style" is preferred over "Code Style")
 * Add particles (the, a, an, etc.) in sentences where they are supposed to be (IntelliJ's spell checker annoys me otherwise)
+* American spelling everywhere English is used: identifiers, comments, docs, log messages and UI text (so "color", "initialize", "canceled" and "behavior" are preferred over "colour", "initialise", "cancelled" and "behaviour")
 
 
 # Commenting
