@@ -15,6 +15,7 @@ import dropnext.dss.domain.ShopifyFulfillmentId
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.domain.WebhookSubscriptionStatus
 import dropnext.dss.lib.shopify.legacyIdFromGid
+import dropnext.graphql.generated.CurrentAppInstallationAccessScopes
 import dropnext.graphql.generated.DeleteWebhookSubscription
 import dropnext.graphql.generated.FulfillmentCancelMutation
 import dropnext.graphql.generated.FulfillmentCreateWithLineItems
@@ -74,6 +75,9 @@ class HttpShopifyGraphqlService(
       data.productsCount?.let { Success(ProductCount(count = it.count, isExact = it.precision == CountPrecision.EXACT)) }
         ?: Failure(ShopifyError.GraphqlError("products count missing in response"))
     }
+
+  override suspend fun accessScopeHandles(): ShopifyResult<List<String>> =
+    execute(CurrentAppInstallationAccessScopes()).map { data -> data.currentAppInstallation.accessScopes.map { it.handle } }
 
   override suspend fun productById(productGid: String): ShopifyResult<ShopProduct?> =
     execute(GetProductById(GetProductById.Variables(productGid))).map { data ->

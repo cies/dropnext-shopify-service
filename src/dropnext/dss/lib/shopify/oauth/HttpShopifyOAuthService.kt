@@ -3,6 +3,7 @@ package dropnext.dss.lib.shopify.oauth
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
 import dropnext.dss.domain.ShopDomain
+import dropnext.dss.domain.ShopifyAccessScope
 import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.domain.ShopifyAppSecret
 import dropnext.dss.lib.crypto.constantTimeEquals
@@ -31,20 +32,6 @@ import kotlinx.serialization.Serializable
 private const val OAUTH_STATE_TTL_SECONDS = 300L
 
 /**
- * What the installation asks the merchant to grant.
- * Since changing this takes a deployment, we hardcode it instead of making it a setting.
- *
- * **NOTE**: Mirror it in the Shopify Partner Dashboard configuration page for this (test) "App".
- */
-private val SHOPIFY_ACCESS_SCOPES: List<String> = listOf(
-  "read_products",
-  "read_orders",
-  "write_webhooks",
-  "write_merchant_managed_fulfillment_orders",
-  "read_merchant_managed_fulfillment_orders",
-)
-
-/**
  * The [ShopifyOAuthService] that talks to Shopify. The `state` is an HMAC over `shop|expiry|nonce` with the
  * app secret, so it needs no storage: a callback is trusted when its state verifies and has not expired.
  *
@@ -65,7 +52,7 @@ class HttpShopifyOAuthService(
       append(shop.normalizedShopifyHost)
       append(OutBoundShopifyOAuthPaths.adminOAuthAuthorize)
       append("?client_id=").append(enc(clientId))
-      append("&scope=").append(enc(SHOPIFY_ACCESS_SCOPES.joinToString(",")))
+      append("&scope=").append(enc(ShopifyAccessScope.entries.joinToString(",") { it.handle }))
       append("&redirect_uri=").append(enc(redirectUrl))
       append("&state=").append(enc(state))
     }
@@ -107,7 +94,7 @@ class HttpShopifyOAuthService(
    * "Shopify did not answer" would send the merchant back to Shopify for an install that fails the same way
    * again; it propagates to `StatusPages` and its `500` instead.
    */
-  override suspend fun exchangeCode(shop: ShopDomain, code: String): OAuthResult<ShopifyAdminToken> {
+  override suspend fun exchangeCode(shop: ShopDomain, code: String): OAuthResult<ShopifyAccessGrant> {
     val url = "https://${shop.normalizedShopifyHost}${OutBoundShopifyOAuthPaths.adminOAuthAccessToken}"
     return try {
       val response = httpClient.post(url) {
@@ -126,13 +113,16 @@ class HttpShopifyOAuthService(
   }
 
   /**
-   * The token out of a `2xx`. A body that does not decode is answered without the decoder's complaint: that quotes the
-   * body it could not read, and this body carries the access token, which must never reach a log line.
+   * The token and the granted scopes out of a `2xx`. A body that does not decode is answered without the decoder's
+   * complaint: that quotes the body it could not read, and this body carries the access token, which must never reach
+   * a log line.
    */
-  private suspend fun tokenFrom(response: HttpResponse): OAuthResult<ShopifyAdminToken> {
+  private suspend fun tokenFrom(response: HttpResponse): OAuthResult<ShopifyAccessGrant> {
     val body = response.bodyAsText()
     return try {
-      Success(ShopifyAdminToken(AppJson.decodeFromString(OAuthAccessTokenResponse.serializer(), body).accessToken))
+      val decoded = AppJson.decodeFromString(OAuthAccessTokenResponse.serializer(), body)
+      val scopeHandles = decoded.scope.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+      Success(ShopifyAccessGrant(ShopifyAdminToken(decoded.accessToken), scopeHandles))
     } catch (_: SerializationException) {
       Failure(OAuthError.Transport("Shopify's token response was not the expected JSON"))
     }

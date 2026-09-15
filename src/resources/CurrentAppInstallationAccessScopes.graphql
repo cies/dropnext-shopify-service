@@ -1,0 +1,9 @@
+# What the shop granted this app. The check holds it against the scopes the install asks for, for a shop whose token
+# exchange answer is long gone.
+query CurrentAppInstallationAccessScopes {
+  currentAppInstallation {
+    accessScopes {
+      handle
+    }
+  }
+}

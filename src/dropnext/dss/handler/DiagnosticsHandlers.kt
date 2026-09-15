@@ -8,6 +8,7 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 
@@ -28,7 +29,7 @@ class DiagnosticsHandlers(
         GET  ${Paths.apiRedirectUrl.padEnd(26)}Full OAuth redirect URL
 
       --- Webhook subscriptions (Authorization: Bearer <MONOLITH_TO_DSS_API_KEY> required) ---
-        GET  ${Paths.apiCheck.padEnd(20)}?shop=  Readiness for a specific shop: token resolvable, webhook subscriptions
+        GET  ${Paths.apiCheck.padEnd(20)}?shop=  Readiness for a specific shop: token resolvable, access scopes, webhook subscriptions
         POST ${Paths.apiWebhooksRegister}?shop=  Register a shop's webhook subscriptions as an install does, deleting those for topics no longer handled
 
       --- Shopify OAuth ---
@@ -84,8 +85,14 @@ private data class HealthResponse(val status: String, val version: String)
 @Serializable
 private data class ApiStatusResponse(
   val status: String,
+
   val version: String,
+
   val bind: String,
+
+  @SerialName("dss_base_url")
   val dssBaseUrl: String,
+
+  @SerialName("oauth_redirect_path")
   val oauthRedirectPath: String,
 )

@@ -6,6 +6,7 @@ import dropnext.dss.contract.UpdateStoreApiKeyRequest
 import dropnext.dss.domain.MonolithPersistOutcome
 import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopInstallReport
+import dropnext.dss.domain.ShopifyAccessScopeReport
 import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.lib.monolith.MonolithError
@@ -19,9 +20,9 @@ import io.github.oshai.kotlinlogging.KotlinLogging
 private val log = KotlinLogging.logger {}
 
 /**
- * Everything that happens after the OAuth code exchange handed us a shop's Admin token: learn the
- * shop's canonical domain and id, remember the token under that domain, persist it to the
- * monolith, count the catalogue as a smoke test, and register the webhook subscriptions.
+ * Everything that happens after the OAuth code exchange handed us a shop's Admin token and its scopes: hold the
+ * scopes against what the service needs, learn the shop's canonical domain and id, remember the token under that
+ * domain, persist it to the monolith, count the catalogue as a smoke test, and register the webhook subscriptions.
  *
  * Nothing here fails the installation: each step that cannot be completed is reported on the
  * confirmation page instead, because the token is already ours and a merchant who sees an error
@@ -32,8 +33,13 @@ suspend fun installShop(
   monolith: MonolithService,
   tokens: ShopTokenStore,
   token: ShopifyAdminToken,
+  grantedScopeHandles: List<String>,
   webhookCallbackUrl: String,
 ): ShopInstallReport {
+  val accessScopes = ShopifyAccessScopeReport.from(grantedScopeHandles)
+  if (!accessScopes.isComplete) {
+    log.warn { "OAuth grant lacks required scopes missing=${accessScopes.missing.joinToString(",") { it.handle }}" }
+  }
   val identity = when (val loaded = shopify.shopIdentity()) {
     is Success -> loaded.value
     is Failure -> {
@@ -62,6 +68,7 @@ suspend fun installShop(
   return ShopInstallReport(
     shop = domain,
     shopId = identity?.shopId,
+    accessScopes = accessScopes,
     monolithPersist = monolithPersist,
     productCount = productCount,
     webhookCallbackUrl = webhookCallbackUrl,

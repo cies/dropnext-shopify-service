@@ -76,6 +76,16 @@ class DiagnosticsHandlersTest {
     assert("https://dss.test" in body)
   }
 
+  @Test
+  fun `the api status summary answers the base url and the redirect path under snake_case keys`() = withDssApp(deps()) { client ->
+    val r = client.get(Paths.api)
+    assert(r.status == HttpStatusCode.OK)
+    val body = r.body<JsonObject>()
+    assert(body["dss_base_url"]!!.jsonPrimitive.content == "https://dss.test")
+    assert(body["oauth_redirect_path"]!!.jsonPrimitive.content == "/oauth/callback")
+    assert("dssBaseUrl" !in body)
+  }
+
   /**
    * The one assertion that has to be about absence: every secret the configuration holds, checked
    * against the body of the endpoint most likely to grow a field that leaks one.

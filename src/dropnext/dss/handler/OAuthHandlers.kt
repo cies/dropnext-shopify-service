@@ -68,7 +68,7 @@ class OAuthHandlers(
         return@withMdcEntries call.respondTextError(DssError.InvalidSignature("Invalid or expired state"))
       }
 
-      val token = when (val exchanged = shopifyOAuthService.exchangeCode(shop, code)) {
+      val grant = when (val exchanged = shopifyOAuthService.exchangeCode(shop, code)) {
         is Success -> exchanged.value
         is Failure -> {
           log.warn { "OAuth code exchange failed: ${exchanged.reason.message}" }
@@ -78,7 +78,7 @@ class OAuthHandlers(
 
       // Remembered under the shop Shopify redirected for; the workflow remembers it again under the
       // canonical domain once it has asked Shopify, so the factory can hand out a service right away.
-      shopTokens.remember(shop, token)
+      shopTokens.remember(shop, grant.token)
       val shopify = (shopifyGraphqlServiceFactory.forShop(shop) as? ShopLookup.Found)?.value
         ?: return@withMdcEntries call.respondTextError(DssError.UpstreamFailure("could not build a Shopify service for $shop"))
 
@@ -86,7 +86,8 @@ class OAuthHandlers(
         shopify = shopify,
         monolith = monolithService,
         tokens = shopTokens,
-        token = token,
+        token = grant.token,
+        grantedScopeHandles = grant.scopeHandles,
         webhookCallbackUrl = "$dssBaseUrl${Paths.webhooksShopify}",
       )
       call.response.header(HttpHeaders.CacheControl, "no-store, no-cache, must-revalidate")

@@ -162,12 +162,16 @@ point the IDE plugin at the committed `src/graphql-schema/schema.graphql`.
 
 * Create or use a Partner app and set **Allowed redirection URL(s)** to exactly `{DSS_BASE_URL}{OAUTH_REDIRECT_PATH}`
 (default path `/oauth/callback`).
-* The scopes the install requests are not a setting but `SHOPIFY_ACCESS_SCOPES` in
-`src/dropnext/dss/lib/shopify/oauth/HttpShopifyOAuthService.kt`: changing them takes a deploy either way. Mirror them in the Partner Dashboard:
-  * `read_products` — catalog sync and product webhooks
-  * `read_orders` — order webhooks and `GetOrderForDss`
-  * `write_webhooks` — `webhookSubscriptionCreate` on install
-  * `write_merchant_managed_fulfillment_orders` and `read_merchant_managed_fulfillment_orders` (per [access scopes](https://shopify.dev/docs/api/usage/access-scopes)) — create fulfillments and tracking from the app
+* The scopes the install requests are code, never a setting: `ShopifyAccessScope` in
+`src/dropnext/dss/domain/ShopifyAccessScope.kt`. Changing them takes a deploy, and an installed shop keeps the scopes it
+granted until it opens the install link again; the install page names any scope the merchant did not grant. Mirror
+them in the Partner Dashboard
+(see [access scopes](https://shopify.dev/docs/api/usage/access-scopes)):
+  * `read_products` — loading a product for the product webhooks, and the product count on the install page
+  * `read_orders` — loading an order for the order webhook, the shipment sync and tracking updates
+  * `write_merchant_managed_fulfillment_orders` — seeing and fulfilling order lines at the merchant's own locations
+  * `write_third_party_fulfillment_orders` — seeing and fulfilling order lines at locations a fulfillment service app manages
+  * `write_fulfillments` — adding tracking events to a fulfillment, and canceling a fulfillment
 
 
 ### Hosted deployment
@@ -198,7 +202,7 @@ Subscriptions all use the same HTTPS callback: `{DSS_BASE_URL}/webhooks/shopify`
 
 On `products/create` and `products/update`, the app parses the webhook body for the resource id and runs `GetProductById`. On `orders/create`, it runs `GetOrderForDss` and POSTs to the monolith. All three are subscribed id-only (`id`, `admin_graphql_api_id`), because the resource is loaded right after; `products/delete` carries only the id anyway.
 
-The install leaves nothing else subscribed at the callback URL: a subscription there for a topic the service does not handle (such as `orders/updated`, which earlier versions registered) is deleted. A shop installed before a change to these topics or their fields gets it through `POST /api/webhooks/register?shop=` (bearer `MONOLITH_TO_DSS_API_KEY`), which runs the same registration without the merchant; `GET /api/check?shop=` shows what would change.
+The install leaves nothing else subscribed at the callback URL: a subscription there for a topic the service does not handle (such as `orders/updated`, which earlier versions registered) is deleted. A shop installed before a change to these topics or their fields gets it through `POST /api/webhooks/register?shop=` (bearer `MONOLITH_TO_DSS_API_KEY`), which runs the same registration without the merchant; `GET /api/check?shop=` shows what would change, and under `access_scopes` which of the scopes the install asks for the shop's grant lacks: a shop installed before that list changed keeps its old grant until it opens the install link again.
 
 **Compliance webhooks:** the app is custom-distributed, not public, so Shopify's mandatory compliance topics (`customers/data_request`, `customers/redact`, `shop/redact`) are not required: they are neither subscribed nor handled, and no customer data is redacted automatically. Shopify's API Terms still require deleting a merchant's data within 30 days of an uninstall or an enforceable deletion request. Going public is a new Shopify app, and these topics come first then.
 

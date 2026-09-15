@@ -4,6 +4,7 @@ import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
 import dropnext.dss.domain.ProductCount
 import dropnext.dss.domain.ShopDomain
+import dropnext.dss.domain.ShopifyAccessScope
 import dropnext.dss.domain.ShopifyFulfillmentEventId
 import dropnext.dss.domain.ShopifyFulfillmentId
 import dropnext.dss.domain.ShopifyShopId
@@ -44,6 +45,9 @@ class FakeShopifyGraphqlService(
 
   var productCountResult: ShopifyResult<ProductCount> = Success(ProductCount(count = 0, isExact = true))
   val productCountCalls: MutableList<ShopDomain> = mutableListOf()
+
+  var accessScopeHandlesResult: ShopifyResult<List<String>> = Success(ShopifyAccessScope.entries.map { it.handle })
+  val accessScopeHandlesCalls: MutableList<ShopDomain> = mutableListOf()
 
   var productByIdResult: ShopifyResult<ShopProduct?> = Success(null)
   val productByIdCalls: MutableList<String> = mutableListOf()
@@ -95,6 +99,11 @@ class FakeShopifyGraphqlService(
   override suspend fun productCount(): ShopifyResult<ProductCount> {
     productCountCalls.add(shop)
     return productCountResult
+  }
+
+  override suspend fun accessScopeHandles(): ShopifyResult<List<String>> {
+    accessScopeHandlesCalls.add(shop)
+    return accessScopeHandlesResult
   }
 
   override suspend fun productById(productGid: String): ShopifyResult<ShopProduct?> {
@@ -172,6 +181,7 @@ class FakeShopifyGraphqlService(
   override fun clear() {
     shopIdentityCalls.clear()
     productCountCalls.clear()
+    accessScopeHandlesCalls.clear()
     productByIdCalls.clear()
     orderForDssCalls.clear()
     orderForDssResultQueue.clear()

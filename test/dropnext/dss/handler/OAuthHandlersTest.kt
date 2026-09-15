@@ -5,6 +5,7 @@ import dev.forkhandles.result4k.Success
 import dropnext.dss.DssDependencies
 import dropnext.dss.boot.config.Config
 import dropnext.dss.domain.ShopDomain
+import dropnext.dss.domain.ShopifyAccessScope
 import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.dssDependencies
@@ -12,6 +13,7 @@ import dropnext.dss.lib.shopify.graphql.ShopIdentityInfo
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.lib.shopify.oauth.HttpShopifyOAuthService
 import dropnext.dss.lib.shopify.oauth.OAuthError
+import dropnext.dss.lib.shopify.oauth.ShopifyAccessGrant
 import dropnext.dss.lib.shopify.oauth.ShopifyOAuthService
 import dropnext.dss.lib.shopify.token.InMemoryShopTokenStore
 import dropnext.dss.lib.shopify.webhook.ShopifyWebhookTopic
@@ -139,7 +141,10 @@ class OAuthHandlersTest {
       withDssApp(deps(config, oauth, rewritingClient, monolith, tokens, shopify)) { client ->
         val r = client.get(signedCallbackUrl(oauth.signedState(acmeShop)))
         assert(r.status == HttpStatusCode.OK)
-        assert("App installed" in r.bodyAsText())
+        val page = r.bodyAsText()
+        assert("App installed" in page)
+        // Shopify answers the granted scopes with the token; the fake grants what the install asks for.
+        assert("All 5 required access scopes granted." in page)
         assert(tokens.cached(acmeShop) == ShopifyAdminToken("shpat_fake_admin_token"))
         val forwarded = monolith.putStoreApiKeyCalls.single()
         assert(forwarded.shopifySubdomain == "acme")
@@ -172,6 +177,25 @@ class OAuthHandlersTest {
       assert("Saving the token to the monolith failed" in page)
       assert("HTTP status 500" in page)
       // The token is still cached locally: the shop works even while the monolith does not know it.
+      assert(tokens.cached(acmeShop) == ShopifyAdminToken("shpat_fake_admin_token"))
+    }
+  }
+
+  /** A merchant can approve less than the install asked for: the install still completes, and the page says what is missing. */
+  @Test
+  fun `oauth callback names a scope the merchant did not grant on the install page`() {
+    val tokens = InMemoryShopTokenStore()
+    val shopify = FakeShopifyGraphqlService(acmeShop)
+    val oauth = FakeShopifyOAuthService().apply {
+      val granted = ShopifyAccessScope.entries.map { it.handle } - "write_fulfillments"
+      exchangeCodeResult = Success(ShopifyAccessGrant(ShopifyAdminToken("shpat_fake_admin_token"), granted))
+    }
+    withDssApp(deps(oauth = oauth, tokens = tokens, shopify = shopify)) { client ->
+      val r = client.get(signedCallbackUrl(oauth.signedState(acmeShop)))
+      assert(r.status == HttpStatusCode.OK)
+      val page = r.bodyAsText()
+      assert("This shop did not grant every access scope the service needs" in page)
+      assert("<td><code>write_fulfillments</code></td>" in page)
       assert(tokens.cached(acmeShop) == ShopifyAdminToken("shpat_fake_admin_token"))
     }
   }

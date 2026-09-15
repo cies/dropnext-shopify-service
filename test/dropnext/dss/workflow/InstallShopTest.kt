@@ -5,21 +5,27 @@ import dev.forkhandles.result4k.Success
 import dropnext.dss.domain.MonolithPersistOutcome
 import dropnext.dss.domain.ProductCount
 import dropnext.dss.domain.ShopDomain
+import dropnext.dss.domain.ShopifyAccessScope
 import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.domain.WebhookTopicStatus
 import dropnext.dss.lib.shopify.graphql.ShopIdentityInfo
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.lib.shopify.token.InMemoryShopTokenStore
+import dropnext.dss.lib.shopify.webhook.ShopifyWebhookTopic
 import dropnext.dss.testutil.fake.FakeMonolithService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
+import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
+import dropnext.dss.testutil.helper.capturingLogs
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.parallel.ResourceLock
 
 
 private val acmeShop = ShopDomain.parse("acme.myshopify.com")!!
 private val installedToken = ShopifyAdminToken("shpat_installed")
 private const val CALLBACK_URL = "https://dss.test/webhooks/shopify"
+private val everyScope = ShopifyAccessScope.entries.map { it.handle }
 
 
 /**
@@ -39,7 +45,7 @@ class InstallShopTest {
       shopIdentityResult = Success(ShopIdentityInfo(shopId = ShopifyShopId(9988L), domain = acmeShop))
       productCountResult = Success(ProductCount(count = 3, isExact = true))
     }
-    val report = installShop(shopify, FakeMonolithService(), tokens, installedToken, CALLBACK_URL)
+    val report = installShop(shopify, FakeMonolithService(), tokens, installedToken, everyScope, CALLBACK_URL)
 
     assert(report.shop == acmeShop)
     assert(report.shopId == ShopifyShopId(9988L))
@@ -55,7 +61,7 @@ class InstallShopTest {
     val shopify = FakeShopifyGraphqlService(acmeShop).apply {
       shopIdentityResult = Failure(ShopifyError.Network("shop identity unreachable"))
     }
-    val report = installShop(shopify, FakeMonolithService(), tokens, installedToken, CALLBACK_URL)
+    val report = installShop(shopify, FakeMonolithService(), tokens, installedToken, everyScope, CALLBACK_URL)
 
     assert(report.shopId == null)
     assert(report.shop == acmeShop)
@@ -69,7 +75,7 @@ class InstallShopTest {
     val shopify = FakeShopifyGraphqlService(acmeShop).apply {
       shopIdentityResult = Failure(ShopifyError.Network("shop identity unreachable"))
     }
-    installShop(shopify, monolith, InMemoryShopTokenStore(), installedToken, CALLBACK_URL)
+    installShop(shopify, monolith, InMemoryShopTokenStore(), installedToken, everyScope, CALLBACK_URL)
 
     assert(monolith.putStoreApiKeyCalls.single().shopifyShopId == null)
   }
@@ -78,7 +84,7 @@ class InstallShopTest {
   fun `a rejected monolith persist is reported with its status`() = runBlocking {
     val monolith = FakeMonolithService().apply { putStoreApiKeyStatus = 500 }
     val tokens = InMemoryShopTokenStore()
-    val report = installShop(FakeShopifyGraphqlService(acmeShop), monolith, tokens, installedToken, CALLBACK_URL)
+    val report = installShop(FakeShopifyGraphqlService(acmeShop), monolith, tokens, installedToken, everyScope, CALLBACK_URL)
 
     val persist = report.monolithPersist
     assert(persist is MonolithPersistOutcome.Failed)
@@ -92,7 +98,7 @@ class InstallShopTest {
     val shopify = FakeShopifyGraphqlService(acmeShop).apply {
       productCountResult = Failure(ShopifyError.GraphqlError("Throttled"))
     }
-    val report = installShop(shopify, FakeMonolithService(), InMemoryShopTokenStore(), installedToken, CALLBACK_URL)
+    val report = installShop(shopify, FakeMonolithService(), InMemoryShopTokenStore(), installedToken, everyScope, CALLBACK_URL)
 
     // Null and 0 mean different things on the page: "could not ask" versus "the catalogue is empty".
     assert(report.productCount == null)
@@ -103,7 +109,7 @@ class InstallShopTest {
     val shopify = FakeShopifyGraphqlService(acmeShop).apply {
       registerWebhookResult = Failure(ShopifyError.UserError(listOf("address is not allowed")))
     }
-    val report = installShop(shopify, FakeMonolithService(), InMemoryShopTokenStore(), installedToken, CALLBACK_URL)
+    val report = installShop(shopify, FakeMonolithService(), InMemoryShopTokenStore(), installedToken, everyScope, CALLBACK_URL)
 
     assert(report.webhooks.addedCount == 0)
     assert(report.webhooks.failures.size == report.webhooks.topics.size)
@@ -123,7 +129,7 @@ class InstallShopTest {
       shopIdentityResult = Success(ShopIdentityInfo(shopId = ShopifyShopId(9988L), domain = canonical))
     }
 
-    val report = installShop(shopify, monolith, tokens, installedToken, CALLBACK_URL)
+    val report = installShop(shopify, monolith, tokens, installedToken, everyScope, CALLBACK_URL)
 
     assert(report.shop == canonical)
     assert(tokens.cached(canonical) == installedToken)
@@ -138,8 +144,53 @@ class InstallShopTest {
       FakeMonolithService(),
       InMemoryShopTokenStore(),
       installedToken,
+      everyScope,
       CALLBACK_URL,
     )
     assert(report.webhookCallbackUrl == CALLBACK_URL)
+  }
+
+  /** The merchant approved less than was asked for: the token still does what its scopes cover, so nothing is skipped. */
+  @Test
+  fun `a grant without a required scope is reported, and every install step runs anyway`() = runBlocking {
+    val tokens = InMemoryShopTokenStore()
+    val monolith = FakeMonolithService()
+    val shopify = FakeShopifyGraphqlService(acmeShop)
+    val report = installShop(shopify, monolith, tokens, installedToken, everyScope - "write_fulfillments", CALLBACK_URL)
+
+    assert(report.accessScopes.missing == listOf(ShopifyAccessScope.WRITE_FULFILLMENTS))
+    assert(tokens.cached(acmeShop) == installedToken)
+    assert(monolith.putStoreApiKeyCalls.size == 1)
+    assert(shopify.registerWebhookCalls.size == ShopifyWebhookTopic.known.size)
+  }
+
+  @Test
+  fun `a grant of every required scope reports nothing missing`() = runBlocking {
+    val report = installShop(FakeShopifyGraphqlService(acmeShop), FakeMonolithService(), InMemoryShopTokenStore(), installedToken, everyScope, CALLBACK_URL)
+
+    assert(report.accessScopes.isComplete)
+  }
+
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `a grant without required scopes logs one warn line naming them`() {
+    val granted = everyScope - "write_fulfillments" - "write_third_party_fulfillment_orders"
+    val lines = capturingLogs {
+      runBlocking { installShop(FakeShopifyGraphqlService(acmeShop), FakeMonolithService(), InMemoryShopTokenStore(), installedToken, granted, CALLBACK_URL) }
+    }
+
+    val scopeLines = lines.filter { "OAuth grant lacks required scopes" in it }
+    assert(scopeLines.size == 1)
+    assert(scopeLines.single().startsWith("WARN OAuth grant lacks required scopes missing=write_third_party_fulfillment_orders,write_fulfillments {"))
+  }
+
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `a complete grant logs no scope line`() {
+    val lines = capturingLogs {
+      runBlocking { installShop(FakeShopifyGraphqlService(acmeShop), FakeMonolithService(), InMemoryShopTokenStore(), installedToken, everyScope, CALLBACK_URL) }
+    }
+
+    assert(lines.none { "OAuth grant lacks required scopes" in it })
   }
 }

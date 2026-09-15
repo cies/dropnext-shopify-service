@@ -2,8 +2,10 @@ package dropnext.dss.testutil.fake
 
 import dev.forkhandles.result4k.Success
 import dropnext.dss.domain.ShopDomain
+import dropnext.dss.domain.ShopifyAccessScope
 import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.lib.shopify.oauth.OAuthResult
+import dropnext.dss.lib.shopify.oauth.ShopifyAccessGrant
 import dropnext.dss.lib.shopify.oauth.ShopifyOAuthService
 import java.time.Instant
 
@@ -15,7 +17,7 @@ import java.time.Instant
  */
 class FakeShopifyOAuthService : ShopifyOAuthService, RecordingFake {
 
-  var exchangeCodeResult: OAuthResult<ShopifyAdminToken> = Success(ShopifyAdminToken("shpat_fake_admin_token"))
+  var exchangeCodeResult: OAuthResult<ShopifyAccessGrant> = Success(completeGrant())
   val exchangeCodeCalls: MutableList<RecordedCodeExchange> = mutableListOf()
 
   override fun authorizeUrl(shop: ShopDomain, state: String): String =
@@ -26,15 +28,19 @@ class FakeShopifyOAuthService : ShopifyOAuthService, RecordingFake {
   override fun isSignedStateValid(state: String, expectedShop: ShopDomain, now: Instant): Boolean =
     state == signedState(expectedShop, now)
 
-  override suspend fun exchangeCode(shop: ShopDomain, code: String): OAuthResult<ShopifyAdminToken> {
+  override suspend fun exchangeCode(shop: ShopDomain, code: String): OAuthResult<ShopifyAccessGrant> {
     exchangeCodeCalls.add(RecordedCodeExchange(shop = shop, code = code))
     return exchangeCodeResult
   }
 
   override fun clear() {
     exchangeCodeCalls.clear()
-    exchangeCodeResult = Success(ShopifyAdminToken("shpat_fake_admin_token"))
+    exchangeCodeResult = Success(completeGrant())
   }
 }
 
 data class RecordedCodeExchange(val shop: ShopDomain, val code: String)
+
+/** The fake's token with every scope the install asks for, so a callback test sees a complete grant unless it sets another. */
+private fun completeGrant(): ShopifyAccessGrant =
+  ShopifyAccessGrant(ShopifyAdminToken("shpat_fake_admin_token"), ShopifyAccessScope.entries.map { it.handle })

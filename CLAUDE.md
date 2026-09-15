@@ -101,7 +101,7 @@ credentials, so the human developer starts it — see "Operational boundary".
 ├── boot/                        # What the process is started with and what it does before taking traffic; not the application itself, so it wires nothing of the handlers
 │   ├── config/                  # `Config.from(env)` (one flat data class holding every env var, secrets wrapped) and the `.env` reader
 │   └── warmup/                  # The warm-up before taking traffic: the workflow, its report, the `Readiness` flag `/health` reads, `WarmUp` + `startWarmUp` (the Ktor trigger), and the loopback client it sends itself requests with
-├── domain/                      # The vocabulary every layer shares, depending on nothing of ours: `ShopDomain`, the ids and secrets (value classes), the reports the install page renders
+├── domain/                      # The vocabulary every layer shares, depending on nothing of ours: `ShopDomain`, the ids and secrets (value classes), the access scopes the install requests, the reports the install page renders
 │   └── fulfillment/             # Pure logic over an order snapshot: the open-line index and the fulfillment-order matcher, request validation
 ├── handler/                     # Ktor handlers, one `*Handlers` class per route family: receive the (already decoded and validated) request, resolve the shop, call a workflow, map its answer (`toDssError`) onto the response
 ├── routing/                     # One `Route.*Routes(handlers)` per handler family; nothing but path ↔ handler bindings
@@ -188,7 +188,9 @@ The other inbound routes are the OAuth pair (`/install`, `/oauth/callback`), the
 `/api/webhooks/register`, `WebhookSubscriptionHandlers`); all of them are constants in `path/Paths.kt`. `/health` answers
 `503` with `status=warming_up` until the warm-up is done (see "Warm-up and readiness") and `200` with `status=ok`
 after; it is the one route the readiness gate touches. The webhook subscription pair sits behind the bearer auth.
-`GET /api/check?shop=` answers whether the shop's token resolves and, from a read-only `scanShopifyWebhooks`, one row
+`GET /api/check?shop=` answers whether the shop's token resolves, which scopes of `ShopifyAccessScope` its grant lacks
+(`access_scopes`: `complete`, `missing`, or `unknown` when Shopify cannot list them, which fails nothing else) and, from
+a read-only `scanShopifyWebhooks`, one row
 per handled webhook topic (`active` at our callback URL with the payload fields the topic declares, no filter and JSON,
 `mismatched` when subscribed there otherwise, or `missing`, plus stale subscriptions pointing elsewhere) and the
 `obsolete` subscriptions at our URL for a topic the service does not handle, so "is this shop still subscribed" can be
@@ -213,11 +215,13 @@ when it creates fulfillments, and matches by variant because the monolith names 
 holds a line; do not add precision there.
 
 ## OAuth install flow
-`GET /install?shop=…` redirects to Shopify's authorize URL with a signed `state` and the scopes in
-`SHOPIFY_ACCESS_SCOPES` (not a setting: changing them takes a deploy either way). `GET /oauth/callback` verifies the
-callback HMAC and the state, exchanges the code for an Admin token (`ShopifyOAuthService`) and hands the rest to the
-`installShop` workflow: learn the shop's canonical domain and id, remember the token in the `ShopTokenStore`, persist
-it to the monolith (`putStoreApiKey`), count the catalogue, register the webhook subscriptions
+`GET /install?shop=…` redirects to Shopify's authorize URL with a signed `state` and the scopes of
+`ShopifyAccessScope` in `domain/` (hardcoded, never a setting: changing them takes a deploy either way).
+`GET /oauth/callback` verifies the callback HMAC and the state, exchanges the code for an Admin token and the scopes
+granted with it (`ShopifyOAuthService`) and hands the rest to the `installShop` workflow: hold the granted scopes
+against `ShopifyAccessScope` (what is missing is a warn line and a red block on the page), learn the shop's canonical
+domain and id, remember the token in the `ShopTokenStore`, persist it to the monolith (`putStoreApiKey`), count the
+catalogue, register the webhook subscriptions
 (`registerShopifyWebhooks`: scans what exists, updates a subscription at our URL whose payload fields, filter or
 format differ, repoints one stale HTTPS subscription per missing topic to our URL (resetting the same three), registers
 the topics still missing with the fields each topic declares, deletes a subscription at our URL for a topic the
@@ -323,7 +327,8 @@ regarding what packages a package may import from: `domain` depends on nothing o
 other, `boot/config` on no `lib` package), `lib` never on an
 application package and its sub-packages never on each other (only on `lib/json`, `lib/crypto`, `lib/slf4j`),
 `workflow` never on the HTTP or view layers, `presentation` on nothing but `domain`. Plus the other rules it keeps: no
-reflection, no wildcard imports, no ad-hoc `Json {}` or `HttpClient(...)`, only `Config` in `boot/config/` reads the
+reflection, no wildcard imports, snake_case JSON keys, access scopes hardcoded and never a setting, no ad-hoc
+`Json {}` or `HttpClient(...)`, only `Config` in `boot/config/` reads the
 environment and that package imports no framework or logger, only `startWarmUp` marks the service ready, only `lib/slf4j` imports the SLF4J `MDC` or `MDCContext`, `boot/warmup`
 sees no more of the Ktor server than the application lifecycle, secrets redact and never serialize, Graphql-generated types only inside `lib/shopify/`, the translation boundaries
 and `workflow/`, no hand-written contract DTOs or `OutBoundMonolithPaths` and the file naming rule. The `test/` →
@@ -539,6 +544,8 @@ Files and types:
 - **snake_case JSON keys**: All API-exposed DTOs (request and response bodies) use `snake_case` for their JSON field
   names. Kotlin properties remain `camelCase` — the mapping is done with `@SerialName("snake_case_name")` annotations
   on each multi-word property. Single-word properties (e.g. `status`, `carrier`) do not need `@SerialName`.
+  `ArchitectureTest` fails a `@Serializable` class in `src/` whose multi-word property has no `@SerialName`, or whose
+  `@SerialName` is not snake_case.
 - **Separate blank lines between properties**: In API DTOs with `@SerialName` annotations, add a blank line between
   each property for readability.
 - **DTOs on the DSS ↔ monolith contract are generated** into `dropnext.dss.contract`: change

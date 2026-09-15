@@ -42,7 +42,7 @@ class HttpShopifyOAuthServiceTest {
     val url = client.authorizeUrl(shop, "state-xyz")
     assert(url.startsWith("https://acme.myshopify.com/admin/oauth/authorize?"))
     assert("client_id=client-id-123" in url)
-    assert("scope=read_products%2Cread_orders%2Cwrite_webhooks%2Cwrite_merchant_managed_fulfillment_orders%2Cread_merchant_managed_fulfillment_orders" in url)
+    assert("scope=read_products%2Cread_orders%2Cwrite_merchant_managed_fulfillment_orders%2Cwrite_third_party_fulfillment_orders%2Cwrite_fulfillments&" in url)
     assert("redirect_uri=https%3A%2F%2Fdss.example.com%2Foauth%2Fcallback" in url)
     assert("state=state-xyz" in url)
   }
@@ -130,11 +130,22 @@ class HttpShopifyOAuthServiceTest {
   fun `exchangeCode posts the app credentials with the code and answers the token`() = withFakeShopify { server, service ->
     val result = service.exchangeCode(shop, "abc-code")
 
-    assert(result == Success(ShopifyAdminToken("shpat_fake_admin_token")))
+    assert((result as Success).value.token == ShopifyAdminToken("shpat_fake_admin_token"))
     val sent = AppJson.parseToJsonElement(server.oauthCalls.single()).jsonObject
     assert(sent["client_id"]?.jsonPrimitive?.content == "client-id-123")
     assert(sent["client_secret"]?.jsonPrimitive?.content == "client-secret-xyz")
     assert(sent["code"]?.jsonPrimitive?.content == "abc-code")
+  }
+
+  /** Shopify answers the granted scopes comma-separated, and a merchant can grant fewer than were asked for. */
+  @Test
+  fun `exchangeCode answers the granted scope handles beside the token`() = withFakeShopify { server, service ->
+    server.oauthAccessTokenResponse = """{"access_token":"shpat_fake_admin_token","scope":"read_products, write_orders,,write_fulfillments"}"""
+
+    val result = service.exchangeCode(shop, "abc-code")
+
+    val expected = ShopifyAccessGrant(ShopifyAdminToken("shpat_fake_admin_token"), listOf("read_products", "write_orders", "write_fulfillments"))
+    assert(result == Success(expected))
   }
 
   @Test

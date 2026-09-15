@@ -6,6 +6,8 @@ import dropnext.dss.domain.ObsoleteWebhookSubscription
 import dropnext.dss.domain.ProductCount
 import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopInstallReport
+import dropnext.dss.domain.ShopifyAccessScope
+import dropnext.dss.domain.ShopifyAccessScopeReport
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.domain.StoreId
 import dropnext.dss.domain.WebhookRegistrationReport
@@ -16,6 +18,7 @@ import kotlin.test.Test
 
 
 private const val CALLBACK_URL = "https://dss.example.com/webhooks/shopify"
+private val everyScope = ShopifyAccessScope.entries.map { it.handle }
 
 
 class RenderOAuthInstallPageTest {
@@ -26,11 +29,13 @@ class RenderOAuthInstallPageTest {
     topics: List<WebhookTopicRegistration> = emptyList(),
     obsolete: List<ObsoleteWebhookSubscription> = emptyList(),
     productCount: ProductCount? = ProductCount(count = 3, isExact = true),
+    accessScopes: ShopifyAccessScopeReport = ShopifyAccessScopeReport.from(everyScope),
   ): String =
     renderOAuthInstallPage(
       ShopInstallReport(
         shop = ShopDomain.parse(shop)!!,
         shopId = ShopifyShopId(9988L),
+        accessScopes = accessScopes,
         monolithPersist = monolithPersist,
         productCount = productCount,
         webhookCallbackUrl = CALLBACK_URL,
@@ -65,6 +70,25 @@ class RenderOAuthInstallPageTest {
     )
     assert("<img src=x onerror=alert(1)>" !in html)
     assert("&lt;img src=x onerror=alert(1)&gt;" in html)
+  }
+
+  @Test
+  fun `a complete grant says every required access scope is granted`() {
+    val html = renderBase()
+    assert("All 5 required access scopes granted." in html)
+    assert("did not grant every access scope" !in html)
+  }
+
+  /** A missing scope fails only the operations that need it, so the page names each scope with what it is for. */
+  @Test
+  fun `a grant without a required scope names it, what it is needed for and that it is missing`() {
+    val html = renderBase(accessScopes = ShopifyAccessScopeReport.from(everyScope - "write_fulfillments"))
+    assert("This shop did not grant every access scope the service needs" in html)
+    assert("<td><code>write_fulfillments</code></td>" in html)
+    assert(ShopifyAccessScope.WRITE_FULFILLMENTS.neededFor in html)
+    assert(Regex("<strong>missing</strong>").findAll(html).count() == 1)
+    assert(Regex(">granted<").findAll(html).count() == 4)
+    assert("All 5 required access scopes granted." !in html)
   }
 
   @Test
@@ -229,6 +253,7 @@ class RenderOAuthInstallPageTest {
     assert("permission denied" in html)
     assert("scope missing" in html)
     assert("Reinstall the app after fixing." in html)
+    assert("the access scopes reported above" in html)
   }
 
   @Test

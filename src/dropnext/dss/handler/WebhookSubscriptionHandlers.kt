@@ -3,6 +3,7 @@ package dropnext.dss.handler
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
 import dropnext.dss.domain.ObsoleteSubscriptionRemoval
+import dropnext.dss.domain.ShopifyAccessScopeReport
 import dropnext.dss.domain.WebhookRegistrationReport
 import dropnext.dss.domain.WebhookSubscriptionStatus
 import dropnext.dss.domain.WebhookTopicStatus
@@ -18,6 +19,7 @@ import io.github.oshai.kotlinlogging.KotlinLogging
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.response.respond
 import io.ktor.server.util.getOrFail
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 
@@ -35,10 +37,10 @@ class WebhookSubscriptionHandlers(
   private val webhookCallbackUrl = "$dssBaseUrl${Paths.webhooksShopify}"
 
   /**
-   * Readiness for one shop: the token resolves and, per handled topic, what Shopify is subscribed
-   * to at our callback URL. The scan is read-only, so the question "is this shop still subscribed"
-   * (Shopify removes a subscription whose deliveries keep failing) can be asked without a reinstall.
-   * Behind the bearer auth: it drives a monolith lookup and a Shopify query per call.
+   * Readiness for one shop: the token resolves, which of the scopes the install asks for its grant lacks, and, per
+   * handled topic, what Shopify is subscribed to at our callback URL. The scan is read-only, so the question "is this
+   * shop still subscribed" (Shopify removes a subscription whose deliveries keep failing) can be asked without a
+   * reinstall. Behind the bearer auth: it drives a monolith lookup and two Shopify queries per call.
    */
   suspend fun handleApiCheck(call: ApplicationCall) {
     val rawShop = call.request.queryParameters.getOrFail("shop")
@@ -46,6 +48,15 @@ class WebhookSubscriptionHandlers(
     withMdcEntries(SHOP_MDC_KEY to shop.normalizedShopifyHost) {
       // The factory goes through the token store, monolith lookup included, so the check answers what a webhook would find.
       val shopify = call.shopifyServiceOrRespond(shopifyGraphqlServiceFactory, shop) ?: return@withMdcEntries
+
+      // Not knowing the grant says nothing about the subscriptions, so a failed query is an answer, not an error.
+      val accessScopes = when (val listed = shopify.accessScopeHandles()) {
+        is Success -> ShopifyAccessScopeReport.from(listed.value).toApiCheckAccessScopes()
+        is Failure -> {
+          log.warn { "api check: access scopes query failed error=${listed.reason.message}" }
+          ApiCheckAccessScopes(status = "unknown", granted = emptyList(), missing = emptyList())
+        }
+      }
 
       val webhooks = when (val scanned = scanShopifyWebhooks(shopify, webhookCallbackUrl)) {
         is Success -> scanned.value
@@ -59,6 +70,7 @@ class WebhookSubscriptionHandlers(
         ApiCheckResponse(
           shop = shop.normalizedShopifyHost,
           checks = ApiCheckDetails(hasTokenMappedForShop = true),
+          accessScopes = accessScopes,
           webhooks = webhooks.topicRows(),
           obsoleteWebhooks = webhooks.obsoleteRows(),
         ),
@@ -114,21 +126,45 @@ private val SUBSCRIPTIONS_UNLISTABLE = DssError.UpstreamFailure("could not list 
 @Serializable
 private data class ApiCheckResponse(
   val shop: String,
+
   val checks: ApiCheckDetails,
+
+  @SerialName("access_scopes")
+  val accessScopes: ApiCheckAccessScopes,
+
   val webhooks: List<WebhookTopicRow>,
+
+  @SerialName("obsolete_webhooks")
   val obsoleteWebhooks: List<ObsoleteWebhookRow>,
+)
+
+/**
+ * The shop's grant against the scopes the install asks for: `complete`, `missing`, or `unknown` when Shopify could not
+ * list it (both lists empty then). A status rather than a `null` object, because `AppJson` leaves a `null` out of the
+ * body, which would read the same as a version of the service that does not report scopes.
+ */
+@Serializable
+private data class ApiCheckAccessScopes(
+  val status: String,
+  val granted: List<String>,
+  val missing: List<String>,
 )
 
 @Serializable
 private data class ApiCheckDetails(
+  @SerialName("has_token_mapped_for_shop")
   val hasTokenMappedForShop: Boolean,
 )
 
 @Serializable
 private data class RegisterWebhooksResponse(
   val shop: String,
+
   val summary: WebhookRegistrationSummary,
+
   val webhooks: List<WebhookTopicRow>,
+
+  @SerialName("obsolete_webhooks")
   val obsoleteWebhooks: List<ObsoleteWebhookRow>,
 )
 
@@ -154,14 +190,26 @@ private data class WebhookRegistrationSummary(
 @Serializable
 private data class WebhookTopicRow(
   val topic: String,
+
   val status: String,
+
   val id: String? = null,
+
   val uri: String? = null,
+
+  @SerialName("previous_uri")
   val previousUri: String? = null,
+
+  @SerialName("include_fields")
   val includeFields: List<String>? = null,
+
+  @SerialName("expected_include_fields")
   val expectedIncludeFields: List<String>? = null,
+
   val filter: String? = null,
+
   val format: String? = null,
+
   val stale: List<StaleSubscriptionRow> = emptyList(),
 )
 
@@ -177,6 +225,12 @@ private data class ObsoleteWebhookRow(
   val topic: String,
   val id: String,
   val status: String,
+)
+
+private fun ShopifyAccessScopeReport.toApiCheckAccessScopes() = ApiCheckAccessScopes(
+  status = if (isComplete) "complete" else "missing",
+  granted = grantedHandles,
+  missing = missing.map { it.handle },
 )
 
 private fun WebhookRegistrationReport.topicRows(): List<WebhookTopicRow> =

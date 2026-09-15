@@ -1,6 +1,7 @@
 package dropnext.dss.testutil.fake
 
 import dropnext.dss.boot.config.Config
+import dropnext.dss.domain.ShopifyAccessScope
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.cio.CIO
@@ -55,8 +56,7 @@ class FakeShopifyGraphqlServer : RecordingFake {
 
   /** OAuth token-exchange response served on `POST /admin/oauth/access_token`. */
   @Volatile
-  var oauthAccessTokenResponse: String =
-    """{"access_token":"shpat_fake_admin_token","scope":"read_orders"}"""
+  var oauthAccessTokenResponse: String = COMPLETE_GRANT_RESPONSE
 
   /** When non-null, the OAuth endpoint returns this status with [oauthAccessTokenResponse] as the body. */
   @Volatile
@@ -104,7 +104,7 @@ class FakeShopifyGraphqlServer : RecordingFake {
     responses.clear()
     responseQueues.clear()
     oauthCalls.clear()
-    oauthAccessTokenResponse = """{"access_token":"shpat_fake_admin_token","scope":"read_orders"}"""
+    oauthAccessTokenResponse = COMPLETE_GRANT_RESPONSE
     oauthStatus = HttpStatusCode.OK
   }
 
@@ -156,3 +156,10 @@ class FakeShopifyGraphqlServer : RecordingFake {
   fun shopUrl(version: String = Config.SHOPIFY_API_VERSION): String =
     "http://localhost:${runBlocking { server.engine.resolvedConnectors().first().port }}/admin/api/$version/graphql.json"
 }
+
+/**
+ * What the token exchange answers a merchant who granted everything the install asked for, which is what a normal
+ * install looks like. A test that wants a shop granting less sets [FakeShopifyGraphqlServer.oauthAccessTokenResponse].
+ */
+private val COMPLETE_GRANT_RESPONSE =
+  """{"access_token":"shpat_fake_admin_token","scope":"${ShopifyAccessScope.entries.joinToString(",") { it.handle }}"}"""

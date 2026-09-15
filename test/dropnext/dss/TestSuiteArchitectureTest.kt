@@ -317,10 +317,11 @@ class TestSuiteArchitectureTest {
 /**
  * How many `bodyAsText()` reads the suite is allowed; see the rule that reads it. Raised from 23 for
  * the OAuth callback's failure cases, which answer plain text by design (a merchant's browser reads them),
- * and again from 27 when the callback learnt to answer a refused code as a `400` of its own, and from 29
- * when the status pages learnt to answer every exception on those paths in plain text.
+ * and again from 27 when the callback learnt to answer a refused code as a `400` of its own, from 29
+ * when the status pages learnt to answer every exception on those paths in plain text, and from 31 when the
+ * install page learnt to name the access scopes a merchant did not grant.
  */
-private const val MAX_RAW_BODY_READS = 31
+private const val MAX_RAW_BODY_READS = 32
 
 
 /** Interface to the test file that has to name each of its methods. */

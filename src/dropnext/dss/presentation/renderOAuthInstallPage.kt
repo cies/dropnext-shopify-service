@@ -5,6 +5,8 @@ import dropnext.dss.domain.ObsoleteSubscriptionRemoval
 import dropnext.dss.domain.ObsoleteWebhookSubscription
 import dropnext.dss.domain.ProductCount
 import dropnext.dss.domain.ShopInstallReport
+import dropnext.dss.domain.ShopifyAccessScope
+import dropnext.dss.domain.ShopifyAccessScopeReport
 import dropnext.dss.domain.WebhookRegistrationReport
 import dropnext.dss.domain.WebhookSubscriptionStatus
 import dropnext.dss.domain.WebhookTopicRegistration
@@ -21,6 +23,7 @@ fun renderOAuthInstallPage(report: ShopInstallReport): String = StringBuilder("<
   body {
     h1 { +"App installed" }
     p { +"Shop: ${report.shop.normalizedShopifyHost} (id ${report.shopId?.value ?: "unknown"})" }
+    renderAccessScopes(report.accessScopes)
     renderMonolithPersistBlock(report.monolithPersist)
     p { +"Products in the shop: ${report.productCount?.let(::describeProductCount) ?: "unknown (lookup failed)"}" }
     p {
@@ -41,6 +44,46 @@ fun renderOAuthInstallPage(report: ShopInstallReport): String = StringBuilder("<
 /** Shopify stops counting at a cap, past which its count is a lower bound. */
 private fun describeProductCount(productCount: ProductCount): String =
   if (productCount.isExact) "${productCount.count}" else "at least ${productCount.count}"
+
+/** A missing scope fails only the operations that need it, so an incomplete grant lists every scope with what it is for. */
+private fun FlowContent.renderAccessScopes(report: ShopifyAccessScopeReport) {
+  if (report.isComplete) {
+    p {
+      style = "color:green"
+      +"All ${ShopifyAccessScope.entries.size} required access scopes granted."
+    }
+    return
+  }
+  p {
+    style = "color:#b91c1c"
+    strong { +"This shop did not grant every access scope the service needs" }
+    +"; what needs a missing scope will fail. Open the install link for this shop again and approve the requested access."
+  }
+  table {
+    thead {
+      tr {
+        th { +"Access scope" }
+        th { +"Needed for" }
+        th { +"Status" }
+      }
+    }
+    tbody {
+      ShopifyAccessScope.entries.forEach { scope ->
+        tr {
+          td { code { +scope.handle } }
+          td { +scope.neededFor }
+          td {
+            if (scope in report.missing) {
+              span { style = "color:red"; strong { +"missing" } }
+            } else {
+              span { style = "color:green"; +"granted" }
+            }
+          }
+        }
+      }
+    }
+  }
+}
 
 private fun FlowContent.renderMonolithPersistBlock(outcome: MonolithPersistOutcome) {
   when (outcome) {
@@ -205,7 +248,7 @@ private fun FlowContent.renderFailedTopics(failures: List<WebhookTopicRegistrati
     }
   }
   p {
-    +"Make sure your Shopify Partner Dashboard app has Orders API access enabled and grants the scopes the install "
-    +"requests. Reinstall the app after fixing."
+    +"Make sure your Shopify Partner Dashboard app has Orders API access enabled and that the shop granted "
+    +"the access scopes reported above. Reinstall the app after fixing."
   }
 }

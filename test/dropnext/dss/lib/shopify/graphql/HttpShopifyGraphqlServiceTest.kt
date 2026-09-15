@@ -152,6 +152,15 @@ class HttpShopifyGraphqlServiceTest {
   }
 
   @Test
+  fun `accessScopeHandles answers the handles Shopify reports`() = runBlocking {
+    fake.stubRaw(
+      "CurrentAppInstallationAccessScopes",
+      """{"data":{"currentAppInstallation":{"accessScopes":[{"handle":"read_orders"},{"handle":"write_fulfillments"}]}}}""",
+    )
+    assert(shopify.accessScopeHandles() == Success(listOf("read_orders", "write_fulfillments")))
+  }
+
+  @Test
   fun `productById pairs the product with the shop's currency`() = runBlocking {
     fake.stubData(
       "GetProductById",

@@ -7,7 +7,9 @@ import com.lemonappdev.konsist.api.verify.assertFalse
 import dropnext.dss.testutil.helper.kotlinSourceFileTexts
 import dropnext.dss.testutil.helper.normalizedPath
 import dropnext.dss.testutil.helper.pathContainsAllowListEntry
+import dropnext.dss.testutil.helper.projectRoot
 import dropnext.dss.testutil.helper.withoutComments
+import java.io.File
 import org.junit.jupiter.api.Test
 
 
@@ -499,6 +501,31 @@ class ArchitectureTest {
   }
 
   /**
+   * The access scopes the install requests are code (`ShopifyAccessScope`), never configuration: a change to them takes
+   * a deploy and every shop's re-authorization either way, and `SHOPIFY_SCOPES` was a setting that drifted from what the
+   * code needed.
+   */
+  @Test
+  fun `the access scopes are never a setting`() {
+    val scopeName = Regex("""\b[A-Z0-9_]*SCOPE[A-Z0-9_]*\b""")
+    val inConfig = srcFiles
+      .filter { "/src/dropnext/dss/boot/config/" in it.path }
+      .flatMap { file -> scopeName.findAll(file.code).map { "  - ${file.path}: ${it.value}" } }
+    val envExampleVariable = Regex("""^[#\s]*([A-Z0-9_]*SCOPE[A-Z0-9_]*)\s*=""", RegexOption.MULTILINE)
+    val inEnvExample = envExampleVariable.findAll(File(projectRoot, ".env.example").readText())
+      .map { "  - .env.example: ${it.groupValues[1]}" }
+      .toList()
+    val offenders = inConfig + inEnvExample
+    if (offenders.isNotEmpty()) {
+      println(
+        "ERROR: the access scopes are configured here:\n" + offenders.joinToString("\n") +
+          "\nThey are hardcoded in `ShopifyAccessScope`; change them there."
+      )
+    }
+    assert(offenders.isEmpty())
+  }
+
+  /**
    * A secret renders as `"***"` and nothing else, and it must not be able to leave the process
    * through serialization. A secret that quietly serialized itself into a payload or interpolated
    * itself into a log line would not be visible to a reviewer; this rule is.
@@ -555,12 +582,52 @@ class ArchitectureTest {
     assert(offenders.isEmpty())
   }
 
-  /** The `@Serializable data class Xxx(...)` declarations with their constructor text. */
+  /**
+   * `CLAUDE.md` has every JSON body use snake_case keys, named per property. `AppJson` has no naming strategy, so a
+   * property without `@SerialName` goes on the wire under its Kotlin name. The contract DTOs are generated under
+   * `build/`, outside this scope, and follow the monolith's spec.
+   */
+  @Test
+  fun `serializable classes spell their JSON keys in snake_case`() {
+    val property = Regex("""\bva[lr]\s+(\w+)\s*:""")
+    val serialName = Regex("""@SerialName\("([^"]*)"\)""")
+    val offenders = srcScope.files.flatMap { file ->
+      serializableClassConstructorsIn(file.text.withoutComments()).flatMap { (className, constructor) ->
+        val properties = property.findAll(constructor).toList()
+        properties.mapIndexedNotNull { index, match ->
+          // What stands between the previous property and this one holds this one's annotations.
+          val annotations = constructor.substring(if (index == 0) 0 else properties[index - 1].range.last + 1, match.range.first)
+          val name = match.groupValues[1]
+          val key = serialName.find(annotations)?.groupValues?.get(1)
+          when {
+            key == null && name.any(Char::isUpperCase) -> "  - $className.$name in ${file.path} has no @SerialName"
+            key != null && !snakeCaseKey.matches(key) -> "  - $className.$name in ${file.path} is named \"$key\""
+            else -> null
+          }
+        }
+      }
+    }
+    if (offenders.isNotEmpty()) {
+      println(
+        "ERROR: these @Serializable properties do not spell their JSON key in snake_case:\n" + offenders.joinToString("\n") +
+          "\nAnnotate a multi-word property with @SerialName(\"snake_case_name\"); a format someone else owns that is not " +
+          "snake_case needs an allowlist here, with a one-line reason."
+      )
+    }
+    assert(offenders.isEmpty())
+  }
+
+  private val snakeCaseKey = Regex("""[a-z][a-z0-9]*(?:_[a-z0-9]+)*""")
+
+  /**
+   * The `@Serializable` class declarations with their constructor text: a `data class` as much as a plain one, and the
+   * annotation above the declaration as much as on its line. A shape these rules do not see is a shape they do not keep.
+   */
   private fun serializableClassConstructorsIn(text: String): List<Pair<String, String>> =
-    Regex("""data class (\w+)\(""").findAll(text).filter { match ->
-      text.substring(0, match.range.first).split('\n').dropLast(1).reversed()
-        .takeWhile { it.trim().startsWith("@") }
-        .any { "@Serializable" in it }
+    Regex("""\bclass (\w+)\(""").findAll(text).filter { match ->
+      val before = text.substring(0, match.range.first).split('\n')
+      val annotationsAbove = before.dropLast(1).reversed().takeWhile { it.trim().startsWith("@") }
+      "@Serializable" in before.last() || annotationsAbove.any { "@Serializable" in it }
     }.map { match ->
       var depth = 1
       var index = match.range.last + 1

@@ -40,6 +40,9 @@ interface ShopifyGraphqlService {
   /** `ProductsCount` — how many products the shop has; the install page shows it as proof that the token reads the catalogue. */
   suspend fun productCount(): ShopifyResult<ProductCount>
 
+  /** `CurrentAppInstallationAccessScopes` — the scopes the shop granted this app, for a token whose exchange answer is long gone. */
+  suspend fun accessScopeHandles(): ShopifyResult<List<String>>
+
   /** `GetProductById` — the product to mirror after a `products/create` or `products/update` webhook; a successful `null` means Shopify has no such product. */
   suspend fun productById(productGid: String): ShopifyResult<ShopProduct?>
 

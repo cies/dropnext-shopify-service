@@ -9,6 +9,7 @@ package dropnext.dss.domain
 data class ShopInstallReport(
   val shop: ShopDomain,
   val shopId: ShopifyShopId?,
+  val accessScopes: ShopifyAccessScopeReport,
   val monolithPersist: MonolithPersistOutcome,
   val productCount: ProductCount?,
   val webhookCallbackUrl: String,

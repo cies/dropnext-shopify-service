@@ -22,11 +22,14 @@ interface ShopifyOAuthService {
   /** Whether [state] was produced by [signedState] for [expectedShop] and has not expired at [now]. */
   fun isSignedStateValid(state: String, expectedShop: ShopDomain, now: Instant = Instant.now()): Boolean
 
-  /** Trades the authorization [code] Shopify sent to the callback for the shop's long-lived Admin token. */
-  suspend fun exchangeCode(shop: ShopDomain, code: String): OAuthResult<ShopifyAdminToken>
+  /** Trades the authorization [code] Shopify sent to the callback for the shop's long-lived Admin token and the scopes granted with it. */
+  suspend fun exchangeCode(shop: ShopDomain, code: String): OAuthResult<ShopifyAccessGrant>
 }
 
 typealias OAuthResult<T> = Result<T, OAuthError>
+
+/** What a code exchange yields. A merchant can grant less than the install asked for, so the scopes travel with the token. */
+data class ShopifyAccessGrant(val token: ShopifyAdminToken, val scopeHandles: List<String>)
 
 /**
  * Why a code exchange produced no token. Two shapes because the callback answers them differently: a
