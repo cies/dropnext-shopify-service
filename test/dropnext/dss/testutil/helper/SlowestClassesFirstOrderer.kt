@@ -34,10 +34,22 @@ class SlowestClassesFirstOrderer : ClassOrderer {
      * Regenerate it with `./gradlew test slowestTestClasses` and paste the output here when the timings move.
      */
     val slowestFirst = listOf(
-      "dropnext.dss.ArchitectureTest", // 9.90s
-      "dropnext.dss.DependenciesTest", // 6.16s, mostly the warm-up of the Ktor and OkHttp stack its first test pays
-      "dropnext.dss.lib.logflare.LogflareBatchSenderTest", // 2.92s
-      "dropnext.dss.lib.logflare.LogflareAppenderTest", // 1.57s
+      "dropnext.dss.ArchitectureTest", // 13.06s, Konsist parsing every file under src/
+      "dropnext.dss.lib.shopify.graphql.HttpShopifyGraphqlServiceTest", // 9.24s
+      "dropnext.dss.lib.logflare.LogflareBatchSenderTest", // 8.80s, the stalled-handshake cases hold a real socket open
+      "dropnext.dss.TestSuiteArchitectureTest", // 8.65s
+      "dropnext.dss.lib.monolith.HttpMonolithServiceTest", // 6.14s
+      "dropnext.dss.lib.ktor.InstallCallIdTest", // 2.56s
+      "dropnext.dss.lib.ktor.InstallRequestBodyLimitTest", // 2.48s
+      "dropnext.dss.handler.DiagnosticsHandlersTest", // 2.44s
+      "dropnext.dss.DependenciesTest", // 2.25s
+      "dropnext.dss.lib.ktor.InstallMonolithWebhookAuthTest", // 1.94s
+      "dropnext.dss.boot.config.ConfigTest", // 1.80s
+      "dropnext.dss.lib.ktor.HttpClientBuildersTest", // 1.62s
+      "dropnext.dss.lib.logflare.LogflareAppenderTest", // 1.45s
+      "dropnext.dss.lib.shopify.oauth.HttpShopifyOAuthServiceTest", // 1.26s
+      "dropnext.dss.lib.shopify.graphql.HttpShopifyGraphqlServiceFactoryTest", // 1.17s
+      "dropnext.dss.boot.warmup.HttpWarmUpLoopbackServiceTest", // 1.07s
     )
   }
 }

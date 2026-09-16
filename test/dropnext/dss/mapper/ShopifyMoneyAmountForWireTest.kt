@@ -1,6 +1,7 @@
 package dropnext.dss.mapper
 
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
+
 
 class ShopifyMoneyAmountForWireTest {
 
@@ -80,5 +81,37 @@ class ShopifyMoneyAmountForWireTest {
     assert(minorUnitsToShopifyAmount(1L, "USD") == "0.01")
     assert(minorUnitsToShopifyAmount(10_000L, "USD") == "100.00")
     assert(minorUnitsToShopifyAmount(0L, "USD") == "0.00")
+  }
+
+  /**
+   * The two directions disagree on purpose. Reading an amount off Shopify is upstream data, so an
+   * unusable one answers zero; formatting one is our own arithmetic, and a negative or unsizeable
+   * value there is a bug that must not be padded into a plausible-looking price.
+   */
+  @Test
+  fun `minorUnitsToShopifyAmount refuses negative minor units`() {
+    assert(runCatching { minorUnitsToShopifyAmount(-1L, "USD") }.exceptionOrNull() is IllegalArgumentException)
+  }
+
+  @Test
+  fun `minorUnitsToShopifyAmount refuses a currency it cannot size`() {
+    assert(runCatching { minorUnitsToShopifyAmount(1234L, "NOTACURRENCY") }.exceptionOrNull() is IllegalStateException)
+  }
+
+  @Test
+  fun `a blank currency code is unknown`() {
+    assert(shopifyAmountToMinorUnits("12.34", "") == 0L)
+    assert(shopifyAmountToMinorUnits("12.34", "   ") == 0L)
+  }
+
+  /** ISO 4217 gives the pseudo-currencies no minor unit at all, and a guessed exponent would move the decimal point. */
+  @Test
+  fun `a pseudo-currency without minor units is unknown`() {
+    assert(shopifyAmountToMinorUnits("12.34", "XXX") == 0L)
+  }
+
+  @Test
+  fun `a currency code is recognized through the whitespace around it`() {
+    assert(shopifyAmountToMinorUnits("12.34", " USD ") == 1234L)
   }
 }

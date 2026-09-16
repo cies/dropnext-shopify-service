@@ -35,6 +35,13 @@ fun logbackContext(): LoggerContext {
 }
 
 /**
+ * What a run of [capturingLogs] left behind: the lines, which is what nearly every caller wants and reads straight off
+ * this as a `List<String>`, and the [value] the block answered, for a test that has something to assert about both.
+ * Without the second a caller had to hoist a `lateinit var` out of the block to carry the result across.
+ */
+class CapturedLogs<out T>(val value: T, private val lines: List<String>) : List<String> by lines
+
+/**
  * Every line logged anywhere while [block] runs, as `LEVEL message` plus the MDC. Attaches a real
  * Logback appender to the root logger rather than reading a captured stream, so it sees exactly what
  * an appender shipping to Logflare would see.
@@ -42,7 +49,7 @@ fun logbackContext(): LoggerContext {
  * The root logger is global and every test writes to it: a test using this declares `@ResourceLock(GLOBAL_LOG_REGISTRY)`
  * so that it runs alone.
  */
-fun capturingLogs(block: () -> Unit): List<String> {
+fun <T> capturingLogs(block: () -> T): CapturedLogs<T> {
   val recorded = CopyOnWriteArrayList<String>()
   val appender = object : AppenderBase<ILoggingEvent>() {
     override fun append(event: ILoggingEvent) {
@@ -57,14 +64,14 @@ fun capturingLogs(block: () -> Unit): List<String> {
   appender.start()
   root.addAppender(appender)
   root.level = Level.TRACE
-  try {
+  val value = try {
     block()
   } finally {
     root.level = originalLevel
     root.detachAppender(appender)
     appender.stop()
   }
-  return recorded.toList()
+  return CapturedLogs(value, recorded.toList())
 }
 
 /**

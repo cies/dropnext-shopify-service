@@ -3,10 +3,7 @@ package dropnext.dss.handler
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
 import dropnext.dss.boot.config.DssMode
-import dropnext.dss.DssDependencies
-
 import dropnext.dss.contract.ApiError
-import dropnext.dss.contract.Shipment
 import dropnext.dss.contract.ShipmentLineItem
 import dropnext.dss.contract.SyncShipmentsWithFulfillmentsRequest
 import dropnext.dss.contract.SyncShipmentsWithFulfillmentsResponse
@@ -14,16 +11,13 @@ import dropnext.dss.contract.TrackingUpdateRequest
 import dropnext.dss.contract.TrackingUpdateResponse
 import dropnext.dss.contract.UpdateStoreApiKeyRequest
 import dropnext.dss.contract.UpdateStoreApiKeyResponse
-import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.domain.ShopifyFulfillmentEventId
 import dropnext.dss.domain.ShopifyFulfillmentId
-import dropnext.dss.dssDependencies
 import dropnext.dss.lib.ktor.DssError
-import dropnext.dss.lib.monolith.MonolithService
+import dropnext.dss.lib.shopify.graphql.FulfillmentLine
+import dropnext.dss.lib.shopify.graphql.FulfillmentTracking
 import dropnext.dss.lib.shopify.graphql.ShopifyError
-import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlServiceFactory
-
 import dropnext.dss.lib.shopify.token.InMemoryShopTokenStore
 import dropnext.dss.lib.slf4j.ROUTE_MDC_KEY
 import dropnext.dss.lib.slf4j.SHOP_MDC_KEY
@@ -31,47 +25,44 @@ import dropnext.dss.path.Paths
 import dropnext.dss.testutil.fake.FakeMonolithService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlServiceFactory
-import dropnext.dss.testutil.fixture.diagramCrossFoOrder
-import dropnext.dss.testutil.fixture.diagramCrossFoShipment
+import dropnext.dss.testutil.fixture.ACME_SHOP
 import dropnext.dss.testutil.fixture.fulfillment
 import dropnext.dss.testutil.fixture.minimalOrder
-import dropnext.dss.testutil.fixture.orderWithFoQuantities
 import dropnext.dss.testutil.fixture.orderWithFulfillment
 import dropnext.dss.testutil.fixture.orderWithFulfillments
 import dropnext.dss.testutil.fixture.shipment
 import dropnext.dss.testutil.fixture.testConfig
-import dropnext.dss.testutil.helper.capturingLogs
+import dropnext.dss.testutil.fixture.testDependencies
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
+import dropnext.dss.testutil.helper.capturingLogs
 import dropnext.dss.testutil.helper.mdcOf
 import dropnext.dss.testutil.helper.withDssApp
 import dropnext.graphql.generated.enums.FulfillmentStatus
 import io.ktor.client.call.body
-import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
-import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import kotlin.time.Duration.Companion.milliseconds
-import org.junit.jupiter.api.parallel.ResourceLock
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.parallel.ResourceLock
 
 
-private val acmeShop = ShopDomain.parse("acme.myshopify.com")!!
-private val defaultInternalSecret = "z".repeat(32)
-
-
+/**
+ * The monolith-facing routes through the production module. What the validators, the auth plugin, the error
+ * mapping and the shipment matcher decide is theirs to prove in their own tests; this class proves each route reaches
+ * them: one guard, one validator, one shop parse and one upstream failure per route, and the answer the handler builds.
+ */
 class MonolithWebhookHandlersTest {
 
   // ---------- internal-secret gate ----------
 
   @Test
   fun `sync-shipments returns 401 when internal secret is required and not provided`() {
-    val secret = "y".repeat(32)
-    withDssApp(deps(secret = secret)) { client ->
+    withDssApp(testDependencies()) { client ->
       val r = client.post(Paths.syncShipmentsWithFulfillments) {
         contentType(ContentType.Application.Json)
         setBody(validSyncRequest())
@@ -81,91 +72,75 @@ class MonolithWebhookHandlersTest {
     }
   }
 
-  /**
-   * Verifies the gate passes when the secret matches: the response is still 401, but with the
-   * downstream missing-token reason — proving the request reached the handler. If the gate had
-   * failed, the body would be empty and carry the bearer challenge instead.
-   */
-  @Test
-  fun `sync-shipments reaches handler when internal secret matches`() {
-    val secret = "y".repeat(32)
-    withDssApp(deps(secret = secret), authenticateAsMonolith = true) { client ->
-      val r = client.post(Paths.syncShipmentsWithFulfillments) {
-        header("Authorization", "Bearer $secret")
-        contentType(ContentType.Application.Json)
-        setBody(validSyncRequest())
-      }
-      assert(r.status == HttpStatusCode.Unauthorized)
-      assert("missing Shopify Admin token" in r.errorMessage())
-    }
-  }
-
   // ---------- validation ----------
 
+  /** The shop is parsed by the handler, not by a validator, so each route proves its own parse. */
   @Test
-  fun `sync-shipments returns 400 for non-positive shopify_order_id`() = withDssApp(deps(), authenticateAsMonolith = true) { client ->
-    val r = client.post(Paths.syncShipmentsWithFulfillments) {
-      contentType(ContentType.Application.Json)
-      setBody(validSyncRequest().copy(shopifyOrderId = 0))
-    }
-    assert(r.status == HttpStatusCode.BadRequest)
-    assert("shopify_order_id" in r.errorMessage())
-  }
-
-  @Test
-  fun `sync-shipments returns 400 for invalid shopify_subdomain`() = withDssApp(deps(), authenticateAsMonolith = true) { client ->
+  fun `sync-shipments returns 400 for invalid shopify_subdomain`() = withDssApp(testDependencies(), authenticateAsMonolith = true) { client ->
     val r = client.post(Paths.syncShipmentsWithFulfillments) {
       contentType(ContentType.Application.Json)
       setBody(validSyncRequest().copy(shopifySubdomain = "!!invalid!!"))
     }
     assert(r.status == HttpStatusCode.BadRequest)
-    assert("shopify_subdomain" in r.errorMessage())
+    assert(r.errorMessage() == "Invalid shopify_subdomain: not a valid Shopify domain")
   }
 
   @Test
-  fun `sync-shipments returns 400 for malformed JSON body`() = withDssApp(deps(), authenticateAsMonolith = true) { client ->
+  fun `sync-shipments returns 400 for malformed JSON body`() = withDssApp(testDependencies(), authenticateAsMonolith = true) { client ->
     val r = client.post(Paths.syncShipmentsWithFulfillments) {
       contentType(ContentType.Application.Json)
       setBody("{ this is not json")
     }
     assert(r.status == HttpStatusCode.BadRequest)
-    assert("invalid request body" in r.errorMessage())
+    assert(r.errorMessage().startsWith("invalid request body: "))
   }
 
+  /** The one case that proves the validator is registered for this body; its rules are `ValidateSyncShipmentsRequestTest`'s. */
   @Test
-  fun `sync-shipments returns 400 for duplicate tracking numbers`() = withDssApp(deps(), authenticateAsMonolith = true) { client ->
-    val r = client.post(Paths.syncShipmentsWithFulfillments) {
-      contentType(ContentType.Application.Json)
-      setBody(
-        validSyncRequest().copy(
-          shipments = listOf(
-            validSyncRequest().shipments.single(),
-            validSyncRequest().shipments.single(),
+  fun `sync-shipments returns 400 for duplicate tracking numbers before asking Shopify`() {
+    val fakeShopify = FakeShopifyGraphqlService().apply { orderForDssResult = Success(minimalOrder()) }
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(
+          validSyncRequest().copy(
+            shipments = listOf(
+              validSyncRequest().shipments.single(),
+              validSyncRequest().shipments.single(),
+            ),
           ),
-        ),
-      )
+        )
+      }
+      assert(r.status == HttpStatusCode.BadRequest)
+      assert(r.errorMessage() == "duplicate tracking_number in payload: 1Z999")
+      assert(fakeShopify.orderForDssCalls.isEmpty())
     }
-    assert(r.status == HttpStatusCode.BadRequest)
-    assert("duplicate tracking_number" in r.errorMessage())
   }
 
   // ---------- sync-shipments success + dry-run ----------
 
+  /** Which shipments match which lines is the matcher's; the handler owns the order it loads and the ids it answers. */
   @Test
-  fun `sync-shipments returns 200 with new_fulfillment_ids`() {
+  fun `sync-shipments creates the fulfillment and answers its id in new_fulfillment_ids`() {
     val fakeShopify = FakeShopifyGraphqlService()
     fakeShopify.orderForDssResult = Success(minimalOrder())
     fakeShopify.createFulfillmentResult = Success(ShopifyFulfillmentId(5001L))
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
       val r = client.post(Paths.syncShipmentsWithFulfillments) {
         contentType(ContentType.Application.Json)
         setBody(validSyncRequest())
       }
       assert(r.status == HttpStatusCode.OK)
-      val body = r.body<SyncShipmentsWithFulfillmentsResponse>()
-      assert(body.newFulfillmentIds == listOf(5001L))
-      assert("new_fulfillment_ids" in r.bodyAsText())
-      assert(r.headers["X-Trace-Id"] != null)
+      assert(r.body<SyncShipmentsWithFulfillmentsResponse>().newFulfillmentIds == listOf(5001L))
+      assert(fakeShopify.orderForDssCalls == listOf("gid://shopify/Order/1001"))
+      val created = fakeShopify.createFulfillmentCalls.single()
+      val expectedLine = FulfillmentLine(
+        fulfillmentOrderId = "gid://shopify/FulfillmentOrder/301",
+        lineItemId = "gid://shopify/FulfillmentOrderLineItem/401",
+        quantity = 1,
+      )
+      assert(created.lines == listOf(expectedLine))
+      assert(created.tracking == FulfillmentTracking(company = "UPS", number = "1Z999", url = null))
     }
   }
 
@@ -173,7 +148,7 @@ class MonolithWebhookHandlersTest {
   fun `sync-shipments returns 400 on dry-run quantity failure before create`() {
     val fakeShopify = FakeShopifyGraphqlService()
     fakeShopify.orderForDssResult = Success(minimalOrder())
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
       val r = client.post(Paths.syncShipmentsWithFulfillments) {
         contentType(ContentType.Application.Json)
         setBody(
@@ -193,96 +168,26 @@ class MonolithWebhookHandlersTest {
     }
   }
 
-  @Test
-  fun `sync-shipments returns 200 for partial match with unmatched variant skipped`() {
-    val fakeShopify = FakeShopifyGraphqlService()
-    fakeShopify.orderForDssResult = Success(minimalOrder())
-    fakeShopify.createFulfillmentResult = Success(ShopifyFulfillmentId(5002L))
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
-      val r = client.post(Paths.syncShipmentsWithFulfillments) {
-        contentType(ContentType.Application.Json)
-        setBody(
-          validSyncRequest().copy(
-            shipments = listOf(
-              Shipment(
-                trackingNumber = "TRK-MIXED",
-                carrier = "UPS",
-                trackingUrl = null,
-                lineItems = listOf(
-                  ShipmentLineItem(productVariantId = 101L, quantity = 1),
-                  ShipmentLineItem(productVariantId = 999L, quantity = 1),
-                ),
-              ),
-            ),
-          ),
-        )
-      }
-      assert(r.status == HttpStatusCode.OK)
-      val body = r.body<SyncShipmentsWithFulfillmentsResponse>()
-      assert(body.newFulfillmentIds == listOf(5002L))
-      assert(fakeShopify.createFulfillmentCalls.size == 1)
-    }
-  }
-
-  @Test
-  fun `sync-shipments cross-FO shipment sends two fulfillment order groups to create`() {
-    val fakeShopify = FakeShopifyGraphqlService()
-    fakeShopify.orderForDssResult = Success(diagramCrossFoOrder())
-    fakeShopify.createFulfillmentResult = Success(ShopifyFulfillmentId(5100L))
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
-      val r = client.post(Paths.syncShipmentsWithFulfillments) {
-        contentType(ContentType.Application.Json)
-        setBody(validSyncRequest().copy(shipments = listOf(diagramCrossFoShipment())))
-      }
-      assert(r.status == HttpStatusCode.OK)
-      val createCall = fakeShopify.createFulfillmentCalls.single()
-      val foIds = createCall.lines.map { it.fulfillmentOrderId }.toSet()
-      assert(foIds.size == 2)
-      assert("gid://shopify/FulfillmentOrder/301" in foIds)
-      assert("gid://shopify/FulfillmentOrder/302" in foIds)
-      assert(createCall.tracking.number == "TRK-A")
-    }
-  }
-
-  /** The monolith re-sends the whole payload after a `502`; what already landed must not be created a second time. */
-  @Test
-  fun `sync-shipments re-send answers 200 with only the new shipment's fulfillment id`() {
-    val fakeShopify = FakeShopifyGraphqlService()
-    fakeShopify.orderForDssResult = Success(
-      orderWithFoQuantities(remaining = 1).copy(fulfillments = listOf(fulfillment(5001L, listOf("TRK-A")))),
-    )
-    fakeShopify.createFulfillmentResult = Success(ShopifyFulfillmentId(5002L))
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
-      val r = client.post(Paths.syncShipmentsWithFulfillments) {
-        contentType(ContentType.Application.Json)
-        setBody(validSyncRequest().copy(shipments = listOf(shipment(tracking = "TRK-A"), shipment(tracking = "TRK-B"))))
-      }
-      assert(r.status == HttpStatusCode.OK)
-      assert(r.body<SyncShipmentsWithFulfillmentsResponse>().newFulfillmentIds == listOf(5002L))
-      assert(fakeShopify.createFulfillmentCalls.single().tracking.number == "TRK-B")
-    }
-  }
-
   // ---------- missing token ----------
 
   @Test
-  fun `sync-shipments returns 401 when shop has no Admin token`() = withDssApp(deps(), authenticateAsMonolith = true) { client ->
+  fun `sync-shipments returns 401 when shop has no Admin token`() = withDssApp(testDependencies(), authenticateAsMonolith = true) { client ->
     val r = client.post(Paths.syncShipmentsWithFulfillments) {
       contentType(ContentType.Application.Json)
       setBody(validSyncRequest())
     }
     assert(r.status == HttpStatusCode.Unauthorized)
-    assert("missing Shopify Admin token" in r.errorMessage())
+    assert(r.errorMessage() == DssError.MissingShopifyAdminToken.message)
   }
 
   @Test
-  fun `tracking-update returns 401 when shop has no Admin token`() = withDssApp(deps(), authenticateAsMonolith = true) { client ->
+  fun `tracking-update returns 401 when shop has no Admin token`() = withDssApp(testDependencies(), authenticateAsMonolith = true) { client ->
     val r = client.post(Paths.trackingUpdate) {
       contentType(ContentType.Application.Json)
       setBody(validTrackingRequest())
     }
     assert(r.status == HttpStatusCode.Unauthorized)
-    assert("missing Shopify Admin token" in r.errorMessage())
+    assert(r.errorMessage() == DssError.MissingShopifyAdminToken.message)
   }
 
   // ---------- tracking-update ----------
@@ -292,7 +197,7 @@ class MonolithWebhookHandlersTest {
     val fakeShopify = FakeShopifyGraphqlService()
     fakeShopify.orderForDssResult = Success(orderWithFulfillment(id = 8000L, trackingNumbers = listOf("1Z999")))
     fakeShopify.createFulfillmentEventResult = Success(ShopifyFulfillmentEventId(7001L))
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
       val r = client.post(Paths.trackingUpdate) {
         contentType(ContentType.Application.Json)
         setBody(validTrackingRequest())
@@ -316,7 +221,7 @@ class MonolithWebhookHandlersTest {
       ),
     )
     fakeShopify.createFulfillmentEventResult = Success(ShopifyFulfillmentEventId(7002L))
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
       val r = client.post(Paths.trackingUpdate) {
         contentType(ContentType.Application.Json)
         setBody(validTrackingRequest())
@@ -330,7 +235,7 @@ class MonolithWebhookHandlersTest {
   fun `tracking-update returns 400 for an unsupported status`() {
     val fakeShopify = FakeShopifyGraphqlService()
     fakeShopify.orderForDssResult = Success(orderWithFulfillment(id = 8000L, trackingNumbers = listOf("1Z999")))
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
       val r = client.post(Paths.trackingUpdate) {
         contentType(ContentType.Application.Json)
         setBody(validTrackingRequest().copy(status = "teleported"))
@@ -345,7 +250,7 @@ class MonolithWebhookHandlersTest {
   fun `tracking-update returns 404 when no fulfillment carries that tracking number`() {
     val fakeShopify = FakeShopifyGraphqlService()
     fakeShopify.orderForDssResult = Success(orderWithFulfillment(id = 8000L, trackingNumbers = listOf("OTHER")))
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
       val r = client.post(Paths.trackingUpdate) {
         contentType(ContentType.Application.Json)
         setBody(validTrackingRequest())
@@ -355,45 +260,52 @@ class MonolithWebhookHandlersTest {
     }
   }
 
+  /** The shop is parsed by the handler, not by a validator, so each route proves its own parse. */
   @Test
   fun `tracking-update returns 400 for an invalid shopify_subdomain`() =
-    withDssApp(deps(), authenticateAsMonolith = true) { client ->
+    withDssApp(testDependencies(), authenticateAsMonolith = true) { client ->
       val r = client.post(Paths.trackingUpdate) {
         contentType(ContentType.Application.Json)
         setBody(validTrackingRequest().copy(shopifySubdomain = "!!invalid!!"))
       }
       assert(r.status == HttpStatusCode.BadRequest)
-      assert("shopify_subdomain" in r.errorMessage())
+      assert(r.errorMessage() == "Invalid shopify_subdomain: not a valid Shopify domain")
     }
+
+  /**
+   * The one case that proves the validator is registered for this body; its rules are `ValidateTrackingUpdateRequestTest`'s.
+   * Shopify would refuse the date with a top-level error that reads as its own failure; the request is at fault, so a 400.
+   */
+  @Test
+  fun `tracking-update returns 400 for a happened_at without an offset before asking Shopify`() {
+    val fakeShopify = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Success(orderWithFulfillment(id = 8000L, trackingNumbers = listOf("1Z999")))
+    }
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.trackingUpdate) {
+        contentType(ContentType.Application.Json)
+        setBody(validTrackingRequest().copy(happenedAt = "2026-04-02T08:30:00"))
+      }
+      assert(r.status == HttpStatusCode.BadRequest)
+      assert(r.errorMessage() == "happened_at must be an ISO 8601 date and time with an offset, such as 2026-04-02T08:30:00Z")
+      assert(fakeShopify.orderForDssCalls.isEmpty())
+    }
+  }
 
   // ---------- handlePutStoreApiKey ----------
 
   @Test
-  fun `PUT stores api-key caches token in the token store`() {
+  fun `PUT stores api-key caches the token, forwards it and answers the store id the monolith assigned`() {
     val tokens = InMemoryShopTokenStore()
-    withDssApp(deps(shopTokens = tokens), authenticateAsMonolith = true) { client ->
-      val r = client.put(Paths.storesApiKey) {
-        contentType(ContentType.Application.Json)
-        setBody(UpdateStoreApiKeyRequest(shopifySubdomain = "acme", apiKey = "shpat_new_token", shopifyShopId = 99L))
-      }
-      assert(r.status == HttpStatusCode.OK)
-      val resp = r.body<UpdateStoreApiKeyResponse>()
-      assert(resp.storeId == 1L) // FakeMonolithService.putStoreApiKeyStoreId default
-      assert(tokens.cached(acmeShop) == ShopifyAdminToken("shpat_new_token"))
-    }
-  }
-
-  @Test
-  fun `PUT stores api-key forwards normalised request to monolith`() {
-    val tokens = InMemoryShopTokenStore()
-    val fake = FakeMonolithService()
-    withDssApp(deps(shopTokens = tokens, monolith = fake), authenticateAsMonolith = true) { client ->
+    val fake = FakeMonolithService().apply { putStoreApiKeyStoreId = 42L }
+    withDssApp(testDependencies(shopTokens = tokens, monolith = fake), authenticateAsMonolith = true) { client ->
       val r = client.put(Paths.storesApiKey) {
         contentType(ContentType.Application.Json)
         setBody(UpdateStoreApiKeyRequest(shopifySubdomain = "acme", apiKey = "shpat_new", shopifyShopId = 99L))
       }
       assert(r.status == HttpStatusCode.OK)
-      assert(tokens.cached(acmeShop) == ShopifyAdminToken("shpat_new"))
+      assert(r.body<UpdateStoreApiKeyResponse>().storeId == 42L)
+      assert(tokens.cached(ACME_SHOP) == ShopifyAdminToken("shpat_new"))
       val forwarded = fake.putStoreApiKeyCalls.single()
       assert(forwarded.shopifySubdomain == "acme")
       assert(forwarded.shopifyShopId == 99L)
@@ -406,14 +318,31 @@ class MonolithWebhookHandlersTest {
   fun `PUT stores api-key answers 502 and keeps the token cached when the monolith answers a server error`() {
     val tokens = InMemoryShopTokenStore()
     val fake = FakeMonolithService().apply { putStoreApiKeyStatus = 500 }
-    withDssApp(deps(shopTokens = tokens, monolith = fake), authenticateAsMonolith = true) { client ->
+    withDssApp(testDependencies(shopTokens = tokens, monolith = fake), authenticateAsMonolith = true) { client ->
       val r = client.put(Paths.storesApiKey) {
         contentType(ContentType.Application.Json)
         setBody(UpdateStoreApiKeyRequest(shopifySubdomain = "acme", apiKey = "shpat_x", shopifyShopId = 99L))
       }
       assert(r.status == HttpStatusCode.BadGateway)
       assert(r.errorMessage() == "the monolith answered HTTP 500; the token is cached in memory only")
-      assert(tokens.cached(acmeShop) == ShopifyAdminToken("shpat_x"))
+      assert(tokens.cached(ACME_SHOP) == ShopifyAdminToken("shpat_x"))
+      assert(fake.putStoreApiKeyCalls.size == 1)
+    }
+  }
+
+  /** No status to report is its own answer: after a monolith deploy this is the case the caller will see first. */
+  @Test
+  fun `PUT stores api-key answers 502 and keeps the token cached when the monolith does not answer`() {
+    val tokens = InMemoryShopTokenStore()
+    val fake = FakeMonolithService().apply { putStoreApiKeyTransportFailure = true }
+    withDssApp(testDependencies(shopTokens = tokens, monolith = fake), authenticateAsMonolith = true) { client ->
+      val r = client.put(Paths.storesApiKey) {
+        contentType(ContentType.Application.Json)
+        setBody(UpdateStoreApiKeyRequest(shopifySubdomain = "acme", apiKey = "shpat_x", shopifyShopId = 99L))
+      }
+      assert(r.status == HttpStatusCode.BadGateway)
+      assert(r.errorMessage() == "the monolith did not answer; the token is cached in memory only")
+      assert(tokens.cached(ACME_SHOP) == ShopifyAdminToken("shpat_x"))
       assert(fake.putStoreApiKeyCalls.size == 1)
     }
   }
@@ -422,14 +351,14 @@ class MonolithWebhookHandlersTest {
   fun `PUT stores api-key answers 404 when the monolith knows no store for the shop`() {
     val tokens = InMemoryShopTokenStore()
     val fake = FakeMonolithService().apply { putStoreApiKeyStatus = 404 }
-    withDssApp(deps(shopTokens = tokens, monolith = fake), authenticateAsMonolith = true) { client ->
+    withDssApp(testDependencies(shopTokens = tokens, monolith = fake), authenticateAsMonolith = true) { client ->
       val r = client.put(Paths.storesApiKey) {
         contentType(ContentType.Application.Json)
         setBody(UpdateStoreApiKeyRequest(shopifySubdomain = "acme", apiKey = "shpat_x", shopifyShopId = 99L))
       }
       assert(r.status == HttpStatusCode.NotFound)
-      assert("knows no store" in r.errorMessage())
-      assert(tokens.cached(acmeShop) == ShopifyAdminToken("shpat_x"))
+      assert(r.errorMessage() == "the monolith knows no store for this shop; the token is cached in memory only")
+      assert(tokens.cached(ACME_SHOP) == ShopifyAdminToken("shpat_x"))
     }
   }
 
@@ -437,7 +366,7 @@ class MonolithWebhookHandlersTest {
   @Test
   fun `PUT stores api-key forwards a null shopify_shop_id as null`() {
     val fake = FakeMonolithService()
-    withDssApp(deps(monolith = fake), authenticateAsMonolith = true) { client ->
+    withDssApp(testDependencies(monolith = fake), authenticateAsMonolith = true) { client ->
       val r = client.put(Paths.storesApiKey) {
         contentType(ContentType.Application.Json)
         setBody(UpdateStoreApiKeyRequest(shopifySubdomain = "acme", apiKey = "shpat_x", shopifyShopId = null))
@@ -447,69 +376,60 @@ class MonolithWebhookHandlersTest {
     }
   }
 
-  /** The handler caches before it persists, so the validator is what keeps a blank token from evicting a good one. */
+  /**
+   * The one case that proves the validator is registered for this body; its rules are `ValidateUpdateStoreApiKeyRequestTest`'s.
+   * The handler caches before it persists, so the validator is what keeps a blank token from evicting a good one.
+   */
   @Test
   fun `PUT stores api-key rejects a blank api_key as 400 without touching the cache`() {
-    val tokens = InMemoryShopTokenStore(mapOf(acmeShop to ShopifyAdminToken("shpat_old")))
+    val tokens = InMemoryShopTokenStore(mapOf(ACME_SHOP to ShopifyAdminToken("shpat_old")))
     val fake = FakeMonolithService()
-    withDssApp(deps(shopTokens = tokens, monolith = fake), authenticateAsMonolith = true) { client ->
+    withDssApp(testDependencies(shopTokens = tokens, monolith = fake), authenticateAsMonolith = true) { client ->
       val r = client.put(Paths.storesApiKey) {
         contentType(ContentType.Application.Json)
         setBody(UpdateStoreApiKeyRequest(shopifySubdomain = "acme", apiKey = "   ", shopifyShopId = 99L))
       }
       assert(r.status == HttpStatusCode.BadRequest)
-      assert("api_key is required" in r.errorMessage())
-      assert(tokens.cached(acmeShop) == ShopifyAdminToken("shpat_old"))
+      assert(r.errorMessage() == "api_key is required")
+      assert(tokens.cached(ACME_SHOP) == ShopifyAdminToken("shpat_old"))
+      assert(fake.putStoreApiKeyCalls.isEmpty())
+    }
+  }
+
+  /** The shop is parsed by the handler, not by a validator, so each route proves its own parse. */
+  @Test
+  fun `PUT stores api-key rejects invalid shopify_subdomain as 400`() {
+    val fake = FakeMonolithService()
+    withDssApp(testDependencies(monolith = fake), authenticateAsMonolith = true) { client ->
+      val r = client.put(Paths.storesApiKey) {
+        contentType(ContentType.Application.Json)
+        setBody(UpdateStoreApiKeyRequest(shopifySubdomain = "!!invalid!!", apiKey = "shpat", shopifyShopId = 99L))
+      }
+      assert(r.status == HttpStatusCode.BadRequest)
+      assert(r.errorMessage() == "Invalid shopify_subdomain: not a valid Shopify domain")
       assert(fake.putStoreApiKeyCalls.isEmpty())
     }
   }
 
   @Test
-  fun `PUT stores api-key rejects a zero shopify_shop_id as 400`() = withDssApp(deps(), authenticateAsMonolith = true) { client ->
-    val r = client.put(Paths.storesApiKey) {
-      contentType(ContentType.Application.Json)
-      setBody(UpdateStoreApiKeyRequest(shopifySubdomain = "acme", apiKey = "shpat_x", shopifyShopId = 0L))
-    }
-    assert(r.status == HttpStatusCode.BadRequest)
-    assert("shopify_shop_id" in r.errorMessage())
-  }
-
-  @Test
-  fun `PUT stores api-key rejects invalid shopify_subdomain as 400`() = withDssApp(deps(), authenticateAsMonolith = true) { client ->
-    val r = client.put(Paths.storesApiKey) {
-      contentType(ContentType.Application.Json)
-      setBody(UpdateStoreApiKeyRequest(shopifySubdomain = "!!invalid!!", apiKey = "shpat", shopifyShopId = 99L))
-    }
-    assert(r.status == HttpStatusCode.BadRequest)
-    assert("shopify_subdomain" in r.errorMessage())
-  }
-
-  @Test
-  fun `PUT stores api-key requires internal secret when configured`() =
-    withDssApp(deps(secret = "z".repeat(32))) { client ->
+  fun `PUT stores api-key requires internal secret when configured`() {
+    val fake = FakeMonolithService()
+    withDssApp(testDependencies(monolith = fake)) { client ->
       val r = client.put(Paths.storesApiKey) {
         contentType(ContentType.Application.Json)
         setBody(UpdateStoreApiKeyRequest(shopifySubdomain = "acme", apiKey = "shpat_x", shopifyShopId = 99L))
       }
       assert(r.status == HttpStatusCode.Unauthorized)
+      assert(r.headers["WWW-Authenticate"] == "Bearer realm=dss-internal")
+      assert(fake.putStoreApiKeyCalls.isEmpty())
     }
+  }
 
   // ---------- the auth guard on tracking-update ----------
 
   @Test
-  fun `tracking-update returns 401 with the bearer challenge when the internal secret is missing`() = withDssApp(deps()) { client ->
+  fun `tracking-update returns 401 with the bearer challenge when the internal secret is missing`() = withDssApp(testDependencies()) { client ->
     val r = client.post(Paths.trackingUpdate) {
-      contentType(ContentType.Application.Json)
-      setBody(validTrackingRequest())
-    }
-    assert(r.status == HttpStatusCode.Unauthorized)
-    assert(r.headers["WWW-Authenticate"] == "Bearer realm=dss-internal")
-  }
-
-  @Test
-  fun `tracking-update returns 401 when the internal secret is wrong`() = withDssApp(deps()) { client ->
-    val r = client.post(Paths.trackingUpdate) {
-      header("Authorization", "Bearer ${"w".repeat(32)}")
       contentType(ContentType.Application.Json)
       setBody(validTrackingRequest())
     }
@@ -522,13 +442,13 @@ class MonolithWebhookHandlersTest {
   @Test
   fun `sync-shipments returns 401 naming the rejected token when Shopify refuses it`() {
     val fakeShopify = FakeShopifyGraphqlService().apply { orderForDssResult = Failure(ShopifyError.TokenRejected(401)) }
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
       val r = client.post(Paths.syncShipmentsWithFulfillments) {
         contentType(ContentType.Application.Json)
         setBody(validSyncRequest())
       }
       assert(r.status == HttpStatusCode.Unauthorized)
-      assert("rejected the shop's Admin token (HTTP 401)" in r.errorMessage())
+      assert(r.errorMessage() == DssError.ShopifyAdminTokenRejected(401).message)
       assert(fakeShopify.createFulfillmentCalls.isEmpty())
     }
   }
@@ -536,13 +456,14 @@ class MonolithWebhookHandlersTest {
   @Test
   fun `tracking-update returns 401 naming the rejected token when Shopify refuses it`() {
     val fakeShopify = FakeShopifyGraphqlService().apply { orderForDssResult = Failure(ShopifyError.TokenRejected(401)) }
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
       val r = client.post(Paths.trackingUpdate) {
         contentType(ContentType.Application.Json)
         setBody(validTrackingRequest())
       }
       assert(r.status == HttpStatusCode.Unauthorized)
-      assert("rejected the shop's Admin token (HTTP 401)" in r.errorMessage())
+      assert(r.errorMessage() == DssError.ShopifyAdminTokenRejected(401).message)
+      assert(fakeShopify.createFulfillmentEventCalls.isEmpty())
     }
   }
 
@@ -552,7 +473,7 @@ class MonolithWebhookHandlersTest {
   @Test
   fun `sync-shipments returns 502 when the token lookup could not reach the monolith`() {
     val factory = FakeShopifyGraphqlServiceFactory(tokenSourceUnavailable = true)
-    withDssApp(deps(shopifyGraphqlServiceFactory = factory), authenticateAsMonolith = true) { client ->
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = factory), authenticateAsMonolith = true) { client ->
       val r = client.post(Paths.syncShipmentsWithFulfillments) {
         contentType(ContentType.Application.Json)
         setBody(validSyncRequest())
@@ -562,58 +483,13 @@ class MonolithWebhookHandlersTest {
     }
   }
 
-  /** The decoder's complaint quotes Shopify's body, which carries customer data: the monolith learns that it failed, not what it said. */
-  @Test
-  fun `sync-shipments answers an unreadable Shopify response without the body it quoted`() {
-    val fakeShopify = FakeShopifyGraphqlService().apply {
-      orderForDssResult = Failure(
-        ShopifyError.Undecodable("Unexpected JSON token at offset 12 at path: \$.data.order\nJSON input: {\"phone\":\"+31 6 1234 5678\"}"),
-      )
-    }
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
-      val r = client.post(Paths.syncShipmentsWithFulfillments) {
-        contentType(ContentType.Application.Json)
-        setBody(validSyncRequest())
-      }
-      assert(r.status == HttpStatusCode.BadGateway)
-      assert(r.errorMessage() == "Shopify's answer could not be read")
-    }
-  }
-
-  @Test
-  fun `sync-shipments returns 502 when Shopify cannot be reached`() {
-    val fakeShopify = FakeShopifyGraphqlService().apply { orderForDssResult = Failure(ShopifyError.Network("connection reset")) }
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
-      val r = client.post(Paths.syncShipmentsWithFulfillments) {
-        contentType(ContentType.Application.Json)
-        setBody(validSyncRequest())
-      }
-      assert(r.status == HttpStatusCode.BadGateway)
-      assert(r.errorMessage() == "connection reset")
-      assert(fakeShopify.createFulfillmentCalls.isEmpty())
-    }
-  }
-
-  @Test
-  fun `sync-shipments returns 502 when Shopify is throttling`() {
-    val fakeShopify = FakeShopifyGraphqlService().apply { orderForDssResult = Failure(ShopifyError.HttpError(429)) }
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
-      val r = client.post(Paths.syncShipmentsWithFulfillments) {
-        contentType(ContentType.Application.Json)
-        setBody(validSyncRequest())
-      }
-      assert(r.status == HttpStatusCode.BadGateway)
-      assert(r.errorMessage() == "Shopify answered HTTP 429")
-    }
-  }
-
   @Test
   fun `tracking-update returns 502 when the event creation fails at Shopify`() {
     val fakeShopify = FakeShopifyGraphqlService().apply {
       orderForDssResult = Success(orderWithFulfillment(id = 8000L, trackingNumbers = listOf("1Z999")))
       createFulfillmentEventResult = Failure(ShopifyError.GraphqlError("throttled"))
     }
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
       val r = client.post(Paths.trackingUpdate) {
         contentType(ContentType.Application.Json)
         setBody(validTrackingRequest())
@@ -621,57 +497,6 @@ class MonolithWebhookHandlersTest {
       assert(r.status == HttpStatusCode.BadGateway)
       assert(r.errorMessage() == "throttled")
       assert(fakeShopify.createFulfillmentEventCalls.size == 1)
-    }
-  }
-
-  // ---------- tracking-update validation, through the plugin ----------
-
-  @Test
-  fun `tracking-update returns 400 for a blank tracking_number before asking Shopify`() {
-    val fakeShopify = FakeShopifyGraphqlService().apply {
-      orderForDssResult = Success(orderWithFulfillment(id = 8000L, trackingNumbers = listOf("1Z999")))
-    }
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
-      val r = client.post(Paths.trackingUpdate) {
-        contentType(ContentType.Application.Json)
-        setBody(validTrackingRequest().copy(trackingNumber = "   "))
-      }
-      assert(r.status == HttpStatusCode.BadRequest)
-      assert("tracking_number is required" in r.errorMessage())
-      assert(fakeShopify.orderForDssCalls.isEmpty())
-    }
-  }
-
-  @Test
-  fun `tracking-update returns 400 for a non-positive shopify_order_id`() {
-    val fakeShopify = FakeShopifyGraphqlService().apply {
-      orderForDssResult = Success(orderWithFulfillment(id = 8000L, trackingNumbers = listOf("1Z999")))
-    }
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
-      val r = client.post(Paths.trackingUpdate) {
-        contentType(ContentType.Application.Json)
-        setBody(validTrackingRequest().copy(shopifyOrderId = 0L))
-      }
-      assert(r.status == HttpStatusCode.BadRequest)
-      assert("shopify_order_id" in r.errorMessage())
-      assert(fakeShopify.orderForDssCalls.isEmpty())
-    }
-  }
-
-  /** Shopify would refuse the date with a top-level error that reads as its own failure; the request is at fault, so a 400. */
-  @Test
-  fun `tracking-update returns 400 for a happened_at without an offset before asking Shopify`() {
-    val fakeShopify = FakeShopifyGraphqlService().apply {
-      orderForDssResult = Success(orderWithFulfillment(id = 8000L, trackingNumbers = listOf("1Z999")))
-    }
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
-      val r = client.post(Paths.trackingUpdate) {
-        contentType(ContentType.Application.Json)
-        setBody(validTrackingRequest().copy(happenedAt = "2026-04-02T08:30:00"))
-      }
-      assert(r.status == HttpStatusCode.BadRequest)
-      assert("happened_at" in r.errorMessage())
-      assert(fakeShopify.orderForDssCalls.isEmpty())
     }
   }
 
@@ -684,7 +509,7 @@ class MonolithWebhookHandlersTest {
       orderForDssResult = Success(minimalOrder())
       createFulfillmentResult = Success(ShopifyFulfillmentId(5003L))
     }
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
       val r = client.post(Paths.syncShipmentsWithFulfillments) {
         contentType(ContentType.Application.Json)
         setBody(
@@ -705,7 +530,7 @@ class MonolithWebhookHandlersTest {
       orderForDssResult = Success(minimalOrder())
       createFulfillmentResult = Success(ShopifyFulfillmentId(5004L))
     }
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
       val r = client.post(Paths.syncShipmentsWithFulfillments) {
         contentType(ContentType.Application.Json)
         setBody(
@@ -725,7 +550,7 @@ class MonolithWebhookHandlersTest {
       orderForDssResult = Success(orderWithFulfillment(id = 8000L, trackingNumbers = listOf("1Z999")))
       createFulfillmentEventResult = Success(ShopifyFulfillmentEventId(7002L))
     }
-    withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
       val r = client.post(Paths.trackingUpdate) {
         contentType(ContentType.Application.Json)
         setBody(
@@ -738,15 +563,6 @@ class MonolithWebhookHandlersTest {
     }
   }
 
-  // ---------- helpers ----------
-
-  /**
-   * Default graph: an empty token store and a [FakeShopifyGraphqlServiceFactory] that answers `Missing`
-   * for every shop — `forShop` therefore short-circuits to "missing token" (401). Tests that
-   * need a working service pass their own [shopifyGraphqlServiceFactory] (typically wrapping a
-   * [FakeShopifyGraphqlService]).
-   */
-
   // ---------- the shop on every log line ----------
 
   /** The handler's line comes after Shopify's answer, a suspension away from where the shop was resolved. */
@@ -758,7 +574,7 @@ class MonolithWebhookHandlersTest {
       orderForDssDelay = 20.milliseconds
     }
     val lines = capturingLogs {
-      withDssApp(deps(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+      withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
         val r = client.post(Paths.syncShipmentsWithFulfillments) {
           contentType(ContentType.Application.Json)
           setBody(validSyncRequest())
@@ -774,7 +590,7 @@ class MonolithWebhookHandlersTest {
   @ResourceLock(GLOBAL_LOG_REGISTRY)
   fun `sync-shipments with an unparseable shopify_subdomain logs its 400 without a shop`() {
     val lines = capturingLogs {
-      withDssApp(deps(mode = DssMode.DEV), authenticateAsMonolith = true) { client ->
+      withDssApp(testDependencies(config = testConfig(mode = DssMode.DEV)), authenticateAsMonolith = true) { client ->
         val r = client.post(Paths.syncShipmentsWithFulfillments) {
           contentType(ContentType.Application.Json)
           setBody(validSyncRequest().copy(shopifySubdomain = "!!invalid!!"))
@@ -787,18 +603,7 @@ class MonolithWebhookHandlersTest {
     assert(SHOP_MDC_KEY !in summary)
   }
 
-  private fun deps(
-    secret: String = defaultInternalSecret,
-    monolith: MonolithService = FakeMonolithService(),
-    shopTokens: InMemoryShopTokenStore = InMemoryShopTokenStore(),
-    shopifyGraphqlServiceFactory: ShopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = null),
-    mode: DssMode = DssMode.PROD,
-  ): DssDependencies = dssDependencies(
-    config = testConfig(monolithToDssApiKey = secret, mode = mode),
-    monolithService = monolith,
-    shopTokens = shopTokens,
-    shopifyGraphqlServiceFactory = shopifyGraphqlServiceFactory,
-  )
+  // ---------- helpers ----------
 
   /**
    * The `error` field of the contract's own [ApiError]. Substring-matching the raw body would
@@ -811,12 +616,7 @@ class MonolithWebhookHandlersTest {
       shopifySubdomain = "acme",
       shopifyOrderId = 1001L,
       shipments = listOf(
-        Shipment(
-          trackingNumber = "1Z999",
-          carrier = "UPS",
-          trackingUrl = null,
-          lineItems = listOf(ShipmentLineItem(productVariantId = 101L, quantity = 1)),
-        ),
+        shipment(),
       ),
     )
 

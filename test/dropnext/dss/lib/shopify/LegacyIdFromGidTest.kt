@@ -1,7 +1,7 @@
 package dropnext.dss.lib.shopify
 
 import dropnext.dss.domain.ShopifyOrderId
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
 
 
 class LegacyIdFromGidTest {

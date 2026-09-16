@@ -3,7 +3,7 @@ package dropnext.dss.boot.config
 import dropnext.dss.domain.DssToMonolithApiKey
 import dropnext.dss.domain.LogflareApiKey
 import dropnext.dss.domain.MonolithToDssApiKey
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
 
 
 /** Every required variable with a value that passes the placeholder checks; tests override one key at a time. */
@@ -116,28 +116,40 @@ class ConfigTest {
   // ---------- validation ----------
 
   @Test
-  fun `a missing required variable fails loud`() {
-    val failure = runCatching { Config.from(requiredEnv() - "MONOLITH_BASE_URL") }.exceptionOrNull()
-    assert(failure is IllegalStateException)
-    assert("MONOLITH_BASE_URL" in failure!!.message!!)
+  fun `every required variable fails loud when it is missing`() {
+    requiredEnv().keys.forEach { name ->
+      val failure = runCatching { Config.from(requiredEnv() - name) }.exceptionOrNull()
+      assert(failure is IllegalStateException)
+      assert(failure?.message == "Set env var $name.")
+    }
   }
 
   @Test
   fun `a placeholder client id is rejected`() {
     val failure = runCatching { Config.from(requiredEnv() + ("SHOPIFY_APP_CLIENT_ID" to "your_client_id")) }.exceptionOrNull()
     assert(failure is IllegalStateException)
+    assert(failure?.message == "SHOPIFY_APP_CLIENT_ID is placeholder.")
+  }
+
+  @Test
+  fun `a placeholder client secret is rejected`() {
+    val failure = runCatching { Config.from(requiredEnv() + ("SHOPIFY_APP_CLIENT_SECRET" to "change_me")) }.exceptionOrNull()
+    assert(failure is IllegalStateException)
+    assert(failure?.message == "SHOPIFY_APP_CLIENT_SECRET is placeholder.")
   }
 
   @Test
   fun `a placeholder MONOLITH_TO_DSS_API_KEY is rejected`() {
     val failure = runCatching { Config.from(requiredEnv() + ("MONOLITH_TO_DSS_API_KEY" to "change_this_to_a_long_random_secret")) }.exceptionOrNull()
     assert(failure is IllegalStateException)
+    assert(failure?.message == "MONOLITH_TO_DSS_API_KEY is still a placeholder value.")
   }
 
   @Test
   fun `a short MONOLITH_TO_DSS_API_KEY is rejected`() {
     val failure = runCatching { Config.from(requiredEnv() + ("MONOLITH_TO_DSS_API_KEY" to "short")) }.exceptionOrNull()
     assert(failure is IllegalStateException)
+    assert(failure?.message == "MONOLITH_TO_DSS_API_KEY must be at least 32 characters.")
   }
 
   /** Ktor parses the header before the token is compared, so a value it cannot parse fails every call with a `400`. */
@@ -161,16 +173,26 @@ class ConfigTest {
     assert(Config.from(requiredEnv() + ("DSS_TO_MONOLITH_API_KEY" to "short-but-fine")).dssToMonolithApiKey == DssToMonolithApiKey("short-but-fine"))
   }
 
+  /** The template's example host is a value nobody meant to deploy, even though it is a well-formed https URL. */
+  @Test
+  fun `the template's example DSS_BASE_URL is rejected`() {
+    val failure = runCatching { Config.from(requiredEnv() + ("DSS_BASE_URL" to "https://dss.example.com")) }.exceptionOrNull()
+    assert(failure is IllegalStateException)
+    assert(failure?.message == "DSS_BASE_URL is placeholder.")
+  }
+
   @Test
   fun `a plain-http DSS_BASE_URL is rejected`() {
     val failure = runCatching { Config.from(requiredEnv() + ("DSS_BASE_URL" to "http://dss.example.org")) }.exceptionOrNull()
     assert(failure is IllegalStateException)
+    assert(failure?.message == "DSS_BASE_URL must be an absolute https:// URL, was 'http://dss.example.org'.")
   }
 
   @Test
   fun `a DSS_BASE_URL without a host is rejected`() {
     val failure = runCatching { Config.from(requiredEnv() + ("DSS_BASE_URL" to "https://")) }.exceptionOrNull()
     assert(failure is IllegalStateException)
+    assert(failure?.message == "DSS_BASE_URL must be an absolute https:// URL, was 'https://'.")
   }
 
   /** Appended to the base URL for Shopify's redirect and mounted as a route: anything but a plain absolute path breaks one of them. */
@@ -187,7 +209,12 @@ class ConfigTest {
   @Test
   fun `a plain-http monolith url is rejected unless explicitly allowed`() {
     val insecure = requiredEnv() + ("MONOLITH_BASE_URL" to "http://localhost:8080")
-    assert(runCatching { Config.from(insecure) }.exceptionOrNull() is IllegalStateException)
+    val refused = runCatching { Config.from(insecure) }.exceptionOrNull()
+    assert(refused is IllegalStateException)
+    assert(
+      refused?.message ==
+        "MONOLITH_BASE_URL must use https:// (or set DSS_ALLOW_INSECURE_MONOLITH=true with DSS_MODE=DEV for local dev).",
+    )
     val allowed = Config.from(insecure + ("DSS_ALLOW_INSECURE_MONOLITH" to "true") + ("DSS_MODE" to "DEV"))
     assert(allowed.monolithBaseUrl == "http://localhost:8080")
     assert(allowed.allowInsecureMonolithUrl)
@@ -210,7 +237,9 @@ class ConfigTest {
     val failure = runCatching { Config.from(flagged) }.exceptionOrNull()
     assert(failure is IllegalStateException)
     assert("DSS_ALLOW_INSECURE_MONOLITH" in failure!!.message.orEmpty())
-    assert(runCatching { Config.from(flagged + ("DSS_MODE" to "PROD")) }.exceptionOrNull() is IllegalStateException)
+    val explicitProd = runCatching { Config.from(flagged + ("DSS_MODE" to "PROD")) }.exceptionOrNull()
+    assert(explicitProd is IllegalStateException)
+    assert("DSS_ALLOW_INSECURE_MONOLITH" in explicitProd?.message.orEmpty())
     assert(Config.from(flagged + ("DSS_MODE" to "DEV")).allowInsecureMonolithUrl)
   }
 
@@ -245,7 +274,7 @@ class ConfigTest {
     assert(Config.from(requiredEnv() + ("MONOLITH_API_PREFIX" to "/")).monolithApiPrefix == null)
   }
 
-  // ---------- the value normalisation every variable goes through ----------
+  // ---------- the value normalization every variable goes through ----------
 
   @Test
   fun `null input returns null`() {

@@ -23,8 +23,8 @@ import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
 import io.ktor.server.routing.routing
 import io.ktor.server.testing.testApplication
-import kotlin.test.Test
 import kotlinx.coroutines.delay
+import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.parallel.ResourceLock
 
 

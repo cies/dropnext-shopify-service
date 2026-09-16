@@ -3,7 +3,7 @@ package dropnext.dss.workflow
 import dropnext.dss.lib.monolith.MonolithError
 import dropnext.dss.lib.monolith.MonolithErrorBody
 import dropnext.dss.lib.shopify.graphql.ShopifyError
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
 
 
 /** Which outcomes Shopify is asked to redeliver: the webhook handler's `502` or `200` is read off this. */

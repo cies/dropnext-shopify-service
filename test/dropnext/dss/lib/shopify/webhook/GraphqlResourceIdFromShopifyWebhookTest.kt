@@ -1,7 +1,7 @@
 package dropnext.dss.lib.shopify.webhook
 
 import dropnext.dss.domain.ShopifyProductId
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
 
 
 class GraphqlResourceIdFromShopifyWebhookTest {

@@ -4,6 +4,7 @@ import dropnext.dss.contract.Shipment
 import dropnext.dss.contract.ShipmentLineItem
 import dropnext.dss.testutil.fixture.diagramCrossFoOrder
 import dropnext.dss.testutil.fixture.diagramCrossFoShipment
+import dropnext.dss.testutil.fixture.foLineItemConnection
 import dropnext.dss.testutil.fixture.fulfillment
 import dropnext.dss.testutil.fixture.openFulfillmentOrder
 import dropnext.dss.testutil.fixture.orderWithFulfillmentOrders
@@ -17,13 +18,14 @@ import dropnext.graphql.generated.getorderfordss.FulfillmentOrderLineItemEdge
 import dropnext.graphql.generated.getorderfordss.Order
 import dropnext.graphql.generated.getorderfordss.ProductVariant
 import dropnext.graphql.generated.inputs.FulfillmentOrderLineItemInput
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
+
 
 class MatchShipmentToFulfillmentOrdersTest {
 
   @Test
   fun `matches open fulfillment order line items`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 2))
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 2))
     val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 1))
     assert(result is ShipmentMatchResult.Ok)
     val ok = result as ShipmentMatchResult.Ok
@@ -37,7 +39,7 @@ class MatchShipmentToFulfillmentOrdersTest {
     val closed = FulfillmentOrder(
       id = "gid://shopify/FulfillmentOrder/302",
       status = FulfillmentOrderStatus.CLOSED,
-      lineItems = foLineItems(variantId = 101L, remaining = 2),
+      lineItems = foLineItemConnection(variantId = 101L, remaining = 2),
     )
     val order = orderWithFulfillmentOrders(closed)
     val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 1))
@@ -49,23 +51,15 @@ class MatchShipmentToFulfillmentOrdersTest {
 
   @Test
   fun `returns user error when quantity exceeds remainingQuantity`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 1))
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 1))
     val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 2))
     assert(result is ShipmentMatchResult.UserError)
   }
 
   @Test
   fun `partial match skips unknown variant`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 2))
-    val shipment = Shipment(
-      trackingNumber = "1Z999",
-      carrier = "UPS",
-      trackingUrl = null,
-      lineItems = listOf(
-        ShipmentLineItem(productVariantId = 101L, quantity = 1),
-        ShipmentLineItem(productVariantId = 999L, quantity = 1),
-      ),
-    )
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 2))
+    val shipment = shipment(lines = listOf(101L to 1, 999L to 1))
     val result = matchOneShipment(order, shipment) as ShipmentMatchResult.Ok
     assert(result.groups.size == 1)
     assert(result.groups.values.single().single().quantity == 1)
@@ -76,7 +70,7 @@ class MatchShipmentToFulfillmentOrdersTest {
 
   @Test
   fun `all lines skipped returns empty groups`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 2))
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 2))
     val result = matchOneShipment(order, shipment(variantId = 999L, quantity = 1))
     assert(result is ShipmentMatchResult.Ok)
     val ok = result as ShipmentMatchResult.Ok
@@ -89,11 +83,12 @@ class MatchShipmentToFulfillmentOrdersTest {
     val fo = FulfillmentOrder(
       id = "gid://shopify/FulfillmentOrder/301",
       status = FulfillmentOrderStatus.IN_PROGRESS,
-      lineItems = foLineItems(variantId = 101L, remaining = 2),
+      lineItems = foLineItemConnection(variantId = 101L, remaining = 2),
     )
     val order = orderWithFulfillmentOrders(fo)
     val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 1))
-    assert(result is ShipmentMatchResult.Ok)
+    // An all-skipped result is `Ok` too, so only the planned line tells an open fulfillment order from a closed one.
+    assert(result == ShipmentMatchResult.Ok(groups = mapOf(fulfillmentOrderGid(301L) to listOf(lineInput(401L, 1))), skipped = emptyList()))
   }
 
   @Test
@@ -101,23 +96,15 @@ class MatchShipmentToFulfillmentOrdersTest {
     val fo1 = FulfillmentOrder(
       id = "gid://shopify/FulfillmentOrder/301",
       status = FulfillmentOrderStatus.OPEN,
-      lineItems = foLineItems(variantId = 101L, remaining = 5),
+      lineItems = foLineItemConnection(variantId = 101L, remaining = 5),
     )
     val fo2 = FulfillmentOrder(
       id = "gid://shopify/FulfillmentOrder/302",
       status = FulfillmentOrderStatus.OPEN,
-      lineItems = foLineItems(variantId = 202L, remaining = 5),
+      lineItems = foLineItemConnection(variantId = 202L, remaining = 5),
     )
     val order = orderWithFulfillmentOrders(fo1, fo2)
-    val shipment = Shipment(
-      trackingNumber = "TRK",
-      carrier = "UPS",
-      trackingUrl = null,
-      lineItems = listOf(
-        ShipmentLineItem(productVariantId = 101L, quantity = 2),
-        ShipmentLineItem(productVariantId = 202L, quantity = 1),
-      ),
-    )
+    val shipment = shipment(tracking = "TRK", lines = listOf(101L to 2, 202L to 1))
     val result = matchOneShipment(order, shipment) as ShipmentMatchResult.Ok
     assert(result.groups.size == 2)
     assert(result.groups.entries.single { it.key.endsWith("301") }.value.single().quantity == 2)
@@ -125,35 +112,8 @@ class MatchShipmentToFulfillmentOrdersTest {
   }
 
   @Test
-  fun `diagram cross-FO shipment`() {
-    val fo1 = FulfillmentOrder(
-      id = "gid://shopify/FulfillmentOrder/301",
-      status = FulfillmentOrderStatus.OPEN,
-      lineItems = foLineItems(lineItemId = 401L, variantId = 1L, remaining = 5),
-    )
-    val fo2 = FulfillmentOrder(
-      id = "gid://shopify/FulfillmentOrder/302",
-      status = FulfillmentOrderStatus.OPEN,
-      lineItems = foLineItems(lineItemId = 402L, variantId = 5L, remaining = 5),
-    )
-    val order = orderWithFulfillmentOrders(fo1, fo2)
-    val shipment = Shipment(
-      trackingNumber = "TRK-A",
-      carrier = "UPS",
-      trackingUrl = null,
-      lineItems = listOf(
-        ShipmentLineItem(productVariantId = 1L, quantity = 1),
-        ShipmentLineItem(productVariantId = 5L, quantity = 1),
-      ),
-    )
-    val result = matchOneShipment(order, shipment) as ShipmentMatchResult.Ok
-    assert(result.groups.size == 2)
-    assert(result.skipped.isEmpty())
-  }
-
-  @Test
   fun `duplicate variant rows aggregated`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 5))
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 5))
     val shipment = Shipment(
       trackingNumber = "1Z999",
       carrier = "UPS",
@@ -173,45 +133,8 @@ class MatchShipmentToFulfillmentOrdersTest {
   }
 
   @Test
-  fun `cross-shipment over-allocation fails dry-run`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 2))
-    val shipments = listOf(
-      shipment(tracking = "TRK-1", variantId = 101L, quantity = 2),
-      shipment(tracking = "TRK-2", variantId = 101L, quantity = 1),
-    )
-    val result = dryRunAllShipments(order, shipments)
-    assert(result is DryRunResult.UserError)
-  }
-
-  @Test
-  fun `cross-shipment over-allocation vs remainingQuantity fails dry-run`() {
-    // remaining already reduced; payload must not use post-cancel totalQuantity
-    val order =
-      orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 1))
-    val shipments = listOf(
-      shipment(tracking = "TRK-1", variantId = 101L, quantity = 1),
-      shipment(tracking = "TRK-2", variantId = 101L, quantity = 1),
-    )
-    val result = dryRunAllShipments(order, shipments)
-    assert(result is DryRunResult.UserError)
-  }
-
-  @Test
-  fun `two qty-1 shipments match when remaining is 2`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 2))
-    val shipments = listOf(
-      shipment(tracking = "TRK-1", variantId = 101L, quantity = 1),
-      shipment(tracking = "TRK-2", variantId = 101L, quantity = 1),
-    )
-    val result = dryRunAllShipments(order, shipments) as DryRunResult.Ok
-    assert(result.perShipment.size == 2)
-    assert(result.perShipment.sumOf { it.skipped.size } == 0)
-    assert(result.perShipment.all { it.groups.isNotEmpty() })
-  }
-
-  @Test
   fun `zero remainingQuantity skips as ZERO_REMAINING`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 0))
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 0))
     val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 1))
     val ok = result as ShipmentMatchResult.Ok
     assert(ok.groups.isEmpty())
@@ -220,19 +143,25 @@ class MatchShipmentToFulfillmentOrdersTest {
 
   @Test
   fun `cross-shipment allocation within limits succeeds dry-run`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 3))
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 3))
     val shipments = listOf(
       shipment(tracking = "TRK-1", variantId = 101L, quantity = 2),
       shipment(tracking = "TRK-2", variantId = 101L, quantity = 1),
     )
-    val result = dryRunAllShipments(order, shipments) as DryRunResult.Ok
-    assert(result.perShipment.size == 2)
-    assert(result.perShipment.sumOf { it.skipped.size } == 0)
+    val result = dryRunAllShipments(order, shipments)
+    assert(
+      result == DryRunResult.Ok(
+        listOf(
+          ShipmentMatchResult.Ok(groups = mapOf(fulfillmentOrderGid(301L) to listOf(lineInput(401L, 2))), skipped = emptyList()),
+          ShipmentMatchResult.Ok(groups = mapOf(fulfillmentOrderGid(301L) to listOf(lineInput(401L, 1))), skipped = emptyList()),
+        ),
+      ),
+    )
   }
 
   @Test
-  fun `null variant legacyResourceId skipped safely`() {
-    val badLine =
+  fun `an unreadable variant id on one line leaves the variant's readable line matched`() {
+    val unreadableLine =
       FulfillmentOrderLineItem(
         id = "gid://shopify/FulfillmentOrderLineItem/401",
         remainingQuantity = 5,
@@ -240,18 +169,18 @@ class MatchShipmentToFulfillmentOrdersTest {
           legacyResourceId = "not-a-number",
         ),
       )
-    val goodFo =
+    val unreadableFo =
       FulfillmentOrder(
         id = "gid://shopify/FulfillmentOrder/301",
         status = FulfillmentOrderStatus.OPEN,
         lineItems = FulfillmentOrderLineItemConnection(
-          edges = listOf(FulfillmentOrderLineItemEdge(node = badLine)),
+          edges = listOf(FulfillmentOrderLineItemEdge(node = unreadableLine)),
         ),
       )
-    val goodFo2 = openFo(variantId = 101L, remaining = 5, foId = 302L, lineItemId = 402L)
-    val order = orderWithFulfillmentOrders(goodFo, goodFo2)
+    val readableFo = openFulfillmentOrder(variantId = 101L, remaining = 5, foId = 302L, lineItemId = 402L)
+    val order = orderWithFulfillmentOrders(unreadableFo, readableFo)
     val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 1))
-    assert(result is ShipmentMatchResult.Ok)
+    assert(result == ShipmentMatchResult.Ok(groups = mapOf(fulfillmentOrderGid(302L) to listOf(lineInput(402L, 1))), skipped = emptyList()))
   }
 
   @Test
@@ -259,12 +188,12 @@ class MatchShipmentToFulfillmentOrdersTest {
     val closedFo = FulfillmentOrder(
       id = "gid://shopify/FulfillmentOrder/301",
       status = FulfillmentOrderStatus.CLOSED,
-      lineItems = foLineItems(variantId = 101L, remaining = 0),
+      lineItems = foLineItemConnection(variantId = 101L, remaining = 0),
     )
     val openFoZero = FulfillmentOrder(
       id = "gid://shopify/FulfillmentOrder/302",
       status = FulfillmentOrderStatus.OPEN,
-      lineItems = foLineItems(lineItemId = 402L, variantId = 101L, remaining = 0),
+      lineItems = foLineItemConnection(lineItemId = 402L, variantId = 101L, remaining = 0),
     )
     val order = orderWithFulfillmentOrders(closedFo, openFoZero)
     val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 1))
@@ -279,12 +208,12 @@ class MatchShipmentToFulfillmentOrdersTest {
     val foLow = FulfillmentOrder(
       id = "gid://shopify/FulfillmentOrder/301",
       status = FulfillmentOrderStatus.OPEN,
-      lineItems = foLineItems(lineItemId = 401L, variantId = 101L, remaining = 1),
+      lineItems = foLineItemConnection(lineItemId = 401L, variantId = 101L, remaining = 1),
     )
     val foHigh = FulfillmentOrder(
       id = "gid://shopify/FulfillmentOrder/302",
       status = FulfillmentOrderStatus.OPEN,
-      lineItems = foLineItems(lineItemId = 402L, variantId = 101L, remaining = 5),
+      lineItems = foLineItemConnection(lineItemId = 402L, variantId = 101L, remaining = 5),
     )
     val order = orderWithFulfillmentOrders(foLow, foHigh)
     val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 2))
@@ -294,14 +223,14 @@ class MatchShipmentToFulfillmentOrdersTest {
 
   @Test
   fun `zero quantity (bypassed validation) returns user error`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 2))
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 2))
     val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 0))
     assert(result is ShipmentMatchResult.UserError)
   }
 
   @Test
   fun `skipped line includes variant id and tracking number`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 2))
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 2))
     val result = matchOneShipment(order, shipment(variantId = 999L, quantity = 1))
     val ok = result as ShipmentMatchResult.Ok
     val skipped = ok.skipped.single()
@@ -311,7 +240,7 @@ class MatchShipmentToFulfillmentOrdersTest {
 
   @Test
   fun `dry-run reports total skipped lines across shipments`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 2))
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 2))
     val shipments =
       listOf(
         Shipment(
@@ -342,11 +271,12 @@ class MatchShipmentToFulfillmentOrdersTest {
         "gid://shopify/FulfillmentOrder/302"
       )
     )
+    assert(result.skipped.isEmpty())
   }
 
   @Test
   fun `a unit already planned on the line counts against what a later shipment may take`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 2))
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 2))
     val planned = listOf(
       FulfillmentOrderLineItemInput(
         id = "gid://shopify/FulfillmentOrderLineItem/401",
@@ -368,7 +298,7 @@ class MatchShipmentToFulfillmentOrdersTest {
    */
   @Test
   fun `a unit an earlier shipment of the payload claimed is an error, not a zero_remaining skip`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 1))
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 1))
     val shipments = listOf(
       shipment(tracking = "TRK-1", variantId = 101L, quantity = 1),
       shipment(tracking = "TRK-2", variantId = 101L, quantity = 1),
@@ -386,8 +316,8 @@ class MatchShipmentToFulfillmentOrdersTest {
   @Test
   fun `a quantity larger than any single open line is spread over the lines that cover it together`() {
     val order = orderWithFulfillmentOrders(
-      openFo(variantId = 101L, remaining = 1, foId = 301L, lineItemId = 401L),
-      openFo(variantId = 101L, remaining = 1, foId = 302L, lineItemId = 402L),
+      openFulfillmentOrder(variantId = 101L, remaining = 1, foId = 301L, lineItemId = 401L),
+      openFulfillmentOrder(variantId = 101L, remaining = 1, foId = 302L, lineItemId = 402L),
     )
     val ok = matchOneShipment(order, shipment(variantId = 101L, quantity = 2)) as ShipmentMatchResult.Ok
     assert(
@@ -402,9 +332,9 @@ class MatchShipmentToFulfillmentOrdersTest {
   @Test
   fun `a spread takes all of the line with the most left before the next, the first in Graphql order on a tie`() {
     val order = orderWithFulfillmentOrders(
-      openFo(variantId = 101L, remaining = 2, foId = 301L, lineItemId = 401L),
-      openFo(variantId = 101L, remaining = 3, foId = 302L, lineItemId = 402L),
-      openFo(variantId = 101L, remaining = 2, foId = 303L, lineItemId = 403L),
+      openFulfillmentOrder(variantId = 101L, remaining = 2, foId = 301L, lineItemId = 401L),
+      openFulfillmentOrder(variantId = 101L, remaining = 3, foId = 302L, lineItemId = 402L),
+      openFulfillmentOrder(variantId = 101L, remaining = 2, foId = 303L, lineItemId = 403L),
     )
     val ok = matchOneShipment(order, shipment(variantId = 101L, quantity = 4)) as ShipmentMatchResult.Ok
     assert(
@@ -418,8 +348,8 @@ class MatchShipmentToFulfillmentOrdersTest {
   @Test
   fun `a quantity above what the variant's open lines have left together is refused, naming that total`() {
     val order = orderWithFulfillmentOrders(
-      openFo(variantId = 101L, remaining = 1, foId = 301L, lineItemId = 401L),
-      openFo(variantId = 101L, remaining = 1, foId = 302L, lineItemId = 402L),
+      openFulfillmentOrder(variantId = 101L, remaining = 1, foId = 301L, lineItemId = 401L),
+      openFulfillmentOrder(variantId = 101L, remaining = 1, foId = 302L, lineItemId = 402L),
     )
     val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 3))
     assert("variant 101 requested quantity 3 exceeds remaining 2" in (result as ShipmentMatchResult.UserError).messages.single())
@@ -428,8 +358,8 @@ class MatchShipmentToFulfillmentOrdersTest {
   @Test
   fun `units a spread claimed count against a later shipment of the payload`() {
     val order = orderWithFulfillmentOrders(
-      openFo(variantId = 101L, remaining = 1, foId = 301L, lineItemId = 401L),
-      openFo(variantId = 101L, remaining = 1, foId = 302L, lineItemId = 402L),
+      openFulfillmentOrder(variantId = 101L, remaining = 1, foId = 301L, lineItemId = 401L),
+      openFulfillmentOrder(variantId = 101L, remaining = 1, foId = 302L, lineItemId = 402L),
     )
     val shipments = listOf(
       shipment(tracking = "TRK-1", variantId = 101L, quantity = 2),
@@ -508,7 +438,7 @@ class MatchShipmentToFulfillmentOrdersTest {
 
   @Test
   fun `a shipment whose tracking number is on a live fulfillment is skipped whole and plans nothing`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 1))
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 1))
       .copy(fulfillments = listOf(fulfillment(8000L, listOf("TRK-A"))))
     val result = dryRunAllShipments(order, listOf(shipment(tracking = "TRK-A", variantId = 101L, quantity = 1))) as DryRunResult.Ok
     val skipped = result.perShipment.single()
@@ -520,7 +450,7 @@ class MatchShipmentToFulfillmentOrdersTest {
   /** The re-send the monolith makes after a partial failure: the shipment already synced must not take the unit the next one needs. */
   @Test
   fun `a shipment skipped by its tracking number claims no quantity from a later shipment of the payload`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 1))
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 1))
       .copy(fulfillments = listOf(fulfillment(8000L, listOf("TRK-A"))))
     val shipments = listOf(
       shipment(tracking = "TRK-A", variantId = 101L, quantity = 1),
@@ -532,7 +462,7 @@ class MatchShipmentToFulfillmentOrdersTest {
 
   @Test
   fun `a shipment on a live fulfillment is skipped rather than refused for a quantity no longer left`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 1))
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 1))
       .copy(fulfillments = listOf(fulfillment(8000L, listOf("TRK-A"))))
     val result = dryRunAllShipments(order, listOf(shipment(tracking = "TRK-A", variantId = 101L, quantity = 2)))
     assert(result is DryRunResult.Ok)
@@ -540,7 +470,7 @@ class MatchShipmentToFulfillmentOrdersTest {
 
   @Test
   fun `a shipment whose tracking number is only on a cancelled fulfillment is matched like a new one`() {
-    val order = orderWithFulfillmentOrders(openFo(variantId = 101L, remaining = 1))
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 1))
       .copy(fulfillments = listOf(fulfillment(8000L, listOf("TRK-A"), status = FulfillmentStatus.CANCELLED)))
     val result = dryRunAllShipments(order, listOf(shipment(tracking = "TRK-A", variantId = 101L, quantity = 1))) as DryRunResult.Ok
     val matched = result.perShipment.single()
@@ -548,50 +478,10 @@ class MatchShipmentToFulfillmentOrdersTest {
     assert(matched.groups.values.flatten().single().quantity == 1)
   }
 
-  private fun openFo(
-    variantId: Long,
-    remaining: Int,
-    foId: Long = 301L,
-    lineItemId: Long = 401L,
-  ): FulfillmentOrder = openFulfillmentOrder(
-    foId = foId,
-    lineItemId = lineItemId,
-    variantId = variantId,
-    remaining = remaining,
-  )
+  private fun fulfillmentOrderGid(id: Long): String = "gid://shopify/FulfillmentOrder/$id"
 
-  private fun foLineItems(
-    variantId: Long,
-    remaining: Int,
-  ): FulfillmentOrderLineItemConnection = foLineItems(401L, variantId, remaining)
-
-  private fun foLineItems(
-    lineItemId: Long,
-    variantId: Long,
-    remaining: Int,
-  ): FulfillmentOrderLineItemConnection = foLineItems(
-    lineItemId,
-    ProductVariant(
-      legacyResourceId = variantId.toString(),
-    ),
-    remaining,
-  )
-
-  private fun foLineItems(
-    lineItemId: Long,
-    variant: ProductVariant,
-    remaining: Int,
-  ) = FulfillmentOrderLineItemConnection(
-    edges = listOf(
-      FulfillmentOrderLineItemEdge(
-        node = FulfillmentOrderLineItem(
-          id = "gid://shopify/FulfillmentOrderLineItem/$lineItemId",
-          remainingQuantity = remaining,
-          variant = variant,
-        ),
-      ),
-    ),
-  )
+  private fun lineInput(lineItemId: Long, quantity: Int): FulfillmentOrderLineItemInput =
+    FulfillmentOrderLineItemInput(id = "gid://shopify/FulfillmentOrderLineItem/$lineItemId", quantity = quantity)
 
   /** One shipment against an order with nothing planned before it; production goes through `dryRunAllShipments`. */
   private fun matchOneShipment(order: Order, shipment: Shipment): ShipmentMatchResult =

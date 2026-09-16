@@ -1,7 +1,8 @@
 package dropnext.dss.lib.shopify.webhook
 
 import dropnext.dss.testutil.fixture.webhookSubscriptionStatus
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
+
 
 class ShopifyWebhookTopicTest {
 

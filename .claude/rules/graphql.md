@@ -29,7 +29,7 @@ These must agree, and the compiler only checks the first:
 - `endpoint = "https://shopify.dev/admin-graphql-direct-proxy/<version>"` on `tasks.graphqlIntrospectSchema` in
   `build.gradle.kts` (introspection source; codegen itself reads the committed schema, so a build never downloads),
 - `Config.SHOPIFY_API_VERSION` in `config/Config.kt`, the version the service speaks (a constant, not a setting),
-- nothing in `test/`: `FakeShopifyGraphqlServer.shopUrl()` and `shopifyGraphqlUrl(port)` derive the version from
+- nothing in `test/`: `shopifyGraphqlUrl(port)` and `shopifyAdminGraphqlUrl(shop)` derive the version from
   `Config.SHOPIFY_API_VERSION`. Two literals are deliberate and stay: the URL-shape
   assertion in `OutBoundShopifyOAuthPathsTest`, and the off-default version in
   `HttpShopifyGraphqlServiceFactoryTest`, which exists to prove the factory uses the version it was configured with.

@@ -94,8 +94,14 @@ logbackClassic = { group = "ch.qos.logback", name = "logback-classic", version.r
 
 # Test dependencies
 junitJupiterEngine = { group = "org.junit.jupiter", name = "junit-jupiter-engine", version.ref = "junitVersion" }
+# The platform's own launcher API, for the `LauncherSessionListener` that warms the HTTP stack once per test JVM.
+# Already on the test runtime classpath — Gradle needs it to run tests at all — so this only makes it compilable against.
+junitPlatformLauncher = { group = "org.junit.platform", name = "junit-platform-launcher", version.ref = "junitVersion" }
 konsist = { group = "com.lemonappdev", name = "konsist", version.ref = "konsistVersion" }
 ktorServerTestHost = { group = "io.ktor", name = "ktor-server-test-host", version.ref = "ktorVersion" }
+# Virtual time (`runTest`), so the webhook budget tests assert the policy instead of waiting out real seconds.
+# Already pulled in by `ktor-server-test-host` at this very version; no reflection (it is coroutines machinery).
+kotlinxCoroutinesTest = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "kotlinxCoroutinesVersion" }
 
 
 [plugins]

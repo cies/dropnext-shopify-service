@@ -1,28 +1,17 @@
 package dropnext.dss.handler
 
-import dropnext.dss.DssDependencies
-import dropnext.dss.boot.config.Config
-import dropnext.dss.boot.warmup.WarmUp
-import dropnext.dss.dssDependencies
-import dropnext.dss.lib.shopify.token.InMemoryShopTokenStore
 import dropnext.dss.path.Paths
-import dropnext.dss.testutil.fake.FakeMonolithService
-import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
-import dropnext.dss.testutil.fake.FakeShopifyGraphqlServiceFactory
+import dropnext.dss.testutil.fixture.TEST_MONOLITH_TO_DSS_API_KEY
 import dropnext.dss.testutil.fixture.testConfig
+import dropnext.dss.testutil.fixture.testDependencies
 import dropnext.dss.testutil.helper.withDssApp
 import io.ktor.client.call.body
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpStatusCode
-import kotlin.time.Duration.Companion.seconds
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Test
-
-
-private val monolithToDssApiKey = "d".repeat(32)
 
 
 /**
@@ -33,7 +22,7 @@ private val monolithToDssApiKey = "d".repeat(32)
 class DiagnosticsHandlersTest {
 
   @Test
-  fun `the index lists every route the service serves`() = withDssApp(deps()) { client ->
+  fun `the index lists every route the service serves`() = withDssApp(testDependencies()) { client ->
     val body = client.get(Paths.index).bodyAsText()
     assert(Paths.health in body)
     assert(Paths.webhooksShopify in body)
@@ -44,40 +33,26 @@ class DiagnosticsHandlersTest {
   }
 
   @Test
-  fun `health answers ok and names the running version`() = withDssApp(deps()) { client ->
+  fun `health answers ok and names the running version`() = withDssApp(testDependencies()) { client ->
     val r = client.get(Paths.health)
     assert(r.status == HttpStatusCode.OK)
-    val body = r.bodyAsText()
-    assert("\"status\":\"ok\"" in body)
-    assert("\"version\":\"test-version\"" in body)
+    val body = r.body<JsonObject>()
+    assert(body["status"]!!.jsonPrimitive.content == "ok")
+    assert(body["version"]!!.jsonPrimitive.content == "test-version")
   }
 
-  /** The same shape with another status and a `503`, so the load balancer's `200` matcher keeps a warming task out of rotation. */
+  /** The base url is the next case's, under the key the monolith reads. */
   @Test
-  fun `health answers 503 warming_up until the warm-up is done`() {
-    val gate = CompletableDeferred<Unit>()
-    withDssApp(deps(), warmUp = WarmUp(5.seconds) { gate.await() }) { client ->
-      val r = client.get(Paths.health)
-      assert(r.status == HttpStatusCode.ServiceUnavailable)
-      val body = r.body<JsonObject>()
-      assert(body["status"]!!.jsonPrimitive.content == "warming_up")
-      assert(body["version"]!!.jsonPrimitive.content == "test-version")
-      gate.complete(Unit)
-    }
-  }
-
-  @Test
-  fun `the api status summary reports the bind address and the base url`() = withDssApp(deps()) { client ->
+  fun `the api status summary reports ok and the bind address`() = withDssApp(testDependencies()) { client ->
     val r = client.get(Paths.api)
     assert(r.status == HttpStatusCode.OK)
-    val body = r.bodyAsText()
-    assert("\"status\":\"ok\"" in body)
-    assert("0.0.0.0:8080" in body)
-    assert("https://dss.test" in body)
+    val body = r.body<JsonObject>()
+    assert(body["status"]!!.jsonPrimitive.content == "ok")
+    assert(body["bind"]!!.jsonPrimitive.content == "0.0.0.0:8080")
   }
 
   @Test
-  fun `the api status summary answers the base url and the redirect path under snake_case keys`() = withDssApp(deps()) { client ->
+  fun `the api status summary answers the base url and the redirect path under snake_case keys`() = withDssApp(testDependencies()) { client ->
     val r = client.get(Paths.api)
     assert(r.status == HttpStatusCode.OK)
     val body = r.body<JsonObject>()
@@ -94,35 +69,21 @@ class DiagnosticsHandlersTest {
   fun `the api status summary carries no secret`() {
     val config = testConfig(
       appClientSecret = "shpss_app_secret_value",
-      monolithToDssApiKey = monolithToDssApiKey,
       dssToMonolithApiKey = "mono_api_key_value",
     )
-    withDssApp(deps(config = config)) { client ->
+    withDssApp(testDependencies(config = config)) { client ->
       val body = client.get(Paths.api).bodyAsText()
       assert("shpss_app_secret_value" !in body)
       assert("mono_api_key_value" !in body)
-      assert(monolithToDssApiKey !in body)
+      assert(TEST_MONOLITH_TO_DSS_API_KEY !in body)
     }
   }
 
   @Test
   fun `the redirect url endpoint answers the url Shopify is configured to call back`() =
-    withDssApp(deps()) { client ->
+    withDssApp(testDependencies()) { client ->
       val r = client.get(Paths.apiRedirectUrl)
       assert(r.status == HttpStatusCode.OK)
       assert(r.bodyAsText() == "https://dss.test/oauth/callback")
     }
-
-  // ---------- helpers ----------
-
-  /** Diagnostics look nothing up for a shop; the fakes only keep the graph from building clients that reach out. */
-  private fun deps(config: Config = testConfig(monolithToDssApiKey = monolithToDssApiKey)): DssDependencies {
-    val tokens = InMemoryShopTokenStore()
-    return dssDependencies(
-      config = config,
-      monolithService = FakeMonolithService(),
-      shopTokens = tokens,
-      shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = FakeShopifyGraphqlService(), tokens = tokens),
-    )
-  }
 }

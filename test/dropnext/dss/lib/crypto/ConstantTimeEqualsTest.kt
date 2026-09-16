@@ -1,6 +1,7 @@
 package dropnext.dss.lib.crypto
 
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
+
 
 class ConstantTimeEqualsTest {
 

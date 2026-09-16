@@ -59,6 +59,7 @@ suspend fun installShop(
     is Success -> counted.value.also {
       log.info { "Product count after OAuth: products=${it.count} exact=${it.isExact}" }
     }
+
     is Failure -> {
       log.warn { "Product count after OAuth failed: ${counted.reason.message}" }
       null
@@ -99,9 +100,14 @@ suspend fun persistTokenToMonolith(
     is Failure -> {
       logMonolithFailure("putStoreApiKey", result.reason)
       when (val error = result.reason) {
-        is MonolithError.Rejected -> MonolithPersistOutcome.Failed(httpStatus = error.status, detail = error.body.message)
-        is MonolithError.Undecodable -> MonolithPersistOutcome.Failed(httpStatus = error.status, detail = error.message)
-        is MonolithError.Transport -> MonolithPersistOutcome.Failed(httpStatus = null, detail = error.message)
+        is MonolithError.Rejected ->
+          MonolithPersistOutcome.Failed(httpStatus = error.status, detail = error.body.message)
+
+        is MonolithError.Undecodable ->
+          MonolithPersistOutcome.Failed(httpStatus = error.status, detail = error.message)
+
+        is MonolithError.Transport ->
+          MonolithPersistOutcome.Failed(httpStatus = null, detail = error.message)
       }
     }
   }

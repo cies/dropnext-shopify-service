@@ -92,6 +92,16 @@ tasks {
   withType<Test> {
     useJUnitPlatform()
 
+    // `ArchitectureTest` and `TestSuiteArchitectureTest` read `src/` and `test/` as text, so the sources are an input
+    // of this task as much as the classes are. Without this Gradle keys the task on the bytecode alone, and a change
+    // that leaves the bytecode identical — an import swapped for a typealias of itself, a file renamed, a comment
+    // edited — is served from the build cache with the rules never run. That is not hypothetical: it is exactly how
+    // `import kotlin.test.Test` hides, since it compiles to the same annotation as the JUnit one.
+    inputs.files(
+      fileTree("src") { include("**/*.kt") },
+      fileTree("test") { include("**/*.kt") },
+    ).withPropertyName("architectureRuleSources").withPathSensitivity(PathSensitivity.RELATIVE)
+
     // JaCoCo attaches its agent to every `Test` task by default, so a plain `./gradlew test` paid
     // on-the-fly instrumentation — the generated Graphql client, Konsist's embedded compiler — to
     // write an exec file nothing then read. Coverage is opt-in:
@@ -170,8 +180,10 @@ dependencies {
   // Test dependencies (see also the `power-assert` plugin definition, makes errors more actionable)
   testImplementation(kotlin("test-junit5")) // Umbrella package that pulls in lots of other testing libs
   testRuntimeOnly(libs.junitJupiterEngine) // Needed separately when using JUnit5
+  testImplementation(libs.junitPlatformLauncher) // `LauncherSessionListener`, for the once-per-JVM warm-up
   testImplementation(libs.konsist) // For architecture tests, among other features
   testImplementation(libs.ktorServerTestHost) // In-memory Ktor test engine (`testApplication { … }`)
+  testImplementation(libs.kotlinxCoroutinesTest) // `runTest`: virtual time for the webhook budget tests
 }
 
 // Prints the `SlowestClassesFirstOrderer` hint list from the last test run, longest first.

@@ -2,7 +2,7 @@ package dropnext.dss.domain.fulfillment
 
 import dropnext.dss.contract.TrackingUpdateRequest
 import dropnext.dss.domain.RequestValidation
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
 
 
 class ValidateTrackingUpdateRequestTest {

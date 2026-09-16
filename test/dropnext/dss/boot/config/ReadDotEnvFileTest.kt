@@ -1,7 +1,7 @@
 package dropnext.dss.boot.config
 
 import java.io.File
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
 
 
 class ReadDotEnvFileTest {

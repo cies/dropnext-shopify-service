@@ -130,7 +130,9 @@ class ArchitectureTest {
     srcScope
       .files
       .filter { "/dropnext/dss/domain/" in normalizedPath(it.path) }
-      .assertFalse { file ->
+      // Strict here and in the directory-scoped rules below: after a package rename the filter matches nothing,
+      // and a lenient assert passes on an empty list.
+      .assertFalse(strict = true) { file ->
         val forbidden = file.imports.map { it.name }.filter { name -> forbiddenImportsInDomain.any { name.startsWith(it) } }
         if (forbidden.isNotEmpty()) {
           println(
@@ -161,7 +163,7 @@ class ArchitectureTest {
     srcScope
       .files
       .filter { "/dropnext/dss/boot/config/" in normalizedPath(it.path) }
-      .assertFalse { file ->
+      .assertFalse(strict = true) { file ->
         val forbidden = file.imports.map { it.name }.filter { name -> forbiddenImportsInBootConfig.any { name.startsWith(it) } }
         if (forbidden.isNotEmpty()) {
           println(
@@ -181,9 +183,9 @@ class ArchitectureTest {
    * handling an `ApplicationCall` itself.
    */
   private val allowedKtorServerImportsInBootWarmup = listOf(
-    "io.ktor.server.application.Application",
-    "io.ktor.server.application.ApplicationStarted",
-    "io.ktor.server.application.ServerReady",
+    "io.ktor.server.application.Application", // `startWarmUp` extends it, to subscribe to its monitor.
+    "io.ktor.server.application.ApplicationStarted", // Starts the warm-up: the outbound part needs only the graph.
+    "io.ktor.server.application.ServerReady", // The inbound part waits for the socket to be bound.
   )
 
   @Test
@@ -191,7 +193,7 @@ class ArchitectureTest {
     srcScope
       .files
       .filter { "/dropnext/dss/boot/warmup/" in normalizedPath(it.path) }
-      .assertFalse { file ->
+      .assertFalse(strict = true) { file ->
         val forbidden = file.imports
           .map { it.name }
           .filter { it.startsWith("io.ktor.server.") }
@@ -228,38 +230,25 @@ class ArchitectureTest {
     assert(offenders.isEmpty())
   }
 
-  /** Reflection-related imports that are always forbidden in production code. */
-  private val reflectionImports = listOf(
-    "java.lang.reflect.",
-    "java.lang.Class",
-  )
-
   /**
-   * `kotlin.reflect` imports allowed because they are used by Kotlin's property-delegate protocol
-   * and for compile-time property-name access (`.name`), not for runtime introspection.
+   * Runtime reflection needs no import in Kotlin: `java.lang.*` is imported by default, and `javaClass` and
+   * `::class.java` are members. So the rule reads the code, not the import list. What stays allowed is what the
+   * compiler resolves: a `KClass` type token, a `KProperty` in a delegate signature, `typeOf`.
    */
-  private val allowedKotlinReflectImports = listOf(
-    "kotlin.reflect.KProperty",
-    "kotlin.reflect.KProperty0",
-    "kotlin.reflect.KProperty1",
-    "kotlin.reflect.KProperty2",
-  )
-
-  /**
-   * Source patterns that indicate actual runtime reflection (as opposed to just using `KProperty`
-   * for delegate signatures or `.name` access).
-   */
-  private val reflectionUsagePatterns = listOf(
-    Regex("""\.\s*get\s*\("""),          // KProperty.get(instance)
-    Regex("""\.\s*set\s*\("""),          // KMutableProperty.set(instance, value)
-    Regex("""\.\s*call\s*\("""),         // KCallable.call(...)
-    Regex("""\.\s*callBy\s*\("""),       // KCallable.callBy(...)
-    Regex("""::class\s*\.\s*members"""),
-    Regex("""::class\s*\.\s*memberProperties"""),
-    Regex("""::class\s*\.\s*memberFunctions"""),
-    Regex("""::class\s*\.\s*declaredMembers"""),
-    Regex("""::class\s*\.\s*declaredMemberProperties"""),
-    Regex("""::class\s*\.\s*declaredMemberFunctions"""),
+  private val reflectionUsage = Regex(
+    listOf(
+      """^[ \t]*import\s+java\.lang\.reflect\.""",
+      """::class\s*\.\s*java\b""",
+      // The class's name for a message is not introspection; `LogflareBatchSender` names an exception by it.
+      """\.javaClass\b(?!\s*\.\s*simpleName\b)""",
+      """\bClass\s*\.\s*forName\s*\(""",
+      """\.get(?:Declared)?(?:Method|Field|Constructor)s?\s*\(""",
+      """\.newInstance\s*\(""",
+      """\bkotlin\.reflect\.(?:full|jvm)\b""",
+      """::class\s*\.\s*(?:members|memberProperties|memberFunctions|declaredMembers|declaredMemberProperties|declaredMemberFunctions|constructors|primaryConstructor)\b""",
+      """\.callBy\s*\(""",
+    ).joinToString("|"),
+    RegexOption.MULTILINE,
   )
 
   /**
@@ -270,40 +259,20 @@ class ArchitectureTest {
 
   @Test
   fun `forbid use of JVM reflection`() {
-    srcScope
-      .files
-      .filterNot { file -> pathContainsAllowListEntry(file.path, reflectionAllowList) }
-      .assertFalse { file ->
-        val importNames = file.imports.map { it.name }
-
-        val forbiddenImports = importNames
-          .filter { importName -> reflectionImports.any { importName.startsWith(it) } }
-
-        val forbiddenKotlinReflectImports = importNames
-          .filter { it.startsWith("kotlin.reflect.") }
-          .filter { importName -> allowedKotlinReflectImports.none { allowed -> importName == allowed } }
-
-        val hasAllowedKotlinReflectImport = importNames.any { importName ->
-          allowedKotlinReflectImports.any { allowed -> importName == allowed }
-        }
-        val hasReflectionUsage = hasAllowedKotlinReflectImport &&
-          reflectionUsagePatterns.any { it.containsMatchIn(file.text.withoutComments()) }
-
-        val allOffending = forbiddenImports + forbiddenKotlinReflectImports
-        if (allOffending.isNotEmpty()) {
-          println(
-            "ERROR: File ${file.path} uses reflection imports: $allOffending. " +
-              "Avoid JVM reflection. If unavoidable, add the file to reflectionAllowList in ArchitectureTest."
-          )
-        }
-        if (hasReflectionUsage) {
-          println(
-            "ERROR: File ${file.path} imports allowed KProperty types but uses them for runtime reflection. " +
-              "Only use KProperty for delegate signatures and .name access."
-          )
-        }
-        allOffending.isNotEmpty() || hasReflectionUsage
+    val offenders = srcFiles
+      .filterNot { pathContainsAllowListEntry(it.path, reflectionAllowList) }
+      .flatMap { file ->
+        reflectionUsage.findAll(file.code)
+          .map { "  - ${file.path}:${file.code.lineNumberAt(it.range.first)}  ${it.value.trim()}" }
+          .toList()
       }
+    if (offenders.isNotEmpty()) {
+      println(
+        "ERROR: these files use JVM reflection:\n" + offenders.joinToString("\n") +
+          "\nAvoid it. If it is unavoidable, add the file to reflectionAllowList in ArchitectureTest, with a one-line reason."
+      )
+    }
+    assert(offenders.isEmpty())
   }
 
   /**
@@ -321,7 +290,7 @@ class ArchitectureTest {
     srcScope
       .files
       .filter { "/dropnext/dss/workflow/" in normalizedPath(it.path) }
-      .assertFalse { file ->
+      .assertFalse(strict = true) { file ->
         val httpImports = file.imports
           .map { it.name }
           .filter { importName -> forbiddenKtorPrefixesInWorkflows.any { importName.startsWith(it) } }
@@ -340,7 +309,9 @@ class ArchitectureTest {
     // The view should take data in and return a String. It must not see ApplicationCall,
     // HttpClient, or any other transport-layer type, so it can be tested in isolation.
     val forbiddenPrefixes = listOf("io.ktor.server.", "io.ktor.client.", "io.ktor.http.", "dropnext.graphql.generated.")
-    val violations = srcFiles.filter { "/src/dropnext/dss/presentation/" in it.path }
+    val presentationFiles = srcFiles.filter { "/src/dropnext/dss/presentation/" in it.path }
+    assert(presentationFiles.isNotEmpty()) // After a package rename the sweep below would pass on nothing.
+    val violations = presentationFiles
       .flatMap { file ->
         file.text.lines()
           .withIndex()
@@ -357,12 +328,12 @@ class ArchitectureTest {
   }
 
   /**
-   * Files allowed to construct a `kotlinx.serialization.Json {}` instance. Everywhere else must
+   * Files allowed to build a `kotlinx.serialization.json.Json` instance or use the default one. Everywhere else must
    * reuse the shared `AppJson` (inbound Shopify) or `MonolithJson` (outbound monolith) singletons
    * so serialization config stays consistent.
    */
   private val jsonConstructionAllowList = listOf(
-    "/dropnext/dss/lib/json/",
+    "/dropnext/dss/lib/json/", // Where `AppJson` and `MonolithJson` are built.
   )
 
   /**
@@ -408,16 +379,17 @@ class ArchitectureTest {
 
   @Test
   fun `forbid ad-hoc Json instance construction outside lib_json`() {
-    val jsonConstructor = Regex("""\bJson\s*\{""")
+    // Both builders (`Json { }`, `Json(from = …) { }`), imported or fully qualified, and the default instance, whose
+    // settings are not ours: `Json.Default` and the `Json.encodeTo…` / `decodeFrom…` / `parseTo…` calls that run on it.
+    val ownJsonInstance = Regex("""\bJson\s*[({]|\bJson\s*\.\s*(?:Default|encodeTo\w*|decodeFrom\w*|parseTo\w*)\b""")
     srcScope
       .files
       .filterNot { file -> pathContainsAllowListEntry(file.path, jsonConstructionAllowList) }
       .assertFalse { file ->
-        val hasJsonImport = file.imports.any { it.name == "kotlinx.serialization.json.Json" }
-        val constructs = hasJsonImport && jsonConstructor.containsMatchIn(file.text.withoutComments())
+        val constructs = ownJsonInstance.containsMatchIn(file.text.withoutComments())
         if (constructs) {
           println(
-            "ERROR: File ${file.path} constructs its own `Json { ... }` instance. " +
+            "ERROR: File ${file.path} builds its own `Json` instance or uses the default one. " +
               "Reuse AppJson or MonolithJson from dropnext.dss.lib.json instead, " +
               "or add a new shared singleton there if a different config is genuinely needed."
           )
@@ -432,12 +404,16 @@ class ArchitectureTest {
    * `withMdcEntries`, which gets that right; everything else goes through them, `MDCContext` included, so there is one
    * way to add to the MDC.
    */
+  private val mdcAccessAllowList = listOf(
+    "/dropnext/dss/lib/slf4j/", // Holds the keys and `withMdcEntries`, the one way everything else adds to the MDC.
+  )
+
   @Test
   fun `only lib_slf4j touches the MDC directly`() {
     val mdcImports = setOf("org.slf4j.MDC", "kotlinx.coroutines.slf4j.MDCContext")
     srcScope
       .files
-      .filterNot { file -> pathContainsAllowListEntry(file.path, listOf("/dropnext/dss/lib/slf4j/")) }
+      .filterNot { file -> pathContainsAllowListEntry(file.path, mdcAccessAllowList) }
       .assertFalse { file ->
         val offending = file.imports.map { it.name }.filter { it in mdcImports }
         if (offending.isNotEmpty()) {
@@ -455,7 +431,7 @@ class ArchitectureTest {
    * `HttpClient` via dependency injection so engine config and OkHttp pooling stay consistent.
    */
   private val httpClientConstructionAllowList = listOf(
-    "/dropnext/dss/lib/ktor/httpClientBuilders.kt",
+    "/dropnext/dss/lib/ktor/httpClientBuilders.kt", // Builds the shared client and the monolith client derived from it.
   )
 
   @Test
@@ -508,8 +484,9 @@ class ArchitectureTest {
   @Test
   fun `the access scopes are never a setting`() {
     val scopeName = Regex("""\b[A-Z0-9_]*SCOPE[A-Z0-9_]*\b""")
-    val inConfig = srcFiles
-      .filter { "/src/dropnext/dss/boot/config/" in it.path }
+    val configFiles = srcFiles.filter { "/src/dropnext/dss/boot/config/" in it.path }
+    assert(configFiles.isNotEmpty()) // After a package rename the sweep below would pass on nothing.
+    val inConfig = configFiles
       .flatMap { file -> scopeName.findAll(file.code).map { "  - ${file.path}: ${it.value}" } }
     val envExampleVariable = Regex("""^[#\s]*([A-Z0-9_]*SCOPE[A-Z0-9_]*)\s*=""", RegexOption.MULTILINE)
     val inEnvExample = envExampleVariable.findAll(File(projectRoot, ".env.example").readText())
@@ -641,13 +618,15 @@ class ArchitectureTest {
       match.groupValues[1] to text.substring(match.range.last + 1, index - 1)
     }.toList()
 
+  private fun String.lineNumberAt(index: Int): Int = 1 + (0 until index).count { this[it] == '\n' }
+
   /**
    * Packages allowed to be star-imported. Mirrors `ij_kotlin_packages_to_use_import_on_demand`
    * in `.editorconfig` — `kotlinx.html` is an HTML-builder eDSL whose ergonomics depend on
    * pulling in all tag/attribute functions at once.
    */
   private val allowedWildcardImportPackages = listOf(
-    "kotlinx.html",
+    "kotlinx.html", // The HTML-builder eDSL, one function per tag and attribute.
   )
 
   @Test
@@ -720,4 +699,43 @@ class ArchitectureTest {
     }
     assert(offenders.isEmpty())
   }
+
+  /**
+   * An exemption outlives what it exempted: a path nothing lives at any more, or an import nothing makes, silently
+   * exempts whatever is put there next. Every allowlist in this class is listed here; a new one joins it.
+   */
+  @Test
+  fun `every allowlist entry still matches something in src`() {
+    val paths = srcFiles.map { it.path }
+    val pathAllowLists = mapOf(
+      "reflectionAllowList" to reflectionAllowList,
+      "jsonConstructionAllowList" to jsonConstructionAllowList,
+      "graphqlGeneratedAllowList" to graphqlGeneratedAllowList,
+      "mdcAccessAllowList" to mdcAccessAllowList,
+      "httpClientConstructionAllowList" to httpClientConstructionAllowList,
+    )
+    val stalePaths = pathAllowLists.flatMap { (listName, entries) ->
+      entries.filter { entry -> paths.none { entry in it } }.map { "  - $listName: $it" }
+    }
+    val warmUpImports = srcFiles.filter { "/src/dropnext/dss/boot/warmup/" in it.path }.flatMap { importsOf(it.code) }
+    val staleWarmUpImports = allowedKtorServerImportsInBootWarmup
+      .filterNot { it in warmUpImports }
+      .map { "  - allowedKtorServerImportsInBootWarmup: $it" }
+    val wildcardPackages = srcFiles.flatMap { importsOf(it.code) }.filter { it.endsWith(".*") }.map { it.removeSuffix(".*") }
+    val staleWildcards = allowedWildcardImportPackages
+      .filterNot { it in wildcardPackages }
+      .map { "  - allowedWildcardImportPackages: $it" }
+    val stale = stalePaths + staleWarmUpImports + staleWildcards
+    if (stale.isNotEmpty()) {
+      println(
+        "ERROR: these allowlist entries match nothing in src/:\n" + stale.joinToString("\n") +
+          "\nStale exemption: drop it from the allowlist."
+      )
+    }
+    assert(stale.isEmpty())
+  }
+
+  /** What a file imports, a star import with its `.*`, read from the code so a commented-out import does not count. */
+  private fun importsOf(code: String): List<String> =
+    Regex("""^[ \t]*import\s+(\w+(?:\.\w+)*(?:\.\*)?)""", RegexOption.MULTILINE).findAll(code).map { it.groupValues[1] }.toList()
 }

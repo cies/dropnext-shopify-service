@@ -1,7 +1,8 @@
 package dropnext.dss.lib.shopify.graphql
 
 import dropnext.graphql.generated.enums.FulfillmentEventStatus
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
+
 
 class ParsedFulfillmentStatusTest {
 

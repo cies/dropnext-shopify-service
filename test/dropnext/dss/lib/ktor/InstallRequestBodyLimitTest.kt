@@ -15,7 +15,7 @@ import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
 import io.ktor.server.testing.ApplicationTestBuilder
 import io.ktor.server.testing.testApplication
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
 
 
 /**

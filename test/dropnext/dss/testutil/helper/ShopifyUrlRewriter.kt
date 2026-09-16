@@ -8,25 +8,29 @@ import io.ktor.serialization.kotlinx.json.json
 import java.util.concurrent.TimeUnit
 import okhttp3.Interceptor
 
+
 /**
  * Builds an [HttpClient] whose outbound requests to any `.myshopify.com` host are silently
  * rewritten to `http://localhost:<fakePort>/...`. Lets production code keep its real Shopify URLs
- * while tests serve responses from [FakeShopifyGraphqlServer].
+ * while tests serve responses from `FakeShopifyGraphqlServer`.
+ *
+ * The timeouts are [testHttpClient]'s, and for the same reason: a backstop against a fake that never answers, never a
+ * deadline a test leans on.
  */
 fun shopifyRewritingHttpClient(fakePort: Int): HttpClient =
   HttpClient(OkHttp) {
     engine {
       addInterceptor(rewriteShopifyHostInterceptor(fakePort))
       config {
-        connectTimeout(2, TimeUnit.SECONDS)
-        readTimeout(5, TimeUnit.SECONDS)
-        writeTimeout(5, TimeUnit.SECONDS)
+        connectTimeout(TEST_CLIENT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        readTimeout(TEST_CLIENT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        writeTimeout(TEST_CLIENT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
       }
     }
     install(HttpTimeout) {
-      requestTimeoutMillis = 5_000
-      connectTimeoutMillis = 2_000
-      socketTimeoutMillis = 5_000
+      requestTimeoutMillis = TEST_CLIENT_TIMEOUT_SECONDS * 1_000
+      connectTimeoutMillis = TEST_CLIENT_TIMEOUT_SECONDS * 1_000
+      socketTimeoutMillis = TEST_CLIENT_TIMEOUT_SECONDS * 1_000
     }
     install(ContentNegotiation) { json() }
   }

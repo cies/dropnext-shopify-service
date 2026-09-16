@@ -1,24 +1,26 @@
 package dropnext.dss.lib.shopify.graphql
 
-import com.expediagroup.graphql.client.ktor.GraphQLKtorClient
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
 import dropnext.dss.boot.config.Config
 import dropnext.dss.domain.ProductCount
-import dropnext.dss.domain.ShopDomain
-import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.domain.ShopifyFulfillmentEventId
 import dropnext.dss.domain.ShopifyFulfillmentId
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.domain.WebhookSubscriptionStatus
+import dropnext.dss.lib.json.AppJson
 import dropnext.dss.testutil.fake.FakeFlakyServer
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlServer
+import dropnext.dss.testutil.fixture.ACME_SHOP
+import dropnext.dss.testutil.fixture.TEST_ADMIN_TOKEN
 import dropnext.dss.testutil.fixture.fulfillment
 import dropnext.dss.testutil.fixture.minimalOrder
 import dropnext.dss.testutil.fixture.orderWithFulfillments
 import dropnext.dss.testutil.fixture.sampleProduct
-import dropnext.dss.testutil.helper.shopifyGraphqlUrl
-import dropnext.dss.testutil.helper.testHttpClient
+import dropnext.dss.testutil.helper.failureReason
+import dropnext.dss.testutil.helper.shopifyRewritingHttpClient
+import dropnext.dss.testutil.helper.shopifyServiceOn
+import dropnext.dss.testutil.helper.successValue
 import dropnext.dss.testutil.helper.throwingHttpClient
 import dropnext.graphql.generated.DeleteWebhookSubscription
 import dropnext.graphql.generated.FulfillmentCancelMutation
@@ -36,7 +38,9 @@ import dropnext.graphql.generated.deletewebhooksubscription.WebhookSubscriptionD
 import dropnext.graphql.generated.enums.CountPrecision
 import dropnext.graphql.generated.enums.CurrencyCode
 import dropnext.graphql.generated.enums.FulfillmentEventStatus
+import dropnext.graphql.generated.enums.FulfillmentOrderStatus
 import dropnext.graphql.generated.enums.FulfillmentStatus
+import dropnext.graphql.generated.enums.OrderDisplayFulfillmentStatus
 import dropnext.graphql.generated.enums.WebhookSubscriptionFormat
 import dropnext.graphql.generated.enums.WebhookSubscriptionTopic
 import dropnext.graphql.generated.fulfillmentcancelmutation.Fulfillment as CancelledFulfillment
@@ -49,7 +53,6 @@ import dropnext.graphql.generated.fulfillmenteventcreatemutation.FulfillmentEven
 import dropnext.graphql.generated.fulfillmenteventcreatemutation.FulfillmentEventCreatePayload
 import dropnext.graphql.generated.fulfillmenteventcreatemutation.UserError as EventUserError
 import dropnext.graphql.generated.getproductbyid.MediaImage
-
 import dropnext.graphql.generated.getproductbyid.Shop as GetProductByIdShop
 import dropnext.graphql.generated.getwebhooksubscriptions.WebhookSubscription as ExistingSubscription
 import dropnext.graphql.generated.getwebhooksubscriptions.WebhookSubscriptionConnection
@@ -61,18 +64,15 @@ import dropnext.graphql.generated.shopidentity.Shop as ShopIdentityShop
 import dropnext.graphql.generated.updatewebhooksubscription.UserError as UpdateUserError
 import dropnext.graphql.generated.updatewebhooksubscription.WebhookSubscription as UpdatedSubscription
 import dropnext.graphql.generated.updatewebhooksubscription.WebhookSubscriptionUpdatePayload
-import io.ktor.client.HttpClient
 import io.ktor.http.HttpStatusCode
-import java.net.URI
-import java.net.URL
-
-import kotlin.test.BeforeTest
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import org.junit.jupiter.api.AfterAll
-import org.junit.jupiter.api.BeforeAll
+import org.junit.jupiter.api.AutoClose
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
 
@@ -89,34 +89,23 @@ private const val CALLBACK_URL = "https://dss.test/webhooks/shopify"
 @TestInstance(TestInstance.Lifecycle.PER_CLASS) // Stop it from unnecessarily reconstructing per instance.
 class HttpShopifyGraphqlServiceTest {
 
-  private val acme = ShopDomain.parse("acme.myshopify.com")!!
+  // One server for the class, as `val`s rather than a `lateinit` trio filled in by a `@BeforeAll`, and closed by JUnit
+  // once the class is done (`@AutoClose` on a per-class instance), so there is no teardown method to forget. The
+  // `@BeforeEach` below clears the fake, so no test has to remember to. The client rewrites the shop's real Admin URL
+  // onto the fake, which is the URL production would have built.
+  @AutoClose("stop")
+  private val fake = FakeShopifyGraphqlServer()
 
-  private lateinit var fake: FakeShopifyGraphqlServer
-  private lateinit var httpClient: HttpClient
-  private lateinit var shopify: ShopifyGraphqlService
+  @AutoClose
+  private val shopifyClient = shopifyRewritingHttpClient(fake.start())
 
-  @BeforeAll
-  fun startServer() {
-    fake = FakeShopifyGraphqlServer()
-    val port = fake.start()
-    httpClient = testHttpClient()
-    gqlUrl = URI(shopifyGraphqlUrl(port)).toURL()
-    shopify = HttpShopifyGraphqlService(acme, GraphQLKtorClient(gqlUrl, httpClient), ShopifyAdminToken("shpat_test"))
-  }
-
-  private lateinit var gqlUrl: URL
+  private val shopify: ShopifyGraphqlService = shopifyServiceOn(shopifyClient)
 
   /** A service whose token-rejected hook is observable; the shared [shopify] has none. */
   private fun serviceReporting(onTokenRejected: () -> Unit): ShopifyGraphqlService =
-    HttpShopifyGraphqlService(acme, GraphQLKtorClient(gqlUrl, httpClient), ShopifyAdminToken("shpat_test"), onTokenRejected)
+    shopifyServiceOn(shopifyClient, onTokenRejected = onTokenRejected)
 
-  @AfterAll
-  fun stopServer() {
-    httpClient.close()
-    fake.stop()
-  }
-
-  @BeforeTest
+  @BeforeEach
   fun clearFakeBetweenTests() {
     fake.clear()
   }
@@ -125,14 +114,14 @@ class HttpShopifyGraphqlServiceTest {
   fun `every request carries the shop's Admin token`() = runBlocking {
     stubShopIdentity()
     shopify.shopIdentity()
-    assert(fake.calls.single().authorization == "shpat_test")
+    assert(fake.calls.single().authorization == TEST_ADMIN_TOKEN.value)
   }
 
   @Test
   fun `shopIdentity answers the numeric shop id and the canonical domain`() = runBlocking {
     stubShopIdentity(id = "gid://shopify/Shop/9988", domain = "Acme.myshopify.com")
     val result = shopify.shopIdentity()
-    assert(result == Success(ShopIdentityInfo(shopId = ShopifyShopId(9988L), domain = acme)))
+    assert(result == Success(ShopIdentityInfo(shopId = ShopifyShopId(9988L), domain = ACME_SHOP)))
   }
 
   @Test
@@ -148,7 +137,7 @@ class HttpShopifyGraphqlServiceTest {
   @Test
   fun `productCount without a count in the payload is a GraphqlError`() = runBlocking {
     fake.stubData("ProductsCount", ProductsCount.Result(productsCount = null), ProductsCount.Result.serializer())
-    assert((shopify.productCount() as Failure).reason is ShopifyError.GraphqlError)
+    assert(shopify.productCount().failureReason() is ShopifyError.GraphqlError)
   }
 
   @Test
@@ -169,7 +158,7 @@ class HttpShopifyGraphqlServiceTest {
     )
     val result = shopify.productById("gid://shopify/Product/501")
     assert(result is Success)
-    val shopProduct = (result as Success).value
+    val shopProduct = result.successValue()
     assert(shopProduct?.shopCurrencyCode == "EUR")
     assert(shopProduct?.product?.title == "Sample")
   }
@@ -199,7 +188,7 @@ class HttpShopifyGraphqlServiceTest {
       """.trimIndent(),
     )
     val result = shopify.productById("gid://shopify/Product/501")
-    val media = (result as Success).value!!.product.media.edges.map { it.node }
+    val media = result.successValue()!!.product.media.edges.map { it.node }
     assert(media.size == 2)
     assert(media.first() !is MediaImage)
     assert((media.last() as MediaImage).image?.url == "https://cdn.example/cover.jpg")
@@ -220,14 +209,14 @@ class HttpShopifyGraphqlServiceTest {
     fake.stubRaw("ShopIdentity", """{"data":{"shop":{"id":"gid://shopify/Shop/1","myshopifyDomain":"acme.myshopify.com"}},"errors":[{"message":"Throttled"}]}""")
     val result = shopify.shopIdentity()
     assert(result is Failure)
-    assert((result as Failure).reason == ShopifyError.GraphqlError("Throttled"))
+    assert(result.failureReason() == ShopifyError.GraphqlError("Throttled"))
   }
 
   /** Shopify sends its error codes with a `200`; they are what tells a throttled request from one that will never be allowed. */
   @Test
   fun `top-level errors carry Shopify's error codes, and a throttled request is retryable`() = runBlocking {
     fake.stubRaw("ShopIdentity", """{"errors":[{"message":"Throttled","extensions":{"code":"THROTTLED"}}]}""")
-    val error = (shopify.shopIdentity() as Failure).reason
+    val error = shopify.shopIdentity().failureReason()
     assert(error == ShopifyError.GraphqlError("Throttled", codes = listOf("THROTTLED")))
     assert(error.isRetryable)
   }
@@ -238,7 +227,7 @@ class HttpShopifyGraphqlServiceTest {
       "ShopIdentity",
       """{"data":null,"errors":[{"message":"Access denied for shop field.","extensions":{"code":"ACCESS_DENIED","documentation":"https://shopify.dev/api/usage/access-scopes"}}]}""",
     )
-    val error = (shopify.shopIdentity() as Failure).reason
+    val error = shopify.shopIdentity().failureReason()
     assert((error as ShopifyError.GraphqlError).codes == listOf("ACCESS_DENIED"))
     assert(!error.isRetryable)
   }
@@ -246,14 +235,14 @@ class HttpShopifyGraphqlServiceTest {
   @Test
   fun `a response without data is a GraphqlError`() = runBlocking {
     fake.stubRaw("ShopIdentity", """{"data":null}""")
-    assert((shopify.shopIdentity() as Failure).reason is ShopifyError.GraphqlError)
+    assert(shopify.shopIdentity().failureReason() is ShopifyError.GraphqlError)
   }
 
   /** Schema drift reads the same on every attempt, and the decoder's complaint quotes the body: logged, never retried. */
   @Test
   fun `an unreadable response is Undecodable and not retryable`() = runBlocking {
     fake.stubRaw("ShopIdentity", "{not-json")
-    val error = (shopify.shopIdentity() as Failure).reason
+    val error = shopify.shopIdentity().failureReason()
     assert(error is ShopifyError.Undecodable)
     assert(!error.isRetryable)
   }
@@ -288,7 +277,7 @@ class HttpShopifyGraphqlServiceTest {
       FulfillmentCancelMutation.Result.serializer(),
     )
     val result = shopify.cancelFulfillment("gid://shopify/Fulfillment/8000")
-    assert((result as Failure).reason == ShopifyError.UserError(listOf("Fulfillment has already been delivered.")))
+    assert(result.failureReason() == ShopifyError.UserError(listOf("Fulfillment has already been delivered.")))
   }
 
   @Test
@@ -298,7 +287,7 @@ class HttpShopifyGraphqlServiceTest {
       FulfillmentCancelMutation.Result(fulfillmentCancel = FulfillmentCancelPayload(fulfillment = null, userErrors = emptyList())),
       FulfillmentCancelMutation.Result.serializer(),
     )
-    assert((shopify.cancelFulfillment("gid://shopify/Fulfillment/8000") as Failure).reason is ShopifyError.GraphqlError)
+    assert(shopify.cancelFulfillment("gid://shopify/Fulfillment/8000").failureReason() is ShopifyError.GraphqlError)
   }
 
   @Test
@@ -314,7 +303,7 @@ class HttpShopifyGraphqlServiceTest {
       FulfillmentCancelMutation.Result.serializer(),
     )
     val result = shopify.cancelFulfillment("gid://shopify/Fulfillment/8000")
-    assert((result as Failure).reason == ShopifyError.UserError(listOf("Fulfillment cannot be cancelled.")))
+    assert(result.failureReason() == ShopifyError.UserError(listOf("Fulfillment cannot be cancelled.")))
   }
 
   @Test
@@ -335,10 +324,9 @@ class HttpShopifyGraphqlServiceTest {
   @Test
   fun `orderForDss sends the order gid and decodes the order`() = runBlocking {
     fake.stubData("GetOrderForDss", GetOrderForDss.Result(order = minimalOrder().copy(email = "buyer@example.com")), GetOrderForDss.Result.serializer())
-    val result = shopify.orderForDss("gid://shopify/Order/1001")
-    assert(result is Success)
-    assert((result as Success).value.name == "#1001")
-    assert(result.value.email == "buyer@example.com")
+    val order = shopify.orderForDss("gid://shopify/Order/1001").successValue()
+    assert(order.name == "#1001")
+    assert(order.email == "buyer@example.com")
     assert(fake.calls.single().variables.jsonObject["id"]?.jsonPrimitive?.content == "gid://shopify/Order/1001")
   }
 
@@ -348,18 +336,51 @@ class HttpShopifyGraphqlServiceTest {
     val order = orderWithFulfillments(fulfillment(8000L, listOf("1Z999"), status = FulfillmentStatus.CANCELLED))
     fake.stubData("GetOrderForDss", GetOrderForDss.Result(order = order), GetOrderForDss.Result.serializer())
     val result = shopify.orderForDss("gid://shopify/Order/1001")
-    assert((result as Success).value.fulfillments.single().status == FulfillmentStatus.CANCELLED)
+    assert(result.successValue().fulfillments.single().status == FulfillmentStatus.CANCELLED)
+  }
+
+  /**
+   * Written by hand rather than encoded from the generated types: a typed stub decodes with the serializer that encoded
+   * it, so a field this build names differently from Shopify would round-trip unnoticed. This body is the one
+   * [minimalOrder] describes, in the shape `GetOrderForDss` asks for.
+   */
+  @Test
+  fun `orderForDss decodes the order as Shopify writes it`() = runBlocking {
+    fake.stubRaw("GetOrderForDss", rawOrderJson())
+    val order = shopify.orderForDss("gid://shopify/Order/1001").successValue()
+    assert(order == minimalOrder())
+  }
+
+  /**
+   * Shopify adds enum values between API versions, and this build only knows the ones in its schema snapshot. A value
+   * it does not know must land on the generated `__UNKNOWN_VALUE` default instead of failing the decode: an order that
+   * does not decode is `Undecodable`, which `orders/create` acknowledges, and the order never reaches the monolith.
+   */
+  @Test
+  fun `orderForDss decodes status values added after the schema snapshot as unknown`() = runBlocking {
+    fake.stubRaw(
+      "GetOrderForDss",
+      rawOrderJson(
+        displayFulfillmentStatus = "A_STATUS_ADDED_LATER",
+        fulfillmentOrderStatus = "A_STATUS_ADDED_LATER",
+        fulfillments = """[{"id":"gid://shopify/Fulfillment/8000","status":"A_STATUS_ADDED_LATER","trackingInfo":[{"number":"1Z999"}]}]""",
+      ),
+    )
+    val order = shopify.orderForDss("gid://shopify/Order/1001").successValue()
+    assert(order.displayFulfillmentStatus == OrderDisplayFulfillmentStatus.__UNKNOWN_VALUE)
+    assert(order.fulfillmentOrders.edges.single().node.status == FulfillmentOrderStatus.__UNKNOWN_VALUE)
+    assert(order.fulfillments.single().status == FulfillmentStatus.__UNKNOWN_VALUE)
   }
 
   @Test
   fun `orderForDss answers NotFound naming the legacy id when Shopify has no such order`() = runBlocking {
     fake.stubData("GetOrderForDss", GetOrderForDss.Result(order = null), GetOrderForDss.Result.serializer())
     val result = shopify.orderForDss("gid://shopify/Order/1001")
-    assert((result as Failure).reason == ShopifyError.NotFound("order 1001 not found"))
+    assert(result.failureReason() == ShopifyError.NotFound("order 1001 not found"))
   }
 
   @Test
-  fun `createFulfillment groups the lines by fulfillment order and answers the new id`() = runBlocking {
+  fun `createFulfillment sends the lines grouped by fulfillment order with the tracking and answers the new id`() = runBlocking {
     fake.stubData(
       "FulfillmentCreateWithLineItems",
       FulfillmentCreateWithLineItems.Result(
@@ -376,14 +397,36 @@ class HttpShopifyGraphqlServiceTest {
         FulfillmentLine(fulfillmentOrderId = "gid://shopify/FulfillmentOrder/301", lineItemId = "gid://shopify/FulfillmentOrderLineItem/402", quantity = 2),
         FulfillmentLine(fulfillmentOrderId = "gid://shopify/FulfillmentOrder/302", lineItemId = "gid://shopify/FulfillmentOrderLineItem/403", quantity = 1),
       ),
-      tracking = FulfillmentTracking(company = "UPS", number = "1Z999", url = null),
+      tracking = FulfillmentTracking(company = "UPS", number = "1Z999", url = "https://track.example/1Z999"),
       notifyCustomer = false,
     )
     assert(result == Success(ShopifyFulfillmentId(5001L)))
-    // Two fulfillment orders in, two groups out: Shopify rejects a duplicated fulfillmentOrderId.
-    val groups = fake.calls.single().variables.jsonObject["lineItemsByFulfillmentOrder"]!!.jsonArray
-    assert(groups.size == 2)
-    assert(groups[0].jsonObject["fulfillmentOrderLineItems"]!!.jsonArray.size == 2)
+    // Two fulfillment orders in, two groups out: Shopify rejects a duplicated fulfillmentOrderId. Each line keeps its
+    // own id and quantity, which is what decides which item Shopify marks as shipped.
+    val expected = AppJson.parseToJsonElement(
+      """
+      {
+        "lineItemsByFulfillmentOrder": [
+          {
+            "fulfillmentOrderId": "gid://shopify/FulfillmentOrder/301",
+            "fulfillmentOrderLineItems": [
+              {"id": "gid://shopify/FulfillmentOrderLineItem/401", "quantity": 1},
+              {"id": "gid://shopify/FulfillmentOrderLineItem/402", "quantity": 2}
+            ]
+          },
+          {
+            "fulfillmentOrderId": "gid://shopify/FulfillmentOrder/302",
+            "fulfillmentOrderLineItems": [
+              {"id": "gid://shopify/FulfillmentOrderLineItem/403", "quantity": 1}
+            ]
+          }
+        ],
+        "tracking": {"company": "UPS", "number": "1Z999", "url": "https://track.example/1Z999"},
+        "notifyCustomer": false
+      }
+      """,
+    )
+    assert(fake.calls.single().variables == expected)
   }
 
   /** Shopify has answered an empty `legacyResourceId` on a fresh fulfillment; the gid carries the same number. */
@@ -420,17 +463,16 @@ class HttpShopifyGraphqlServiceTest {
       tracking = FulfillmentTracking(company = "UPS", number = "1Z999", url = null),
       notifyCustomer = false,
     )
-    assert((result as Failure).reason == ShopifyError.GraphqlError("fulfillment missing in response"))
+    assert(result.failureReason() == ShopifyError.GraphqlError("fulfillment missing in response"))
   }
 
   /** What a restarting Shopify edge looks like from here: the connection is accepted and reset. */
   @Test
   fun `a reset connection is a Network failure`() = runBlocking {
     FakeFlakyServer().use { unreachable ->
-      val deadUrl = URI("${unreachable.baseUrl}/admin/api/${Config.SHOPIFY_API_VERSION}/graphql.json").toURL()
-      val deadShopify = HttpShopifyGraphqlService(acme, GraphQLKtorClient(deadUrl, httpClient), ShopifyAdminToken("shpat_test"))
+      val deadShopify = shopifyServiceOn(shopifyClient, url = "${unreachable.baseUrl}/admin/api/${Config.SHOPIFY_API_VERSION}/graphql.json")
       val result = deadShopify.orderForDss("gid://shopify/Order/1001")
-      assert((result as Failure).reason is ShopifyError.Network)
+      assert(result.failureReason() is ShopifyError.Network)
     }
   }
 
@@ -438,7 +480,7 @@ class HttpShopifyGraphqlServiceTest {
   @Test
   fun `a failure that is not a transport failure propagates instead of reading as a Network failure`() = runBlocking {
     throwingHttpClient(IllegalStateException("client misconfigured")).use { broken ->
-      val brokenShopify = HttpShopifyGraphqlService(acme, GraphQLKtorClient(gqlUrl, broken), ShopifyAdminToken("shpat_test"))
+      val brokenShopify = shopifyServiceOn(broken)
       val thrown = runCatching { brokenShopify.orderForDss("gid://shopify/Order/1001") }.exceptionOrNull()
       assert(thrown is IllegalStateException)
     }
@@ -461,7 +503,7 @@ class HttpShopifyGraphqlServiceTest {
       tracking = FulfillmentTracking(company = "UPS", number = "bad", url = null),
       notifyCustomer = false,
     )
-    assert((result as Failure).reason == ShopifyError.UserError(listOf("Tracking number is invalid.")))
+    assert(result.failureReason() == ShopifyError.UserError(listOf("Tracking number is invalid.")))
   }
 
   @Test
@@ -484,12 +526,14 @@ class HttpShopifyGraphqlServiceTest {
       fulfillmentGid = "gid://shopify/Fulfillment/5001",
       status = FulfillmentEventStatus.IN_TRANSIT,
       happenedAt = "2026-04-02T08:30:00Z",
-      message = null,
+      message = "Left the sorting center",
     )
     assert(result == Success(ShopifyFulfillmentEventId(7001L)))
     val input = fake.calls.single().variables.jsonObject["fulfillmentEvent"]!!.jsonObject
     assert(input["fulfillmentId"]?.jsonPrimitive?.content == "gid://shopify/Fulfillment/5001")
     assert(input["happenedAt"]?.jsonPrimitive?.content == "2026-04-02T08:30:00Z")
+    assert(input["status"]?.jsonPrimitive?.content == "IN_TRANSIT")
+    assert(input["message"]?.jsonPrimitive?.content == "Left the sorting center")
   }
 
   @Test
@@ -519,13 +563,12 @@ class HttpShopifyGraphqlServiceTest {
       ),
       GetWebhookSubscriptions.Result.serializer(),
     )
-    val result = shopify.webhookSubscriptions()
-    assert(result is Success)
-    assert((result as Success).value.map { it.topic } == listOf("ORDERS_CREATE", "PRODUCTS_UPDATE"))
-    assert(result.value.first().id == "gid://shopify/WebhookSubscription/1")
-    assert(result.value.map { it.includeFields } == listOf(listOf("id", "admin_graphql_api_id"), emptyList()))
-    assert(result.value.map { it.filter } == listOf("vendor:Acme", null))
-    assert(result.value.map { it.format } == listOf("JSON", "XML"))
+    val subscriptions = shopify.webhookSubscriptions().successValue()
+    assert(subscriptions.map { it.topic } == listOf("ORDERS_CREATE", "PRODUCTS_UPDATE"))
+    assert(subscriptions.first().id == "gid://shopify/WebhookSubscription/1")
+    assert(subscriptions.map { it.includeFields } == listOf(listOf("id", "admin_graphql_api_id"), emptyList()))
+    assert(subscriptions.map { it.filter } == listOf("vendor:Acme", null))
+    assert(subscriptions.map { it.format } == listOf("JSON", "XML"))
   }
 
   @Test
@@ -549,6 +592,47 @@ class HttpShopifyGraphqlServiceTest {
     assert(fake.calls.single().variables.jsonObject["uri"]?.jsonPrimitive?.content == CALLBACK_URL)
   }
 
+  /** The scan asks for every subscription this app has; a variable here would silently narrow what a reinstall repairs. */
+  @Test
+  fun `webhookSubscriptions asks for them all, with no variables at all`() = runBlocking {
+    fake.stubData(
+      "GetWebhookSubscriptions",
+      GetWebhookSubscriptions.Result(webhookSubscriptions = WebhookSubscriptionConnection(nodes = emptyList())),
+      GetWebhookSubscriptions.Result.serializer(),
+    )
+
+    shopify.webhookSubscriptions()
+
+    assert(fake.calls.single().variables == JsonNull)
+  }
+
+  /**
+   * `null` fields mean the full payload, and the client says so by leaving the variable out entirely: a variable sent
+   * as JSON `null` would be a field Shopify reads as "no fields". `products/delete` is registered exactly this way,
+   * and the workflow test can only see the typed `null` it passed, not what went on the wire.
+   */
+  @Test
+  fun `registerWebhook with null fields leaves the variable out rather than sending a null`() = runBlocking {
+    fake.stubData(
+      "RegisterWebhook",
+      RegisterWebhook.Result(
+        webhookSubscriptionCreate = WebhookSubscriptionCreatePayload(
+          userErrors = emptyList(),
+          webhookSubscription = CreatedSubscription(
+            id = "gid://shopify/WebhookSubscription/9",
+            topic = WebhookSubscriptionTopic.PRODUCTS_DELETE,
+            includeFields = emptyList(),
+          ),
+        ),
+      ),
+      RegisterWebhook.Result.serializer(),
+    )
+
+    shopify.registerWebhook(WebhookSubscriptionTopic.PRODUCTS_DELETE, CALLBACK_URL, includeFields = null)
+
+    assert("includeFields" !in fake.calls.single().variables.jsonObject)
+  }
+
   /** Shopify reports a rejected callback URL as a field error, which is worth carrying to the install page. */
   @Test
   fun `registerWebhook prefixes a user error with the field it names`() = runBlocking {
@@ -563,7 +647,7 @@ class HttpShopifyGraphqlServiceTest {
       RegisterWebhook.Result.serializer(),
     )
     val result = shopify.registerWebhook(WebhookSubscriptionTopic.ORDERS_CREATE, CALLBACK_URL, includeFields = null)
-    assert((result as Failure).reason == ShopifyError.UserError(listOf("webhookSubscription,uri: is not allowed")))
+    assert(result.failureReason() == ShopifyError.UserError(listOf("webhookSubscription,uri: is not allowed")))
   }
 
   // ---------- what a non-200 status from Shopify becomes ----------
@@ -573,7 +657,7 @@ class HttpShopifyGraphqlServiceTest {
   fun `a 401 from Shopify is a rejected token, not a network failure`() = runBlocking {
     fake.stubRaw("ShopIdentity", """{"errors":"[API] Invalid API key or access token"}""", HttpStatusCode.Unauthorized)
     val result = shopify.shopIdentity()
-    assert((result as Failure).reason == ShopifyError.TokenRejected(401))
+    assert(result.failureReason() == ShopifyError.TokenRejected(401))
   }
 
   @Test
@@ -581,7 +665,7 @@ class HttpShopifyGraphqlServiceTest {
     fake.stubRaw("ShopIdentity", """{"errors":"[API] Invalid API key or access token"}""", HttpStatusCode.Unauthorized)
     var reported = 0
     val result = serviceReporting { reported++ }.shopIdentity()
-    assert((result as Failure).reason == ShopifyError.TokenRejected(401))
+    assert(result.failureReason() == ShopifyError.TokenRejected(401))
     assert(reported == 1)
   }
 
@@ -596,20 +680,20 @@ class HttpShopifyGraphqlServiceTest {
   @Test
   fun `a 429 from Shopify is an HttpError carrying the status`() = runBlocking {
     fake.stubRaw("ShopIdentity", """{"errors":"Throttled"}""", HttpStatusCode.TooManyRequests)
-    assert((shopify.shopIdentity() as Failure).reason == ShopifyError.HttpError(429))
+    assert(shopify.shopIdentity().failureReason() == ShopifyError.HttpError(429))
   }
 
   @Test
   fun `a 503 from Shopify is an HttpError carrying the status`() = runBlocking {
     fake.stubRaw("ShopIdentity", "<html>maintenance</html>", HttpStatusCode.ServiceUnavailable)
-    assert((shopify.shopIdentity() as Failure).reason == ShopifyError.HttpError(503))
+    assert(shopify.shopIdentity().failureReason() == ShopifyError.HttpError(503))
   }
 
   /** Ktor's exception quotes the response body and the URL; both belong to Shopify, not to our logs. */
   @Test
   fun `an HTTP failure's message carries neither the response body nor the url`() = runBlocking {
     fake.stubRaw("ShopIdentity", """{"errors":"body-that-must-not-be-logged"}""", HttpStatusCode.PaymentRequired)
-    val error = (shopify.shopIdentity() as Failure).reason
+    val error = shopify.shopIdentity().failureReason()
     assert(error == ShopifyError.HttpError(402))
     assert("body-that-must-not-be-logged" !in error.message)
     assert("graphql.json" !in error.message)
@@ -630,7 +714,7 @@ class HttpShopifyGraphqlServiceTest {
       FulfillmentEventCreateMutation.Result.serializer(),
     )
     val result = shopify.createFulfillmentEvent("gid://shopify/Fulfillment/5001", FulfillmentEventStatus.IN_TRANSIT, "not-a-date", null)
-    assert((result as Failure).reason == ShopifyError.UserError(listOf("happenedAt is invalid")))
+    assert(result.failureReason() == ShopifyError.UserError(listOf("happenedAt is invalid")))
   }
 
   /** No user error and no event is Shopify misbehaving: an upstream failure, not a resource we could not find. */
@@ -644,7 +728,7 @@ class HttpShopifyGraphqlServiceTest {
       FulfillmentEventCreateMutation.Result.serializer(),
     )
     val result = shopify.createFulfillmentEvent("gid://shopify/Fulfillment/5001", FulfillmentEventStatus.IN_TRANSIT, "2026-04-02T08:30:00Z", null)
-    assert((result as Failure).reason is ShopifyError.GraphqlError)
+    assert(result.failureReason() is ShopifyError.GraphqlError)
   }
 
   @Test
@@ -664,7 +748,7 @@ class HttpShopifyGraphqlServiceTest {
       tracking = FulfillmentTracking(company = "UPS", number = "1Z999", url = null),
       notifyCustomer = false,
     )
-    assert((result as Failure).reason is ShopifyError.GraphqlError)
+    assert(result.failureReason() is ShopifyError.GraphqlError)
   }
 
   @Test
@@ -677,7 +761,7 @@ class HttpShopifyGraphqlServiceTest {
       RegisterWebhook.Result.serializer(),
     )
     val result = shopify.registerWebhook(WebhookSubscriptionTopic.ORDERS_CREATE, CALLBACK_URL, includeFields = null)
-    assert((result as Failure).reason is ShopifyError.GraphqlError)
+    assert(result.failureReason() is ShopifyError.GraphqlError)
   }
 
   @Test
@@ -739,7 +823,7 @@ class HttpShopifyGraphqlServiceTest {
       UpdateWebhookSubscription.Result.serializer(),
     )
     val result = shopify.updateWebhookSubscription("gid://shopify/WebhookSubscription/7", CALLBACK_URL, includeFields = null)
-    assert((result as Failure).reason == ShopifyError.UserError(listOf("id: Webhook subscription does not exist")))
+    assert(result.failureReason() == ShopifyError.UserError(listOf("id: Webhook subscription does not exist")))
   }
 
   @Test
@@ -761,7 +845,7 @@ class HttpShopifyGraphqlServiceTest {
       ),
     )
     val result = shopify.deleteWebhookSubscription("gid://shopify/WebhookSubscription/7")
-    assert((result as Failure).reason == ShopifyError.UserError(listOf("id: Webhook subscription does not exist")))
+    assert(result.failureReason() == ShopifyError.UserError(listOf("id: Webhook subscription does not exist")))
   }
 
   /** A payload without the deleted id and without a user error has not said the subscription is gone. */
@@ -769,7 +853,174 @@ class HttpShopifyGraphqlServiceTest {
   fun `deleteWebhookSubscription without a deleted id in the payload is a GraphqlError`() = runBlocking {
     stubDeletePayload(WebhookSubscriptionDeletePayload(userErrors = emptyList(), deletedWebhookSubscriptionId = null))
     val result = shopify.deleteWebhookSubscription("gid://shopify/WebhookSubscription/7")
-    assert((result as Failure).reason is ShopifyError.GraphqlError)
+    assert(result.failureReason() is ShopifyError.GraphqlError)
+  }
+
+  // ---------- what the schema allows Shopify to answer ----------
+
+  /** A gid without a number would be Shopify changing its id format; the install must still learn the domain. */
+  @Test
+  fun `shopIdentity answers a null shop id when the gid carries no number`() = runBlocking {
+    stubShopIdentity(id = "gid://shopify/Shop/")
+    assert(shopify.shopIdentity().successValue().shopId == null)
+  }
+
+  /** The canonical domain is what the install remembers the shop under; an unparseable one must not lose the shop. */
+  @Test
+  fun `shopIdentity keeps the shop it asked about when the canonical domain does not parse`() = runBlocking {
+    stubShopIdentity(domain = "not a host at all")
+    assert(shopify.shopIdentity().successValue().domain == ACME_SHOP)
+  }
+
+  /** Below Shopify's cap the count is the catalogue; above it the install page has to say "at least". */
+  @Test
+  fun `productCount reports a count Shopify did not cap as exact`() = runBlocking {
+    fake.stubData(
+      "ProductsCount",
+      ProductsCount.Result(productsCount = Count(count = 42, precision = CountPrecision.EXACT)),
+      ProductsCount.Result.serializer(),
+    )
+    assert(shopify.productCount() == Success(ProductCount(count = 42, isExact = true)))
+  }
+
+  /** A gid we cannot shorten is still the only thing that identifies the order the webhook named. */
+  @Test
+  fun `orderForDss names the gid itself when it carries no legacy id`() = runBlocking {
+    fake.stubData("GetOrderForDss", GetOrderForDss.Result(order = null), GetOrderForDss.Result.serializer())
+    assert(shopify.orderForDss("gid://shopify/Order/").failureReason() == ShopifyError.NotFound("order gid://shopify/Order/ not found"))
+  }
+
+  /** The merchant's shipping notification hangs off this flag; a mutation that dropped it would stop the emails silently. */
+  @Test
+  fun `createFulfillment sends the customer notification flag as it was asked`() = runBlocking {
+    fake.stubData(
+      "FulfillmentCreateWithLineItems",
+      FulfillmentCreateWithLineItems.Result(
+        fulfillmentCreate = FulfillmentCreatePayload(
+          fulfillment = CreatedFulfillment(id = "gid://shopify/Fulfillment/5001", legacyResourceId = "5001"),
+          userErrors = emptyList(),
+        ),
+      ),
+      FulfillmentCreateWithLineItems.Result.serializer(),
+    )
+    shopify.createFulfillment(
+      lines = listOf(FulfillmentLine("gid://shopify/FulfillmentOrder/301", "gid://shopify/FulfillmentOrderLineItem/401", 1)),
+      tracking = FulfillmentTracking(company = "UPS", number = "1Z999", url = null),
+      notifyCustomer = true,
+    )
+    assert(fake.calls.single().variables.jsonObject["notifyCustomer"]!!.jsonPrimitive.boolean)
+  }
+
+  /** Shopify does not always say which field it objected to, and the message alone is what the install page then shows. */
+  @Test
+  fun `a user error without a field keeps its message unprefixed`() = runBlocking {
+    fake.stubData(
+      "RegisterWebhook",
+      RegisterWebhook.Result(
+        webhookSubscriptionCreate = WebhookSubscriptionCreatePayload(
+          userErrors = listOf(RegisterUserError(field = null, message = "Address for this topic has already been taken")),
+          webhookSubscription = null,
+        ),
+      ),
+      RegisterWebhook.Result.serializer(),
+    )
+    val result = shopify.registerWebhook(WebhookSubscriptionTopic.ORDERS_CREATE, CALLBACK_URL, includeFields = null)
+    assert(result.failureReason() == ShopifyError.UserError(listOf("Address for this topic has already been taken")))
+  }
+
+  /** An empty `errors` array is Shopify saying there were none; reading it as a failure would throw away the data beside it. */
+  @Test
+  fun `an empty errors array is not a failure`() = runBlocking {
+    fake.stubRaw(
+      "ShopIdentity",
+      """{"data":{"shop":{"id":"gid://shopify/Shop/1","myshopifyDomain":"acme.myshopify.com"}},"errors":[]}""",
+    )
+    assert(shopify.shopIdentity().successValue().shopId == ShopifyShopId(1L))
+  }
+
+  @Test
+  fun `updateWebhookSubscription without a subscription in the payload is a GraphqlError`() = runBlocking {
+    fake.stubData(
+      "UpdateWebhookSubscription",
+      UpdateWebhookSubscription.Result(
+        webhookSubscriptionUpdate = WebhookSubscriptionUpdatePayload(userErrors = emptyList(), webhookSubscription = null),
+      ),
+      UpdateWebhookSubscription.Result.serializer(),
+    )
+    val result = shopify.updateWebhookSubscription("gid://shopify/WebhookSubscription/7", CALLBACK_URL, includeFields = null)
+    assert(result.failureReason() is ShopifyError.GraphqlError)
+  }
+
+  // ---------- a mutation Shopify answered without a payload at all ----------
+
+  /**
+   * Every mutation field is nullable in the Admin schema, so a `200` may carry no payload at all,
+   * with neither a result nor a user error to explain it. Read as an empty success, that would report
+   * a fulfillment created, a webhook registered or a subscription deleted that never happened, so
+   * each mutation answers it as the upstream failure the monolith retries.
+   */
+  @Test
+  fun `cancelFulfillment without a payload is a GraphqlError`() = runBlocking {
+    fake.stubData(
+      "FulfillmentCancelMutation",
+      FulfillmentCancelMutation.Result(fulfillmentCancel = null),
+      FulfillmentCancelMutation.Result.serializer(),
+    )
+    assert(shopify.cancelFulfillment("gid://shopify/Fulfillment/8000").failureReason() is ShopifyError.GraphqlError)
+  }
+
+  @Test
+  fun `createFulfillment without a payload is a GraphqlError`() = runBlocking {
+    fake.stubData(
+      "FulfillmentCreateWithLineItems",
+      FulfillmentCreateWithLineItems.Result(fulfillmentCreate = null),
+      FulfillmentCreateWithLineItems.Result.serializer(),
+    )
+    val result = shopify.createFulfillment(
+      lines = listOf(FulfillmentLine("gid://shopify/FulfillmentOrder/301", "gid://shopify/FulfillmentOrderLineItem/401", 1)),
+      tracking = FulfillmentTracking(company = "UPS", number = "1Z999", url = null),
+      notifyCustomer = false,
+    )
+    assert(result.failureReason() is ShopifyError.GraphqlError)
+  }
+
+  @Test
+  fun `createFulfillmentEvent without a payload is a GraphqlError`() = runBlocking {
+    fake.stubData(
+      "FulfillmentEventCreateMutation",
+      FulfillmentEventCreateMutation.Result(fulfillmentEventCreate = null),
+      FulfillmentEventCreateMutation.Result.serializer(),
+    )
+    val result = shopify.createFulfillmentEvent("gid://shopify/Fulfillment/5001", FulfillmentEventStatus.IN_TRANSIT, "2026-04-02T08:30:00Z", null)
+    assert(result.failureReason() is ShopifyError.GraphqlError)
+  }
+
+  @Test
+  fun `registerWebhook without a payload is a GraphqlError`() = runBlocking {
+    fake.stubData("RegisterWebhook", RegisterWebhook.Result(webhookSubscriptionCreate = null), RegisterWebhook.Result.serializer())
+    val result = shopify.registerWebhook(WebhookSubscriptionTopic.ORDERS_CREATE, CALLBACK_URL, includeFields = null)
+    assert(result.failureReason() is ShopifyError.GraphqlError)
+  }
+
+  @Test
+  fun `updateWebhookSubscription without a payload is a GraphqlError`() = runBlocking {
+    fake.stubData(
+      "UpdateWebhookSubscription",
+      UpdateWebhookSubscription.Result(webhookSubscriptionUpdate = null),
+      UpdateWebhookSubscription.Result.serializer(),
+    )
+    val result = shopify.updateWebhookSubscription("gid://shopify/WebhookSubscription/7", CALLBACK_URL, includeFields = null)
+    assert(result.failureReason() is ShopifyError.GraphqlError)
+  }
+
+  @Test
+  fun `deleteWebhookSubscription without a payload is a GraphqlError`() = runBlocking {
+    fake.stubData(
+      "DeleteWebhookSubscription",
+      DeleteWebhookSubscription.Result(webhookSubscriptionDelete = null),
+      DeleteWebhookSubscription.Result.serializer(),
+    )
+    assert(shopify.deleteWebhookSubscription("gid://shopify/WebhookSubscription/7").failureReason() is ShopifyError.GraphqlError)
   }
 
   // ---------- helpers ----------
@@ -809,4 +1060,30 @@ id: String = "gid://shopify/Shop/1", domain: String = "acme.myshopify.com") {
       ShopIdentity.Result.serializer(),
     )
   }
+
+  /** A `GetOrderForDss` answer written the way Shopify writes it, matching [minimalOrder] unless a case changes a value. */
+  private fun rawOrderJson(
+    displayFulfillmentStatus: String = "UNFULFILLED",
+    fulfillmentOrderStatus: String = "OPEN",
+    fulfillments: String = "[]",
+  ): String =
+    """
+    {"data":{"order":{
+      "id":"gid://shopify/Order/1001","name":"#1001","email":null,"createdAt":"2026-04-25T10:30:00+00:00",
+      "totalPriceSet":{"shopMoney":{"amount":"39.98","currencyCode":"USD"}},
+      "displayFinancialStatus":"PAID","displayFulfillmentStatus":"$displayFulfillmentStatus",
+      "shippingAddress":null,
+      "lineItems":{"edges":[{"node":{
+        "id":"gid://shopify/LineItem/201","quantity":2,"name":"T-Shirt - Blue","title":"T-Shirt",
+        "originalUnitPriceSet":{"shopMoney":{"amount":"19.99"}},"variant":{"legacyResourceId":"101"}
+      }}]},
+      "fulfillmentOrders":{"edges":[{"node":{
+        "id":"gid://shopify/FulfillmentOrder/301","status":"$fulfillmentOrderStatus",
+        "lineItems":{"edges":[{"node":{
+          "id":"gid://shopify/FulfillmentOrderLineItem/401","remainingQuantity":2,"variant":{"legacyResourceId":"101"}
+        }}]}
+      }}]},
+      "fulfillments":$fulfillments
+    }}}
+    """.trimIndent()
 }

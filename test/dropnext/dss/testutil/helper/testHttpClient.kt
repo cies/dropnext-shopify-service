@@ -9,27 +9,32 @@ import java.util.concurrent.TimeUnit
 
 
 /**
- * The one client the tests talk to their fake servers with. Timeouts are seconds rather than the
- * production minutes: a fake that never answers should fail its test quickly instead of parking the
- * suite until Gradle gives up.
+ * The one client the tests talk to their fake servers with.
  *
- * [followRedirects] is off for the OAuth tests, which assert on the `302` itself.
+ * The timeouts are a backstop against a fake that never answers, not a deadline a test asserts on: a test *about* a
+ * timeout passes its own, short one. Generous, because they are not measuring the fake — they were five seconds, and
+ * under the JaCoCo agent a cold JVM spent longer than that loading the client and the server on a loopback request
+ * that answers in milliseconds once warm, which failed two tests for a reason that had nothing to do with them.
+ * See [TestSuiteWarmUp], which removes most of that cost; this is what is left if it ever cannot run.
  */
 fun testHttpClient(followRedirects: Boolean = true): HttpClient = HttpClient(OkHttp) {
   this.followRedirects = followRedirects
   engine {
     config {
-      connectTimeout(2, TimeUnit.SECONDS)
-      readTimeout(5, TimeUnit.SECONDS)
-      writeTimeout(5, TimeUnit.SECONDS)
+      connectTimeout(TEST_CLIENT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+      readTimeout(TEST_CLIENT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+      writeTimeout(TEST_CLIENT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
     }
   }
   install(HttpTimeout) {
-    requestTimeoutMillis = 5_000
-    connectTimeoutMillis = 2_000
-    socketTimeoutMillis = 5_000
+    requestTimeoutMillis = TEST_CLIENT_TIMEOUT_SECONDS * 1_000
+    connectTimeoutMillis = TEST_CLIENT_TIMEOUT_SECONDS * 1_000
+    socketTimeoutMillis = TEST_CLIENT_TIMEOUT_SECONDS * 1_000
   }
 }
+
+/** Long enough that a loaded machine never trips it, short enough that a hung fake fails its test instead of the run. */
+const val TEST_CLIENT_TIMEOUT_SECONDS: Long = 30
 
 /**
  * A client whose every request fails with [cause] before it reaches the wire, for proving that a failure which is

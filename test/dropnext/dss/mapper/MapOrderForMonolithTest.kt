@@ -1,24 +1,73 @@
 package dropnext.dss.mapper
 
+import dropnext.dss.contract.CreateShopifyOrderRequest
 import dropnext.dss.contract.OrderLineItem
+import dropnext.dss.contract.ShippingAddress
 import dropnext.dss.domain.ShopifyOrderId
 import dropnext.dss.testutil.fixture.minimalOrder
 import dropnext.dss.testutil.fixture.orderWithoutFulfillmentOrders
 import dropnext.dss.testutil.helper.orderToCreateShopifyOrderRequest
 import dropnext.graphql.generated.enums.CountryCode
+import dropnext.graphql.generated.enums.CurrencyCode
 import dropnext.graphql.generated.enums.OrderDisplayFinancialStatus
 import dropnext.graphql.generated.enums.OrderDisplayFulfillmentStatus
 import dropnext.graphql.generated.getorderfordss.LineItem
 import dropnext.graphql.generated.getorderfordss.LineItemConnection
 import dropnext.graphql.generated.getorderfordss.LineItemEdge
 import dropnext.graphql.generated.getorderfordss.MailingAddress
+import dropnext.graphql.generated.getorderfordss.MoneyBag
+import dropnext.graphql.generated.getorderfordss.MoneyV2
 import dropnext.graphql.generated.getorderfordss.Order
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
 
 
 class MapOrderForMonolithTest {
 
   private val orderId = ShopifyOrderId(1001L)
+
+  /**
+   * The whole request, so a field nobody asserts on its own is still pinned. The two snapshot titles cross over on
+   * purpose: Shopify's line `name` is the variant's title ("T-Shirt - Blue"), its `title` the product's.
+   */
+  @Test
+  fun `maps the minimal order to the request the monolith expects`() {
+    val order = minimalOrder().copy(email = "buyer@example.com")
+
+    val expected = CreateShopifyOrderRequest(
+      shopifySubdomain = "acme",
+      shopifyOrderId = 1001L,
+      name = "#1001",
+      financialStatus = "Paid",
+      fulfillmentStatus = null,
+      createdAt = "2026-04-25T10:30:00Z",
+      shippingAddress = ShippingAddress(
+        firstName = null,
+        lastName = null,
+        address1 = "",
+        address2 = null,
+        city = "",
+        province = null,
+        provinceCode = null,
+        countryCode = "",
+        zip = null,
+        phone = null,
+      ),
+      lineItems = listOf(
+        OrderLineItem(
+          shopifyLineItemId = 201L,
+          productVariantId = 101L,
+          quantity = 2,
+          snapshotOfVariantTitle = "T-Shirt - Blue",
+          snapshotOfProductTitle = "T-Shirt",
+          snapshotOfPriceAsString = "19.99",
+        ),
+      ),
+      totalAsString = "39.98",
+      currency = "USD",
+      email = "buyer@example.com",
+    )
+    assert(mapOrderForMonolith("acme", orderId, order) == MonolithOrderMapping(expected, omittedLineItems = emptyList()))
+  }
 
   @Test
   fun `maps financial status to PascalCase`() {
@@ -141,22 +190,6 @@ class MapOrderForMonolithTest {
   }
 
   @Test
-  fun `omits line items whose variant is null`() {
-    val base = minimalOrder()
-    val withNullVariant = base.copy(
-      lineItems = dropnext.graphql.generated.getorderfordss.LineItemConnection(
-        edges = listOf(
-          dropnext.graphql.generated.getorderfordss.LineItemEdge(
-            node = base.lineItems.edges.single().node.copy(variant = null),
-          ),
-        ),
-      ),
-    )
-    val req = orderToCreateShopifyOrderRequest("dropnext-staging", withNullVariant)
-    assert(req.lineItems.isEmpty())
-  }
-
-  @Test
   fun `maps shippingAddress when present`() {
     val mailing = MailingAddress(
       firstName = "Ada",
@@ -171,17 +204,19 @@ class MapOrderForMonolithTest {
       phone = "+44 20 7946 0958",
     )
     val req = orderToCreateShopifyOrderRequest("dropnext-staging", minimalOrder().copy(shippingAddress = mailing))
-    val s = req.shippingAddress
-    assert(s.firstName == "Ada")
-    assert(s.lastName == "Lovelace")
-    assert(s.address1 == "10 Downing St")
-    assert(s.address2 == "Apt 2")
-    assert(s.city == "London")
-    assert(s.province == "England")
-    assert(s.provinceCode == "ENG")
-    assert(s.countryCode == "GB")
-    assert(s.zip == "SW1A 2AA")
-    assert(s.phone == "+44 20 7946 0958")
+    val expected = ShippingAddress(
+      firstName = "Ada",
+      lastName = "Lovelace",
+      address1 = "10 Downing St",
+      address2 = "Apt 2",
+      city = "London",
+      province = "England",
+      provinceCode = "ENG",
+      countryCode = "GB",
+      zip = "SW1A 2AA",
+      phone = "+44 20 7946 0958",
+    )
+    assert(req.shippingAddress == expected)
   }
 
   @Test
@@ -202,13 +237,6 @@ class MapOrderForMonolithTest {
     val req = orderToCreateShopifyOrderRequest("dropnext-staging", minimalOrder().copy(shippingAddress = null))
     assert(req.shippingAddress.address1 == "")
     assert(req.shippingAddress.firstName == null)
-  }
-
-  @Test
-  fun `maps line item unit price and order total from Shopify`() {
-    val req = orderToCreateShopifyOrderRequest("dropnext-staging", minimalOrder())
-    assert(req.lineItems.single().snapshotOfPriceAsString == "19.99")
-    assert(req.totalAsString == "39.98")
   }
 
   @Test
@@ -240,14 +268,7 @@ class MapOrderForMonolithTest {
 
   @Test
   fun `keeps a zero totalPriceSet instead of summing the undiscounted lines`() {
-    val order = minimalOrder().copy(
-      totalPriceSet = dropnext.graphql.generated.getorderfordss.MoneyBag(
-        shopMoney = dropnext.graphql.generated.getorderfordss.MoneyV2(
-          amount = "0.00",
-          currencyCode = dropnext.graphql.generated.enums.CurrencyCode.USD,
-        ),
-      ),
-    )
+    val order = minimalOrder().copy(totalPriceSet = MoneyBag(shopMoney = MoneyV2(amount = "0.00", currencyCode = CurrencyCode.USD)))
     val req = orderToCreateShopifyOrderRequest("dropnext-staging", order)
     assert(req.totalAsString == "0.00")
     assert(req.lineItems.isNotEmpty())
@@ -270,19 +291,10 @@ class MapOrderForMonolithTest {
 
   @Test
   fun `falls back to lineItems sum when totalPriceSet is unparseable`() {
-    val order = minimalOrder().copy(
-      totalPriceSet = dropnext.graphql.generated.getorderfordss.MoneyBag(
-        shopMoney = dropnext.graphql.generated.getorderfordss.MoneyV2(
-          amount = "n/a",
-          currencyCode = dropnext.graphql.generated.enums.CurrencyCode.USD,
-        ),
-      ),
-    )
+    val order = minimalOrder().copy(totalPriceSet = MoneyBag(shopMoney = MoneyV2(amount = "n/a", currencyCode = CurrencyCode.USD)))
     val req = orderToCreateShopifyOrderRequest("dropnext-staging", order)
-    val lineSumMinor = req.lineItems.sumOf {
-      shopifyAmountToMinorUnits(it.snapshotOfPriceAsString, "USD") * it.quantity.toLong()
-    }
-    assert(req.totalAsString == minorUnitsToShopifyAmount(lineSumMinor, "USD"))
+    // The fixture's one line: 19.99 × 2.
+    assert(req.totalAsString == "39.98")
   }
 
   /** A snapshot without a readable id used to be sent as order `0`; the id now comes from the gid the caller loaded. */
@@ -335,7 +347,6 @@ class MapOrderForMonolithTest {
 
   @Test
   fun `falls back to raw createdAt when parsing fails`() {
-
     val order = minimalOrder().copy(createdAt = "not-a-date")
     val req = orderToCreateShopifyOrderRequest("dropnext-staging", order)
     assert(req.createdAt == "not-a-date")

@@ -2,7 +2,7 @@ package dropnext.dss.lib.monolith
 
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
 import dropnext.dss.testutil.helper.capturingLogs
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.parallel.ResourceLock
 
 

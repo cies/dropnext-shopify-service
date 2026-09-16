@@ -14,7 +14,7 @@ import dropnext.dss.domain.WebhookRegistrationReport
 import dropnext.dss.domain.WebhookTopicRegistration
 import dropnext.dss.domain.WebhookTopicStatus
 import dropnext.dss.testutil.fixture.webhookSubscriptionStatus
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
 
 
 private const val CALLBACK_URL = "https://dss.example.com/webhooks/shopify"
@@ -75,7 +75,7 @@ class RenderOAuthInstallPageTest {
   @Test
   fun `a complete grant says every required access scope is granted`() {
     val html = renderBase()
-    assert("All 5 required access scopes granted." in html)
+    assert("All ${ShopifyAccessScope.entries.size} required access scopes granted." in html)
     assert("did not grant every access scope" !in html)
   }
 
@@ -87,8 +87,8 @@ class RenderOAuthInstallPageTest {
     assert("<td><code>write_fulfillments</code></td>" in html)
     assert(ShopifyAccessScope.WRITE_FULFILLMENTS.neededFor in html)
     assert(Regex("<strong>missing</strong>").findAll(html).count() == 1)
-    assert(Regex(">granted<").findAll(html).count() == 4)
-    assert("All 5 required access scopes granted." !in html)
+    assert(Regex(">granted<").findAll(html).count() == ShopifyAccessScope.entries.size - 1)
+    assert("All ${ShopifyAccessScope.entries.size} required access scopes granted." !in html)
   }
 
   @Test
@@ -247,13 +247,15 @@ class RenderOAuthInstallPageTest {
         WebhookTopicRegistration("ORDERS_UPDATED", WebhookTopicStatus.Failed("scope missing")),
       ),
     )
-    assert("Webhook subscriptions that could not be registered or updated" in html)
-    assert("PRODUCTS_CREATE" in html)
-    assert("ORDERS_UPDATED" in html)
-    assert("permission denied" in html)
-    assert("scope missing" in html)
-    assert("Reinstall the app after fixing." in html)
-    assert("the access scopes reported above" in html)
+    assert("Webhook subscriptions that could not be registered or updated:" in html)
+    // The topic table above names every topic too; only the block after the heading proves the failures are listed.
+    val failureBlock = html.substringAfter("Webhook subscriptions that could not be registered or updated:")
+    assert("PRODUCTS_CREATE" in failureBlock)
+    assert("ORDERS_UPDATED" in failureBlock)
+    assert("permission denied" in failureBlock)
+    assert("scope missing" in failureBlock)
+    assert("Reinstall the app after fixing." in failureBlock)
+    assert("the access scopes reported above" in failureBlock)
   }
 
   @Test
@@ -279,9 +281,6 @@ class RenderOAuthInstallPageTest {
 
   @Test
   fun `robots meta is set to noindex nofollow`() {
-    val html = renderBase()
-    assert("robots" in html)
-    assert("noindex" in html)
-    assert("nofollow" in html)
+    assert("""<meta name="robots" content="noindex, nofollow">""" in renderBase())
   }
 }

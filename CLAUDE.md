@@ -334,7 +334,8 @@ sees no more of the Ktor server than the application lifecycle, secrets redact a
 and `workflow/`, no hand-written contract DTOs or `OutBoundMonolithPaths` and the file naming rule. The `test/` →
 `src/` mirroring rule lives in `TestSuiteArchitectureTest` and is checked in one direction only: every test file must
 have a source counterpart; a source file without a test is not caught. Add a rule there before introducing a new
-layer, and extend an allowlist only with a one-line comment saying why.
+layer, and extend an allowlist only with a one-line comment saying why; an entry that no longer matches anything
+fails the build.
 
 
 # External dependency policy
@@ -483,8 +484,10 @@ exercises the behaviour:
   `assertNotNull` / `assertContains`; one fact per `assert`, so a failure names the fact.
 - **Fixtures have names**: build inputs with `minimalOrder()`, `diagramCrossFoOrder()`, `testConfig()` and friends
   rather than inlining a generated-type literal in every test.
-- **Every `MonolithService` and `ShopifyGraphqlService` method needs a wire-level test** whose case does not rely on
-  an empty response (so the deserialization is exercised); `TestSuiteArchitectureTest` enforces it.
+- **Every method of an outbound interface needs a wire-level test** (`MonolithService`, `ShopifyGraphqlService`,
+  `ShopifyOAuthService`, `WarmUpLoopbackService`) whose case does not rely on an empty response, so the
+  deserialization is exercised. `TestSuiteArchitectureTest` checks that a `@Test` named after each method exists;
+  that its response carries data is for review, not enforced.
 - **A request → response test goes through `withDssApp(deps)`**, which mounts the production `dssModule` with no
   warm-up; pass `warmUp = WarmUp(budget) { … }` to test the readiness gate. A test that spins up its own server
   proves only that its own wiring works.

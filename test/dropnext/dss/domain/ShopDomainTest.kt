@@ -1,6 +1,7 @@
 package dropnext.dss.domain
 
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
+
 
 class ShopDomainTest {
 

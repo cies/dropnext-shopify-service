@@ -9,7 +9,8 @@ import dropnext.graphql.generated.getorderfordss.FulfillmentOrderLineItemConnect
 import dropnext.graphql.generated.getorderfordss.FulfillmentOrderLineItemEdge
 import dropnext.graphql.generated.getorderfordss.ProductVariant
 import dropnext.graphql.generated.inputs.FulfillmentOrderLineItemInput
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
+
 
 class OpenFulfillmentLinesTest {
 

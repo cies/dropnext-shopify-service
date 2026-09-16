@@ -12,10 +12,10 @@ import dropnext.dss.handler.MAX_CONCURRENT_MIRRORS
 import dropnext.dss.handler.MonolithWebhookHandlers
 import dropnext.dss.handler.OAuthHandlers
 import dropnext.dss.handler.ShopifyWebhookHandlers
-import dropnext.dss.handler.WebhookSubscriptionHandlers
 import dropnext.dss.handler.WEBHOOK_MIRROR_BUDGET
 import dropnext.dss.handler.WEBHOOK_MONOLITH_MAX_RETRIES
 import dropnext.dss.handler.WEBHOOK_WRITE_GRACE
+import dropnext.dss.handler.WebhookSubscriptionHandlers
 import dropnext.dss.lib.ktor.createMonolithHttpClient
 import dropnext.dss.lib.ktor.createSharedHttpClient
 import dropnext.dss.lib.monolith.HttpMonolithService
@@ -30,8 +30,10 @@ import dropnext.dss.lib.shopify.webhook.ShopifyHmacVerifierService
 import dropnext.dss.workflow.resolveShopTokenFromMonolith
 import io.github.oshai.kotlinlogging.KotlinLogging
 import io.ktor.client.HttpClient
+import java.time.Clock
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeSource
 import kotlinx.coroutines.sync.Semaphore
 
 
@@ -134,6 +136,9 @@ fun dssDependencies(
   webhookMirrorBudget: Duration = WEBHOOK_MIRROR_BUDGET,
   webhookWriteGrace: Duration = WEBHOOK_WRITE_GRACE,
   webhookMirrorSlots: Semaphore = Semaphore(MAX_CONCURRENT_MIRRORS),
+  /** The two the delivery report's timings are read from; a test hands in a fixed pair to assert what it printed. */
+  webhookClock: Clock = Clock.systemUTC(),
+  webhookTimeSource: TimeSource = TimeSource.Monotonic,
   readiness: Readiness = Readiness(),
   /** The requests the warm-up sends the service itself: the shared client, to the port the server binds. */
   warmUpLoopback: WarmUpLoopbackService = HttpWarmUpLoopbackService(
@@ -164,6 +169,8 @@ fun dssDependencies(
     webhookMirrorBudget,
     webhookWriteGrace,
     webhookMirrorSlots,
+    webhookClock,
+    webhookTimeSource,
   ),
   monolithWebhookHandlers = MonolithWebhookHandlers(
     shopifyGraphqlServiceFactory,

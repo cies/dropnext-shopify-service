@@ -23,6 +23,7 @@ import dropnext.graphql.generated.getorderfordss.MoneyV22
 import dropnext.graphql.generated.getorderfordss.Order
 import dropnext.graphql.generated.getorderfordss.ProductVariant
 
+
 internal fun minimalOrder(
   fulfillment: OrderDisplayFulfillmentStatus = OrderDisplayFulfillmentStatus.UNFULFILLED,
   financial: OrderDisplayFinancialStatus = OrderDisplayFinancialStatus.PAID,

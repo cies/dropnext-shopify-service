@@ -1,16 +1,10 @@
 package dropnext.dss.handler
 
-import dropnext.dss.contract.CreateShopifyOrderRequest
-import dropnext.dss.contract.DeleteProductVariantsRequest
-import dropnext.dss.contract.UpsertProductVariantsRequest
 import dropnext.dss.domain.ShopDomain
 import dropnext.dss.lib.ktor.DssError
 import dropnext.dss.lib.ktor.MAX_CONCURRENT_REQUESTS_PER_HOST
 import dropnext.dss.lib.ktor.respondError
 import dropnext.dss.lib.ktor.toHttpStatus
-import dropnext.dss.lib.slf4j.currentTraceId
-import dropnext.dss.lib.monolith.CreateOrderOutcome
-import dropnext.dss.lib.monolith.MonolithResult
 import dropnext.dss.lib.monolith.MonolithService
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlService
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlServiceFactory
@@ -21,6 +15,7 @@ import dropnext.dss.lib.shopify.webhook.graphqlResourceIdFromShopifyWebhook
 import dropnext.dss.lib.shopify.webhook.productIdFromProductWebhook
 import dropnext.dss.lib.shopify.webhook.shopDomainFromWebhook
 import dropnext.dss.lib.slf4j.SHOP_MDC_KEY
+import dropnext.dss.lib.slf4j.currentTraceId
 import dropnext.dss.lib.slf4j.withMdcEntries
 import dropnext.dss.workflow.WebhookMirrorOutcome
 import dropnext.dss.workflow.WebhookSkipReason
@@ -33,14 +28,13 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
+import java.time.Clock
 import java.time.Instant
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
+import kotlin.time.TimeSource
 import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.withTimeoutOrNull
 
 
 private val log = KotlinLogging.logger {}
@@ -98,11 +92,15 @@ class ShopifyWebhookHandlers(
   private val mirrorBudget: Duration = WEBHOOK_MIRROR_BUDGET,
   private val writeGrace: Duration = WEBHOOK_WRITE_GRACE,
   private val mirrorSlots: Semaphore = Semaphore(MAX_CONCURRENT_MIRRORS),
+  /** What `lag_ms` is measured against. Injectable so a test can assert the value rather than only its presence. */
+  private val clock: Clock = Clock.systemUTC(),
+  /** What `took_ms` is measured with: monotonic, so a clock step cannot make a delivery look instant or eternal. */
+  private val timeSource: TimeSource = TimeSource.Monotonic,
 ) {
 
   suspend fun handleShopifyWebhook(call: ApplicationCall) {
-    val receivedAt = Instant.now()
-    val startedNanos = System.nanoTime()
+    val receivedAt = clock.instant()
+    val started = timeSource.markNow()
     val hmacHeader = call.request.headers["X-Shopify-Hmac-Sha256"]
     val topic = ShopifyWebhookTopic.parse(call.request.headers["X-Shopify-Topic"])
     val shopDomainHeader = call.request.headers["X-Shopify-Shop-Domain"]
@@ -128,7 +126,7 @@ class ShopifyWebhookHandlers(
         shop == null -> WebhookMirrorOutcome.Skipped(WebhookSkipReason.NO_SHOP_DOMAIN)
         !mirrorSlots.tryAcquire() -> WebhookMirrorOutcome.Overloaded
         else -> try {
-          mirrorWithinBudget(topic, shop, bodyString)
+          mirrorWithinBudget(monolithService, mirrorBudget, writeGrace) { monolith -> mirror(topic, shop, bodyString, monolith) }
         } finally {
           mirrorSlots.release()
         }
@@ -138,7 +136,7 @@ class ShopifyWebhookHandlers(
         topic = topic.raw,
         webhookId = call.request.headers["X-Shopify-Webhook-Id"],
         lagMillis = call.request.headers["X-Shopify-Triggered-At"]?.let { lagMillis(it, receivedAt) },
-        tookMillis = (System.nanoTime() - startedNanos) / 1_000_000,
+        tookMillis = started.elapsedNow().inWholeMilliseconds,
         outcome = outcome,
       )
       val answer = if (outcome.isTransient) DssError.UpstreamFailure("not mirrored, please redeliver") else null
@@ -152,15 +150,6 @@ class ShopifyWebhookHandlers(
     }
   }
 
-  private suspend fun mirrorWithinBudget(topic: ShopifyWebhookTopic, shop: ShopDomain, bodyString: String): WebhookMirrorOutcome =
-    coroutineScope {
-      val monolith = WriteTrackingMonolithService(monolithService)
-      val work = async { mirror(topic, shop, bodyString, monolith) }
-      // Timing out an await leaves the awaited work running: it is a child of this scope, not of the timeout.
-      val outcome = withTimeoutOrNull(mirrorBudget) { work.await() }
-        ?: if (monolith.writeStarted) withTimeoutOrNull(writeGrace) { work.await() } else null
-      outcome ?: WebhookMirrorOutcome.TimedOut.also { work.cancel() }
-    }
 
   // The Shopify service is resolved per branch: a delete needs none (the product is gone and the
   // body carries its id), and a shop without a token must not lose its deletes.
@@ -208,29 +197,6 @@ class ShopifyWebhookHandlers(
     }
 }
 
-/**
- * One delivery's view of the monolith, noting when the delivery starts changing it: from then on the budget waits out
- * [WEBHOOK_WRITE_GRACE] before cancelling. The token lookup goes through the token store's own service and never counts.
- */
-private class WriteTrackingMonolithService(private val delegate: MonolithService) : MonolithService by delegate {
-  @Volatile
-  var writeStarted: Boolean = false
-    private set
-
-  override suspend fun postCreateOrder(request: CreateShopifyOrderRequest): MonolithResult<CreateOrderOutcome> =
-    write { delegate.postCreateOrder(request) }
-
-  override suspend fun upsertProductVariants(request: UpsertProductVariantsRequest): MonolithResult<Int> =
-    write { delegate.upsertProductVariants(request) }
-
-  override suspend fun deleteProductVariants(request: DeleteProductVariantsRequest): MonolithResult<Int> =
-    write { delegate.deleteProductVariants(request) }
-
-  private inline fun <T> write(block: () -> T): T {
-    writeStarted = true
-    return block()
-  }
-}
 
 /** Shopify sends `X-Shopify-Triggered-At` as ISO-8601; an unparseable value costs the field, not the delivery. */
 private fun lagMillis(triggeredAt: String, receivedAt: Instant): Long? =

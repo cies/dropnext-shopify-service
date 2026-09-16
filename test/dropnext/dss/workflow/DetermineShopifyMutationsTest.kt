@@ -12,8 +12,8 @@ import dropnext.dss.testutil.fixture.orderWithTwoVariantFulfillmentOrders
 import dropnext.dss.testutil.fixture.shipment
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
 import dropnext.dss.testutil.helper.capturingLogs
-import kotlin.test.Test
 import kotlinx.coroutines.runBlocking
+import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.parallel.ResourceLock
 
 
@@ -30,55 +30,13 @@ class DetermineShopifyMutationsTest {
     assert(fake.createFulfillmentCalls.isEmpty())
   }
 
+  /** The error is the service's, already triaged: the plan step adds nothing to it and sends nothing after it. */
   @Test
-  fun `missing order is NotFound`() = runBlocking {
+  fun `a failed order load is passed through and nothing is planned`() = runBlocking {
     val fake = FakeShopifyGraphqlService()
     fake.orderForDssResult = Failure(ShopifyError.NotFound("order 1001 not found"))
     val result = determineShopifyMutations(fake, ShopifyOrderId(1001L), shipments = listOf(shipment()))
-    assert(result is Failure)
-    val error = (result as Failure).reason
-    assert(error is ShopifyError.NotFound)
-    assert("order 1001 not found" in error.message)
-    assert(fake.cancelFulfillmentCalls.isEmpty())
-  }
-
-  @Test
-  fun `Graphql errors with no order are GraphqlError`() = runBlocking {
-    val fake = FakeShopifyGraphqlService()
-    fake.orderForDssResult = Failure(ShopifyError.GraphqlError("throttled"))
-    val result = determineShopifyMutations(fake, ShopifyOrderId(1001L), shipments = listOf(shipment()))
-    assert(result is Failure)
-    val error = (result as Failure).reason
-    assert(error is ShopifyError.GraphqlError)
-    assert("throttled" in error.message)
-  }
-
-  @Test
-  fun `load exception is Network`() = runBlocking {
-    val fake = FakeShopifyGraphqlService()
-    fake.orderForDssResult = Failure(ShopifyError.Network("connection refused"))
-    val result = determineShopifyMutations(fake, ShopifyOrderId(1001L), shipments = listOf(shipment()))
-    assert(result is Failure)
-    val error = (result as Failure).reason
-    assert(error is ShopifyError.Network)
-    assert("connection refused" in error.message)
-  }
-
-  @Test
-  fun `existing fulfillment is not planned as a cancel`() = runBlocking {
-    val fake = FakeShopifyGraphqlService()
-    fake.orderForDssResult = Success(
-      minimalOrder().copy(
-        fulfillments = listOf(
-          fulfillment(8000L),
-        ),
-      ),
-    )
-    val result = determineShopifyMutations(fake, ShopifyOrderId(1001L), shipments = listOf(shipment()))
-    val mutations = (result as Success).value.mutations
-    assert(mutations.none { it is ShopifyMutation.FulfillmentCancel })
-    assert(mutations.single() is ShopifyMutation.FulfillmentCreate)
-    assert(fake.cancelFulfillmentCalls.isEmpty())
+    assert(result == Failure(ShopifyError.NotFound("order 1001 not found")))
     assert(fake.createFulfillmentCalls.isEmpty())
   }
 

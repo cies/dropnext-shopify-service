@@ -5,7 +5,7 @@ import dropnext.dss.lib.monolith.MonolithErrorBody
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.workflow.WebhookMirrorOutcome
 import dropnext.dss.workflow.WebhookSkipReason
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
 
 
 /**
@@ -17,7 +17,7 @@ class WebhookDeliveryReportTest {
   private fun report(outcome: WebhookMirrorOutcome, lagMillis: Long? = 840L) =
     WebhookDeliveryReport(
       topic = "orders/create",
-      webhookId = "b54557e4-0f2d-4d7c-8c45-8d2a5c4d6f7e",
+      webhookId = WEBHOOK_ID,
       lagMillis = lagMillis,
       tookMillis = 612L,
       outcome = outcome,
@@ -27,11 +27,7 @@ class WebhookDeliveryReportTest {
   fun `a mirrored delivery is an info line with the lag and the duration`() {
     val report = report(WebhookMirrorOutcome.Mirrored)
     assert(report.logLevel == WebhookDeliveryReport.LogLevel.INFO)
-    assert(
-      report.logLine(200) ==
-        "Webhook done topic=orders/create webhook_id=b54557e4-0f2d-4d7c-8c45-8d2a5c4d6f7e " +
-        "outcome=mirrored lag_ms=840 took_ms=612 answered=200",
-    )
+    assert(report.logLine(200) == "$LINE_START outcome=mirrored lag_ms=840 took_ms=612 answered=200")
     assert(report.toResponse("trace-1") == WebhookDeliveryResponse(outcome = "mirrored", traceId = "trace-1"))
   }
 
@@ -39,8 +35,8 @@ class WebhookDeliveryReportTest {
   fun `a skipped delivery names its reason in both renderings`() {
     val report = report(WebhookMirrorOutcome.Skipped(WebhookSkipReason.TOPIC_NOT_MIRRORED), lagMillis = null)
     assert(report.logLevel == WebhookDeliveryReport.LogLevel.INFO)
-    assert("outcome=skipped reason=topic_not_mirrored" in report.logLine(200))
-    assert("lag_ms" !in report.logLine(200))
+    // No `lag_ms` at all: a delivery without a readable trigger time has no lag to report, not a zero one.
+    assert(report.logLine(200) == "$LINE_START outcome=skipped reason=topic_not_mirrored took_ms=612 answered=200")
     assert(report.toResponse(null) == WebhookDeliveryResponse(outcome = "skipped", reason = "topic_not_mirrored"))
   }
 
@@ -58,8 +54,10 @@ class WebhookDeliveryReportTest {
   fun `a transient failure is a warning that says Shopify was asked to redeliver`() {
     val report = report(WebhookMirrorOutcome.MonolithFailed(MonolithError.Transport("connection refused")))
     assert(report.logLevel == WebhookDeliveryReport.LogLevel.WARN)
-    assert("outcome=failed transient=true error=monolith_transport" in report.logLine(502))
-    assert(report.logLine(502).endsWith("answered=502"))
+    assert(
+      report.logLine(502) ==
+        "$LINE_START outcome=failed transient=true error=monolith_transport lag_ms=840 took_ms=612 answered=502",
+    )
   }
 
   @Test
@@ -67,7 +65,7 @@ class WebhookDeliveryReportTest {
     val refused = MonolithError.Rejected(400, "bad", MonolithErrorBody(message = "bad", code = null, monolithTraceId = null))
     val report = report(WebhookMirrorOutcome.MonolithFailed(refused))
     assert(report.logLevel == WebhookDeliveryReport.LogLevel.ERROR)
-    assert("outcome=failed transient=false error=monolith_400" in report.logLine(200))
+    assert(report.logLine(200) == "$LINE_START outcome=failed transient=false error=monolith_400 lag_ms=840 took_ms=612 answered=200")
     assert(report.toResponse("trace-2") == WebhookDeliveryResponse(outcome = "failed", error = "monolith_400", traceId = "trace-2"))
   }
 
@@ -88,9 +86,18 @@ class WebhookDeliveryReportTest {
   fun `an unavailable token and a blown time budget are transient failures with their own labels`() {
     val unavailable = report(WebhookMirrorOutcome.TokenUnavailable)
     assert(unavailable.logLevel == WebhookDeliveryReport.LogLevel.WARN)
-    assert("outcome=failed transient=true error=token_unavailable" in unavailable.logLine(502))
-    assert("outcome=failed transient=true error=timed_out" in report(WebhookMirrorOutcome.TimedOut).logLine(502))
-    assert("outcome=failed transient=true error=overloaded" in report(WebhookMirrorOutcome.Overloaded).logLine(502))
+    assert(
+      unavailable.logLine(502) ==
+        "$LINE_START outcome=failed transient=true error=token_unavailable lag_ms=840 took_ms=612 answered=502",
+    )
+    assert(
+      report(WebhookMirrorOutcome.TimedOut).logLine(502) ==
+        "$LINE_START outcome=failed transient=true error=timed_out lag_ms=840 took_ms=612 answered=502",
+    )
+    assert(
+      report(WebhookMirrorOutcome.Overloaded).logLine(502) ==
+        "$LINE_START outcome=failed transient=true error=overloaded lag_ms=840 took_ms=612 answered=502",
+    )
     assert(report(WebhookMirrorOutcome.Overloaded).logLevel == WebhookDeliveryReport.LogLevel.WARN)
   }
 
@@ -98,7 +105,10 @@ class WebhookDeliveryReportTest {
   fun `a Graphql failure's codes are on the log line, and a permanent one is an error`() {
     val denied = report(WebhookMirrorOutcome.ShopifyFailed(ShopifyError.GraphqlError("Access denied", codes = listOf("ACCESS_DENIED"))))
     assert(denied.logLevel == WebhookDeliveryReport.LogLevel.ERROR)
-    assert("transient=false error=shopify_graphql codes=ACCESS_DENIED" in denied.logLine(200))
+    assert(
+      denied.logLine(200) ==
+        "$LINE_START outcome=failed transient=false error=shopify_graphql codes=ACCESS_DENIED lag_ms=840 took_ms=612 answered=200",
+    )
     assert(denied.toResponse(null) == WebhookDeliveryResponse(outcome = "failed", error = "shopify_graphql"))
   }
 
@@ -112,6 +122,14 @@ class WebhookDeliveryReportTest {
   @Test
   fun `a delivery without a shop domain or a webhook id still renders`() {
     val report = report(WebhookMirrorOutcome.Skipped(WebhookSkipReason.NO_SHOP_DOMAIN)).copy(webhookId = null)
-    assert("webhook_id=- outcome=skipped reason=no_shop_domain" in report.logLine(200))
+    assert(
+      report.logLine(200) ==
+        "Webhook done topic=orders/create webhook_id=- outcome=skipped reason=no_shop_domain lag_ms=840 took_ms=612 answered=200",
+    )
   }
 }
+
+private const val WEBHOOK_ID = "b54557e4-0f2d-4d7c-8c45-8d2a5c4d6f7e"
+
+/** What every line of [WebhookDeliveryReportTest] opens with; each case spells out the rest, which is what it is about. */
+private const val LINE_START = "Webhook done topic=orders/create webhook_id=$WEBHOOK_ID"

@@ -26,20 +26,32 @@ import io.ktor.server.testing.testApplication
  *
  * [warmUp] is none unless a test says otherwise: the production warm-up calls the monolith and Shopify on its own,
  * and a fake's recorded calls or a fake server's answer queue would count them.
+ *
+ * Whatever [block] answers is handed back, for the values that outlive the application — a minted trace id, a response
+ * a test reads after the clients are closed. `testApplication` itself answers nothing, so a caller that needed one
+ * used to hoist a `var` out of the block and fill it in from inside.
  */
-fun withDssApp(
+fun <T> withDssApp(
   deps: DssDependencies,
   authenticateAsMonolith: Boolean = false,
   warmUp: WarmUp = WarmUp.NONE,
-  block: suspend ApplicationTestBuilder.(HttpClient) -> Unit,
-) = testApplication {
-  application { dssModule(deps, warmUp) }
-  val client = createClient {
-    followRedirects = false
-    install(ClientContentNegotiation) { json(AppJson) }
-    if (authenticateAsMonolith) {
-      defaultRequest { header("Authorization", "Bearer ${deps.config.monolithToDssApiKey.value}") }
+  block: suspend ApplicationTestBuilder.(HttpClient) -> T,
+): T {
+  // `testApplication` runs the block to completion before it returns, so a plain capture is safely published here.
+  var answer: Answer<T>? = null
+  testApplication {
+    application { dssModule(deps, warmUp) }
+    val client = createClient {
+      followRedirects = false
+      install(ClientContentNegotiation) { json(AppJson) }
+      if (authenticateAsMonolith) {
+        defaultRequest { header("Authorization", "Bearer ${deps.config.monolithToDssApiKey.value}") }
+      }
     }
+    answer = Answer(block(client))
   }
-  block(client)
+  return checkNotNull(answer) { "the test application returned before the block ran" }.value
 }
+
+/** A box, so a block answering `null` is told apart from one that never ran. */
+private class Answer<out T>(val value: T)

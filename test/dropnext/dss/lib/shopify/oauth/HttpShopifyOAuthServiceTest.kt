@@ -6,17 +6,21 @@ import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.domain.ShopifyAppSecret
 import dropnext.dss.lib.json.AppJson
+import dropnext.dss.testutil.fake.FakeFlakyServer
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlServer
+import dropnext.dss.testutil.helper.failureReason
 import dropnext.dss.testutil.helper.shopifyRewritingHttpClient
-import dropnext.dss.testutil.helper.testHttpClient
+import dropnext.dss.testutil.helper.successValue
 import dropnext.dss.testutil.helper.throwingHttpClient
+import dropnext.dss.testutil.helper.withFakeShopifyServer
 import io.ktor.http.HttpStatusCode
+import java.net.URI
 import java.time.Instant
-import kotlin.test.Test
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-
+import org.junit.jupiter.api.AutoClose
+import org.junit.jupiter.api.Test
 
 
 private val shop = ShopDomain.parse("acme.myshopify.com")!!
@@ -24,8 +28,9 @@ private val now = Instant.parse("2026-05-22T12:00:00Z")
 
 class HttpShopifyOAuthServiceTest {
 
-  // Never used: every case here signs or builds a URL, none of them reaches the network.
-  private val httpClient = testHttpClient()
+  // The signing and URL cases never reach the network; a client that fails every request says so if one ever does.
+  @AutoClose
+  private val httpClient = throwingHttpClient(IllegalStateException("the signing and URL cases send no request"))
   private val client = oauthService(secret = "client-secret-xyz")
 
   private fun oauthService(secret: String) = HttpShopifyOAuthService(
@@ -56,39 +61,39 @@ class HttpShopifyOAuthServiceTest {
   // ---------- signed state ----------
 
   @Test
-  fun `signedState validates with matching inputs`() {
+  fun `isSignedStateValid accepts a state signed for the same shop`() {
     val state = client.signedState(shop, now)
     assert(client.isSignedStateValid(state, shop, now))
   }
 
   @Test
-  fun `signedState validates a few seconds after signing`() {
+  fun `isSignedStateValid accepts a state a few seconds after signing`() {
     val state = client.signedState(shop, now)
     assert(client.isSignedStateValid(state, shop, now.plusSeconds(30)))
   }
 
   @Test
-  fun `signedState expires after 5 minutes`() {
+  fun `isSignedStateValid refuses a state after 5 minutes`() {
     val state = client.signedState(shop, now)
     assert(!client.isSignedStateValid(state, shop, now.plusSeconds(301)))
   }
 
   @Test
-  fun `signedState rejects mismatched shop`() {
+  fun `isSignedStateValid rejects mismatched shop`() {
     val state = client.signedState(shop, now)
     val other = ShopDomain.parse("other.myshopify.com")!!
     assert(!client.isSignedStateValid(state, other, now))
   }
 
   @Test
-  fun `signedState rejects wrong secret`() {
+  fun `isSignedStateValid rejects wrong secret`() {
     val state = client.signedState(shop, now)
     val otherClient = oauthService(secret = "different-secret")
     assert(!otherClient.isSignedStateValid(state, shop, now))
   }
 
   @Test
-  fun `signedState rejects tampered shop portion`() {
+  fun `isSignedStateValid rejects tampered shop portion`() {
     val state = client.signedState(shop, now)
     val parts = state.split('|')
     val tampered = listOf("evil.myshopify.com", parts[1], parts[2], parts[3]).joinToString("|")
@@ -96,23 +101,43 @@ class HttpShopifyOAuthServiceTest {
     assert(!client.isSignedStateValid(tampered, evil, now))
   }
 
+  /**
+   * The expiry is what keeps a leaked redirect from being replayed, so it has to be under the signature: extended, with
+   * the shop and the original signature kept, only the signature can refuse it.
+   */
   @Test
-  fun `signedState rejects malformed state with three segments`() {
+  fun `isSignedStateValid rejects a state whose expiry was extended after signing`() {
+    val parts = client.signedState(shop, now).split('|')
+    val later = now.plusSeconds(3_600)
+    val extended = listOf(parts[0], later.epochSecond.toString(), parts[2], parts[3]).joinToString("|")
+    // Past the original expiry, well before the extended one: the clock alone would accept it.
+    assert(!client.isSignedStateValid(extended, shop, now.plusSeconds(600)))
+  }
+
+  @Test
+  fun `isSignedStateValid rejects a state whose nonce was replaced after signing`() {
+    val parts = client.signedState(shop, now).split('|')
+    val replaced = listOf(parts[0], parts[1], "another-nonce", parts[3]).joinToString("|")
+    assert(!client.isSignedStateValid(replaced, shop, now))
+  }
+
+  @Test
+  fun `isSignedStateValid rejects malformed state with three segments`() {
     assert(!client.isSignedStateValid("only|three|parts", shop, now))
   }
 
   @Test
-  fun `signedState rejects malformed state with five segments`() {
+  fun `isSignedStateValid rejects malformed state with five segments`() {
     assert(!client.isSignedStateValid("a|b|c|d|e", shop, now))
   }
 
   @Test
-  fun `signedState rejects empty state`() {
+  fun `isSignedStateValid rejects empty state`() {
     assert(!client.isSignedStateValid("", shop, now))
   }
 
   @Test
-  fun `signedState rejects non-numeric expiry`() {
+  fun `isSignedStateValid rejects non-numeric expiry`() {
     val state = "${shop.normalizedShopifyHost}|notANumber|nonce|signature"
     assert(!client.isSignedStateValid(state, shop, now))
   }
@@ -130,7 +155,7 @@ class HttpShopifyOAuthServiceTest {
   fun `exchangeCode posts the app credentials with the code and answers the token`() = withFakeShopify { server, service ->
     val result = service.exchangeCode(shop, "abc-code")
 
-    assert((result as Success).value.token == ShopifyAdminToken("shpat_fake_admin_token"))
+    assert(result.successValue().token == ShopifyAdminToken("shpat_fake_admin_token"))
     val sent = AppJson.parseToJsonElement(server.oauthCalls.single()).jsonObject
     assert(sent["client_id"]?.jsonPrimitive?.content == "client-id-123")
     assert(sent["client_secret"]?.jsonPrimitive?.content == "client-secret-xyz")
@@ -175,8 +200,20 @@ class HttpShopifyOAuthServiceTest {
 
     val result = service.exchangeCode(shop, "abc-code")
 
-    assert((result as Failure).reason is OAuthError.Transport)
-    assert("client-secret-xyz" !in result.reason.message)
+    assert(result.failureReason() is OAuthError.Transport)
+    assert("client-secret-xyz" !in result.failureReason().message)
+  }
+
+  /** A connection Shopify drops is worth sending the merchant back for: the next attempt may well get through. */
+  @Test
+  fun `exchangeCode answers Transport when the connection is dropped`() = runBlocking {
+    FakeFlakyServer().use { flaky ->
+      shopifyRewritingHttpClient(URI(flaky.baseUrl).port).use { shopifyClient ->
+        val service = HttpShopifyOAuthService(shopifyClient, "client-id-123", ShopifyAppSecret("s"), "https://dss.example.com/oauth/callback")
+        val result = service.exchangeCode(shop, "abc-code")
+        assert(result.failureReason() is OAuthError.Transport)
+      }
+    }
   }
 
   /** Sending the merchant back to Shopify for a bug on our side would fail the same way again. */
@@ -196,26 +233,20 @@ class HttpShopifyOAuthServiceTest {
 
     val result = service.exchangeCode(shop, "abc-code")
 
-    assert((result as Failure).reason is OAuthError.Transport)
-    assert("shpat_must_not_leak" !in result.reason.message)
+    assert(result.failureReason() is OAuthError.Transport)
+    assert("shpat_must_not_leak" !in result.failureReason().message)
   }
 
-  /** A fake Shopify serving the token exchange, reached through the rewriting client so the service keeps its real URL. */
-  private fun withFakeShopify(block: suspend (FakeShopifyGraphqlServer, ShopifyOAuthService) -> Unit) {
-    val server = FakeShopifyGraphqlServer()
-    val rewritingClient = shopifyRewritingHttpClient(server.start())
-    try {
+  /** A fake Shopify serving the token exchange, reached through the shared helper so the service keeps its real URL. */
+  private fun withFakeShopify(block: suspend (FakeShopifyGraphqlServer, ShopifyOAuthService) -> Unit) =
+    withFakeShopifyServer { server, shopifyClient ->
       val service = HttpShopifyOAuthService(
-        httpClient = rewritingClient,
+        httpClient = shopifyClient,
         clientId = "client-id-123",
         clientSecret = ShopifyAppSecret("client-secret-xyz"),
         redirectUrl = "https://dss.example.com/oauth/callback",
       )
       runBlocking { block(server, service) }
-    } finally {
-      rewritingClient.close()
-      server.stop()
     }
-  }
 }
 

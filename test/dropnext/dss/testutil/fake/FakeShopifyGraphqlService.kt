@@ -44,7 +44,6 @@ class FakeShopifyGraphqlService(
   val shopIdentityCalls: MutableList<ShopDomain> = mutableListOf()
 
   var productCountResult: ShopifyResult<ProductCount> = Success(ProductCount(count = 0, isExact = true))
-  val productCountCalls: MutableList<ShopDomain> = mutableListOf()
 
   var accessScopeHandlesResult: ShopifyResult<List<String>> = Success(ShopifyAccessScope.entries.map { it.handle })
   val accessScopeHandlesCalls: MutableList<ShopDomain> = mutableListOf()
@@ -53,7 +52,6 @@ class FakeShopifyGraphqlService(
   val productByIdCalls: MutableList<String> = mutableListOf()
 
   var orderForDssResult: ShopifyResult<Order> = Failure(ShopifyError.NotFound("order not found"))
-  val orderForDssResultQueue: MutableList<ShopifyResult<Order>> = mutableListOf()
 
   /** How long `orderForDss` takes to answer: what makes a webhook outlive its time budget. */
   var orderForDssDelay: Duration = Duration.ZERO
@@ -96,10 +94,7 @@ class FakeShopifyGraphqlService(
     return shopIdentityResult
   }
 
-  override suspend fun productCount(): ShopifyResult<ProductCount> {
-    productCountCalls.add(shop)
-    return productCountResult
-  }
+  override suspend fun productCount(): ShopifyResult<ProductCount> = productCountResult
 
   override suspend fun accessScopeHandles(): ShopifyResult<List<String>> {
     accessScopeHandlesCalls.add(shop)
@@ -115,9 +110,6 @@ class FakeShopifyGraphqlService(
     orderForDssCalls.add(orderGid)
     delay(orderForDssDelay)
     orderForDssGate?.await()
-    if (orderForDssResultQueue.isNotEmpty()) {
-      return orderForDssResultQueue.removeAt(0)
-    }
     return orderForDssResult
   }
 
@@ -131,7 +123,7 @@ class FakeShopifyGraphqlService(
     tracking: FulfillmentTracking,
     notifyCustomer: Boolean,
   ): ShopifyResult<ShopifyFulfillmentId> {
-    createFulfillmentCalls.add(RecordedCreateFulfillmentCall(lines = lines, tracking = tracking))
+    createFulfillmentCalls.add(RecordedCreateFulfillmentCall(lines = lines, tracking = tracking, notifyCustomer = notifyCustomer))
     if (createFulfillmentResultQueue.isNotEmpty()) {
       return createFulfillmentResultQueue.removeAt(0)
     }
@@ -180,11 +172,9 @@ class FakeShopifyGraphqlService(
 
   override fun clear() {
     shopIdentityCalls.clear()
-    productCountCalls.clear()
     accessScopeHandlesCalls.clear()
     productByIdCalls.clear()
     orderForDssCalls.clear()
-    orderForDssResultQueue.clear()
     orderForDssDelay = Duration.ZERO
     orderForDssGate = null
     cancelFulfillmentCalls.clear()
@@ -201,6 +191,8 @@ class FakeShopifyGraphqlService(
 data class RecordedCreateFulfillmentCall(
   val lines: List<FulfillmentLine>,
   val tracking: FulfillmentTracking,
+  /** Recorded because `true` would have Shopify email the retailer's customers on our behalf. */
+  val notifyCustomer: Boolean,
 )
 
 data class RecordedUpdateWebhookSubscriptionCall(

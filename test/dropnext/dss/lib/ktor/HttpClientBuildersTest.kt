@@ -4,7 +4,9 @@ import dropnext.dss.lib.slf4j.TRACE_ID_MDC_KEY
 import dropnext.dss.testutil.fake.FakeFlakyServer
 import dropnext.dss.testutil.fake.FakeMonolithHttpServer
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
+import dropnext.dss.testutil.helper.awaitUntil
 import dropnext.dss.testutil.helper.capturingLogs
+import dropnext.dss.testutil.helper.withFakeMonolithServer
 import io.ktor.callid.withCallId
 import io.ktor.client.plugins.HttpRequestTimeoutException
 import io.ktor.client.request.get
@@ -16,12 +18,14 @@ import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
 import io.ktor.server.routing.routing
 import io.ktor.server.testing.testApplication
+import java.io.IOException
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlin.time.Duration.Companion.milliseconds
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.parallel.ResourceLock
 
@@ -85,7 +89,8 @@ class HttpClientBuildersTest {
       val client = createMonolithHttpClient(createSharedHttpClient(), retryBaseDelayMillis = NO_BACKOFF_MILLIS)
       try {
         val outcome = runCatching { runBlocking { client.get(upstream.baseUrl) } }
-        assert(outcome.isFailure)
+        // An `IOException` is what `HttpMonolithService` answers as a transport failure; anything else would escape it.
+        assert(outcome.exceptionOrNull() is IOException)
         assert(upstream.connectionCount == 1 + MONOLITH_MAX_RETRIES)
       } finally {
         client.close()
@@ -108,6 +113,50 @@ class HttpClientBuildersTest {
     } finally {
       client.close()
       upstream.stop()
+    }
+  }
+
+  /**
+   * A `4xx` is the monolith's answer, not its failure: a `404` from the store lookup or a `409` from an order create is
+   * final, and repeating it would only spend a webhook's budget on the same answer.
+   */
+  @Test
+  fun `the monolith client does not retry a client error`() {
+    withFakeMonolithServer { upstream, baseUrl ->
+      val client = createMonolithHttpClient(createSharedHttpClient(), retryBaseDelayMillis = NO_BACKOFF_MILLIS)
+      try {
+        upstream.enqueue(HttpStatusCode.NotFound, "")
+        upstream.enqueue(HttpStatusCode.OK, "{}")
+        val response: HttpResponse = runBlocking { client.get("$baseUrl/stores") }
+        assert(response.status == HttpStatusCode.NotFound)
+        assert(upstream.requests.size == 1)
+      } finally {
+        client.close()
+      }
+    }
+  }
+
+  /**
+   * The pauses are what fit the retries into a webhook's budget. Ktor waits `base^(retry - 1) × baseDelayMs`, capped
+   * at `maxDelayMs`, plus a random `[0, randomizationMs)`: with a base delay of 50 ms that is 50, 100 and 200 (the cap,
+   * four times the base), plus less than 25 each, so 350 to 422 ms in all. Below 350 the pauses no longer double;
+   * seconds would mean the cap or the random part no longer holds (Ktor's defaults add up to a second per retry).
+   */
+  @Test
+  fun `the monolith client doubles its pause between retries`() {
+    FakeFlakyServer(failFirstConnections = MONOLITH_MAX_RETRIES).use { upstream ->
+      val client = createMonolithHttpClient(createSharedHttpClient(), retryBaseDelayMillis = 50)
+      try {
+        val started = TimeSource.Monotonic.markNow()
+        val response: HttpResponse = runBlocking { client.get(upstream.baseUrl) }
+        val elapsed = started.elapsedNow()
+        assert(response.status == HttpStatusCode.OK)
+        assert(upstream.connectionCount == 1 + MONOLITH_MAX_RETRIES)
+        assert(elapsed >= 350.milliseconds)
+        assert(elapsed < 2.seconds)
+      } finally {
+        client.close()
+      }
     }
   }
 
@@ -194,10 +243,8 @@ class HttpClientBuildersTest {
       try {
         runBlocking {
           val inFlight = (1..8).map { async(Dispatchers.IO) { runCatching { client.get(upstream.baseUrl) } } }
-          val deadline = System.nanoTime() + 3_000_000_000L
-          while (upstream.connectionCount < 8 && System.nanoTime() < deadline) delay(20)
           // Under the default limit the sixth to eighth request wait in the dispatcher until a timeout frees a slot.
-          assert(upstream.connectionCount == 8)
+          assert(awaitUntil(3.seconds) { upstream.connectionCount == 8 })
           inFlight.forEach { it.cancel() }
         }
       } finally {

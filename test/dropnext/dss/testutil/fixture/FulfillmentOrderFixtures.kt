@@ -1,5 +1,7 @@
 package dropnext.dss.testutil.fixture
 
+import dropnext.dss.contract.Shipment
+import dropnext.dss.contract.ShipmentLineItem
 import dropnext.graphql.generated.enums.FulfillmentOrderStatus
 import dropnext.graphql.generated.getorderfordss.FulfillmentOrder
 import dropnext.graphql.generated.getorderfordss.FulfillmentOrderConnection
@@ -9,8 +11,6 @@ import dropnext.graphql.generated.getorderfordss.FulfillmentOrderLineItemConnect
 import dropnext.graphql.generated.getorderfordss.FulfillmentOrderLineItemEdge
 import dropnext.graphql.generated.getorderfordss.Order
 import dropnext.graphql.generated.getorderfordss.ProductVariant
-import dropnext.dss.contract.Shipment
-import dropnext.dss.contract.ShipmentLineItem
 
 
 /** Builds an order whose open fulfillment orders mirror the diagram cross-FO scenario (LI1 + LI5). */
@@ -49,27 +49,22 @@ internal fun diagramCrossFoShipment(): Shipment =
   )
 
 internal fun openFulfillmentOrder(
-  foId: Long,
-  lineItemId: Long,
   variantId: Long,
   remaining: Int,
+  foId: Long = 301L,
+  lineItemId: Long = 401L,
   status: FulfillmentOrderStatus = FulfillmentOrderStatus.OPEN,
-): FulfillmentOrder {
-  val variant =
-    ProductVariant(
-      legacyResourceId = variantId.toString(),
-    )
-  return FulfillmentOrder(
+): FulfillmentOrder =
+  FulfillmentOrder(
     id = "gid://shopify/FulfillmentOrder/$foId",
     status = status,
-    lineItems = foLineItemConnection(lineItemId, variant, remaining),
+    lineItems = foLineItemConnection(variantId, remaining, lineItemId),
   )
-}
 
 internal fun foLineItemConnection(
-  lineItemId: Long,
-  variant: ProductVariant,
+  variantId: Long,
   remaining: Int,
+  lineItemId: Long = 401L,
 ): FulfillmentOrderLineItemConnection =
   FulfillmentOrderLineItemConnection(
     edges =
@@ -79,7 +74,7 @@ internal fun foLineItemConnection(
             FulfillmentOrderLineItem(
               id = "gid://shopify/FulfillmentOrderLineItem/$lineItemId",
               remainingQuantity = remaining,
-              variant = variant,
+              variant = ProductVariant(legacyResourceId = variantId.toString()),
             ),
         ),
       ),

@@ -1,6 +1,6 @@
 package dropnext.dss.lib.shopify.graphql
 
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
 
 
 /** Which Shopify failures a retry can fix. Shopify sends its Graphql errors with HTTP `200`, so their codes decide. */

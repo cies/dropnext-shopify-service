@@ -2,6 +2,8 @@ package dropnext.dss.workflow
 
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
+import dropnext.dss.lib.monolith.MonolithError
+import dropnext.dss.lib.monolith.MonolithErrorBody
 import dropnext.dss.lib.shopify.graphql.ShopProduct
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.testutil.fake.FakeMonolithService
@@ -30,8 +32,9 @@ class SyncShopifyProductToMonolithTest {
       productByIdResult = Success(ShopProduct(sampleProduct(legacyResourceId = "501", variantId = "9001"), "EUR"))
     }
 
-    syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID)
+    val outcome = syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID)
 
+    assert(outcome == WebhookMirrorOutcome.Mirrored)
     assert(shopify.productByIdCalls == listOf(PRODUCT_GID))
     val upsert = monolith.upsertProductVariantsCalls.single()
     assert(upsert.shopifySubdomain == "acme")
@@ -44,8 +47,9 @@ class SyncShopifyProductToMonolithTest {
     val monolith = FakeMonolithService()
     val shopify = FakeShopifyGraphqlService().apply { productByIdResult = Success(null) }
 
-    syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID)
+    val outcome = syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID)
 
+    assert(outcome == WebhookMirrorOutcome.Skipped(WebhookSkipReason.PRODUCT_GONE))
     assert(monolith.upsertProductVariantsCalls.isEmpty())
   }
 
@@ -55,13 +59,12 @@ class SyncShopifyProductToMonolithTest {
     val monolith = FakeMonolithService()
     val shopify = FakeShopifyGraphqlService().apply { productByIdResult = Failure(ShopifyError.HttpError(429)) }
 
-    lateinit var outcome: WebhookMirrorOutcome
-    val lines = capturingLogs { outcome = runBlocking { syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID) } }
+    val lines = capturingLogs { runBlocking { syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID) } }
 
     assert(monolith.upsertProductVariantsCalls.isEmpty())
     // A throttled Shopify is worth a redelivery.
-    assert(outcome == WebhookMirrorOutcome.ShopifyFailed(ShopifyError.HttpError(429)))
-    assert(outcome.isTransient)
+    assert(lines.value == WebhookMirrorOutcome.ShopifyFailed(ShopifyError.HttpError(429)))
+    assert(lines.value.isTransient)
     val line = lines.single { "could not load productGid=$PRODUCT_GID" in it }
 
     assert(line.startsWith("WARN"))
@@ -76,15 +79,16 @@ class SyncShopifyProductToMonolithTest {
       productByIdResult = Success(ShopProduct(sampleProduct(legacyResourceId = "501", variantId = null), "EUR"))
     }
 
-    syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID)
+    val outcome = syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID)
 
+    assert(outcome == WebhookMirrorOutcome.Skipped(WebhookSkipReason.NO_MAPPABLE_LINES))
     assert(shopify.productByIdCalls.size == 1)
     assert(monolith.upsertProductVariantsCalls.isEmpty())
   }
 
   @Test
   @ResourceLock(GLOBAL_LOG_REGISTRY)
-  fun `a monolith rejection is logged with its trace id and does not raise`() {
+  fun `a monolith 500 on the upsert is a transient failure logged with the monolith's trace id`() {
     val monolith = FakeMonolithService().apply { upsertProductVariantsStatus = 500 }
     val shopify = FakeShopifyGraphqlService().apply {
       productByIdResult = Success(ShopProduct(sampleProduct(legacyResourceId = "501", variantId = "9001"), "EUR"))
@@ -93,6 +97,10 @@ class SyncShopifyProductToMonolithTest {
     val lines = capturingLogs { runBlocking { syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID) } }
 
     assert(monolith.upsertProductVariantsCalls.size == 1)
+    val rejection = MonolithError.Rejected(500, "forced fail", MonolithErrorBody("forced fail", "VariantError", "fake-upsert"))
+    assert(lines.value == WebhookMirrorOutcome.MonolithFailed(rejection))
+    // A monolith that answers a 5xx may take the redelivery.
+    assert(lines.value.isTransient)
     val line = lines.single { "Monolith upsertProductVariants failed" in it }
     assert(line.startsWith("ERROR"))
     assert("status=500" in line)

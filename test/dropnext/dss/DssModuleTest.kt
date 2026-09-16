@@ -3,24 +3,25 @@ package dropnext.dss
 import dropnext.dss.boot.warmup.WarmUp
 import dropnext.dss.contract.UpdateStoreApiKeyRequest
 import dropnext.dss.contract.UpdateStoreApiKeyResponse
-import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.lib.shopify.token.InMemoryShopTokenStore
 import dropnext.dss.path.Paths
 import dropnext.dss.testutil.fake.FakeMonolithHttpServer
 import dropnext.dss.testutil.fake.FakeMonolithService
-
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
-import dropnext.dss.testutil.fake.FakeShopifyGraphqlServiceFactory
+import dropnext.dss.testutil.fixture.ACME_SHOP
+import dropnext.dss.testutil.fixture.TEST_APP_SECRET
+import dropnext.dss.testutil.fixture.TEST_MONOLITH_TO_DSS_API_KEY
 import dropnext.dss.testutil.fixture.testConfig
+import dropnext.dss.testutil.fixture.testDependencies
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
+import dropnext.dss.testutil.helper.awaitUntil
 import dropnext.dss.testutil.helper.base64HmacSha256
 import dropnext.dss.testutil.helper.capturingLogs
 import dropnext.dss.testutil.helper.testHttpClient
 import dropnext.dss.testutil.helper.withDssApp
 import io.ktor.client.call.body
 import io.ktor.client.request.get
-
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.put
@@ -29,22 +30,15 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import java.nio.charset.StandardCharsets
-import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.parallel.ResourceLock
 
 
-private val acmeShop = ShopDomain.parse("acme.myshopify.com")!!
-private const val APP_SECRET = "shpss_app_secret"
-private val MONOLITH_TO_DSS_API_KEY = "k".repeat(32)
 private val ADMIN_TOKEN = ShopifyAdminToken("shpat_super_secret_admin_token")
 
 
@@ -54,13 +48,13 @@ private val ADMIN_TOKEN = ShopifyAdminToken("shpat_super_secret_admin_token")
 class DssModuleTest {
 
   @Test
-  fun `every response carries the trace id header`() = withDssApp(deps()) { client ->
+  fun `every response carries the trace id header`() = withDssApp(testDependencies(shopify = FakeShopifyGraphqlService())) { client ->
     val r = client.get(Paths.health)
     assert(r.headers["X-Trace-Id"] != null)
   }
 
   @Test
-  fun `a caller-supplied request id becomes the trace id`() = withDssApp(deps()) { client ->
+  fun `a caller-supplied request id becomes the trace id`() = withDssApp(testDependencies(shopify = FakeShopifyGraphqlService())) { client ->
     val r = client.get(Paths.health) { header("X-Request-Id", "trace-from-the-monolith") }
     assert(r.headers["X-Trace-Id"] == "trace-from-the-monolith")
   }
@@ -78,13 +72,19 @@ class DssModuleTest {
     assert(!httpClient.isActive)
   }
 
+  /** "Before the handler runs" is the point: the guard must answer without the order ever being read from Shopify. */
   @Test
-  fun `an unauthenticated monolith route is refused before the handler runs`() = withDssApp(deps()) { client ->
-    val r = client.post(Paths.syncShipmentsWithFulfillments) {
-      contentType(ContentType.Application.Json)
-      setBody("""{"shopify_subdomain":"acme","shopify_order_id":1,"shipments":[]}""")
+  fun `an unauthenticated monolith route is refused before the handler runs`() {
+    val shopify = FakeShopifyGraphqlService()
+    withDssApp(testDependencies(shopify = shopify)) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody("""{"shopify_subdomain":"acme","shopify_order_id":1,"shipments":[]}""")
+      }
+      assert(r.status == HttpStatusCode.Unauthorized)
+      assert(r.headers["WWW-Authenticate"] == "Bearer realm=dss-internal")
+      assert(shopify.orderForDssCalls.isEmpty())
     }
-    assert(r.status == HttpStatusCode.Unauthorized)
   }
 
   /**
@@ -97,15 +97,15 @@ class DssModuleTest {
   fun `no secret reaches the logs`() {
     val body = """{"id":1001,"admin_graphql_api_id":"gid://shopify/Order/1001","domain":"acme.myshopify.com"}"""
     val lines = capturingLogs {
-      withDssApp(deps(tokens = InMemoryShopTokenStore(mapOf(acmeShop to ADMIN_TOKEN)))) { client ->
+      withDssApp(testDependencies(shopify = FakeShopifyGraphqlService(), shopTokens = InMemoryShopTokenStore(mapOf(ACME_SHOP to ADMIN_TOKEN)))) { client ->
         client.post(Paths.webhooksShopify) {
           header("X-Shopify-Topic", "orders/create")
-          header("X-Shopify-Shop-Domain", acmeShop.normalizedShopifyHost)
-          header("X-Shopify-Hmac-Sha256", base64HmacSha256(APP_SECRET, body.toByteArray(StandardCharsets.UTF_8)))
+          header("X-Shopify-Shop-Domain", ACME_SHOP.normalizedShopifyHost)
+          header("X-Shopify-Hmac-Sha256", base64HmacSha256(TEST_APP_SECRET, body.toByteArray(StandardCharsets.UTF_8)))
           setBody(body)
         }
         client.put(Paths.storesApiKey) {
-          header("Authorization", "Bearer $MONOLITH_TO_DSS_API_KEY")
+          header("Authorization", "Bearer $TEST_MONOLITH_TO_DSS_API_KEY")
           contentType(ContentType.Application.Json)
           setBody("""{"shopify_subdomain":"acme","api_key":"${ADMIN_TOKEN.value}","shopify_shop_id":99}""")
         }
@@ -118,8 +118,8 @@ class DssModuleTest {
     assert(lines.isNotEmpty())
     assert(ADMIN_TOKEN.value !in logged)
     assert("shpat_" !in logged)
-    assert(MONOLITH_TO_DSS_API_KEY !in logged)
-    assert(APP_SECRET !in logged)
+    assert(TEST_MONOLITH_TO_DSS_API_KEY !in logged)
+    assert(TEST_APP_SECRET !in logged)
     assert("Bearer " !in logged)
   }
 
@@ -134,7 +134,7 @@ class DssModuleTest {
     try {
       monolithServer.enqueue(HttpStatusCode.OK, """{"store_id":7}""")
       val deps = dssDependencies(
-        config = testConfig(monolithToDssApiKey = MONOLITH_TO_DSS_API_KEY, monolithBaseUrl = "http://localhost:$port"),
+        config = testConfig(monolithToDssApiKey = TEST_MONOLITH_TO_DSS_API_KEY, monolithBaseUrl = "http://localhost:$port"),
         httpClient = testHttpClient(),
       )
       withDssApp(deps, authenticateAsMonolith = true) { client ->
@@ -162,10 +162,10 @@ class DssModuleTest {
     try {
       monolithServer.enqueue(HttpStatusCode.OK, """{"store_id":7}""")
       val deps = dssDependencies(
-        config = testConfig(monolithToDssApiKey = MONOLITH_TO_DSS_API_KEY, monolithBaseUrl = "http://localhost:$port"),
+        config = testConfig(monolithToDssApiKey = TEST_MONOLITH_TO_DSS_API_KEY, monolithBaseUrl = "http://localhost:$port"),
         httpClient = testHttpClient(),
       )
-      val minted = withDssAppReturning(deps) { client ->
+      val minted = withDssApp(deps, authenticateAsMonolith = true) { client ->
         client.put(Paths.storesApiKey) {
           contentType(ContentType.Application.Json)
           setBody(UpdateStoreApiKeyRequest(shopifySubdomain = "acme", shopifyShopId = 99L, apiKey = "shpat_x"))
@@ -180,42 +180,24 @@ class DssModuleTest {
 
   /**
    * The readiness gate the load balancer relies on: `/health` is a `503` while the warm-up runs, so a task that is
-   * still cold stays out of rotation, and a `200` from the moment it ends.
+   * still cold stays out of rotation, and a `200` from the moment it ends. The warming answer names the running version
+   * as the ready one does, so one probe reads either.
    */
   @Test
   fun `health answers 503 while the warm-up runs and 200 once it is done`() {
     val gate = CompletableDeferred<Unit>()
-    val deps = deps()
+    val deps = testDependencies(shopify = FakeShopifyGraphqlService())
     withDssApp(deps, warmUp = WarmUp(5.seconds) { gate.await() }) { client ->
       val warming = client.get(Paths.health)
       assert(warming.status == HttpStatusCode.ServiceUnavailable)
-      assert(warming.body<JsonObject>()["status"]!!.jsonPrimitive.content == "warming_up")
+      val warmingBody = warming.body<JsonObject>()
+      assert(warmingBody["status"]!!.jsonPrimitive.content == "warming_up")
+      assert(warmingBody["version"]!!.jsonPrimitive.content == "test-version")
       gate.complete(Unit)
-      awaitReady(deps)
+      assert(awaitUntil { deps.readiness.isReady })
       val ready = client.get(Paths.health)
       assert(ready.status == HttpStatusCode.OK)
       assert(ready.body<JsonObject>()["status"]!!.jsonPrimitive.content == "ok")
-    }
-  }
-
-  /** A warm-up that hangs must not keep a task out of rotation: the budget opens the gate, and the warm-up is cancelled. */
-  @Test
-  fun `a warm-up that outlives its budget opens the gate when the budget ends`() {
-    val deps = deps()
-    withDssApp(deps, warmUp = WarmUp(200.milliseconds) { awaitCancellation() }) { client ->
-      startApplication()
-      awaitReady(deps)
-      assert(client.get(Paths.health).status == HttpStatusCode.OK)
-    }
-  }
-
-  @Test
-  fun `a warm-up that throws opens the gate`() {
-    val deps = deps()
-    withDssApp(deps, warmUp = WarmUp(5.seconds) { error("a bug in the warm-up") }) { client ->
-      startApplication()
-      awaitReady(deps)
-      assert(client.get(Paths.health).status == HttpStatusCode.OK)
     }
   }
 
@@ -223,35 +205,12 @@ class DssModuleTest {
   @Test
   fun `every other route is served while the warm-up runs`() {
     val gate = CompletableDeferred<Unit>()
-    withDssApp(deps(), warmUp = WarmUp(5.seconds) { gate.await() }) { client ->
+    val deps = testDependencies(shopify = FakeShopifyGraphqlService())
+    withDssApp(deps, warmUp = WarmUp(5.seconds) { gate.await() }) { client ->
       assert(client.get(Paths.api).status == HttpStatusCode.OK)
+      // The gate is still shut, so the `200` above was answered by a task that is not ready yet.
+      assert(!deps.readiness.isReady)
       gate.complete(Unit)
     }
   }
-
-  /**
-   * The gate is opened by a coroutine the module launched; a test that asserts the open state has to let it run. The
-   * test engine starts the application on the first request, so a test that polls before making one starts it itself.
-   */
-  private suspend fun awaitReady(deps: DssDependencies) = withTimeout(5.seconds) {
-    while (!deps.readiness.isReady) delay(5)
-  }
-
-  /** [withDssApp] answers `Unit`; this variant hands the block's answer back, for a value the test needs after the app stopped. */
-  private fun <T> withDssAppReturning(deps: DssDependencies, block: suspend (io.ktor.client.HttpClient) -> T): T {
-    var answer: T? = null
-    withDssApp(deps, authenticateAsMonolith = true) { client -> answer = block(client) }
-    return answer!!
-  }
-
-  // ---------- helpers ----------
-
-  private fun deps(tokens: InMemoryShopTokenStore = InMemoryShopTokenStore()): DssDependencies =
-
-    dssDependencies(
-      config = testConfig(appClientSecret = APP_SECRET, monolithToDssApiKey = MONOLITH_TO_DSS_API_KEY),
-      monolithService = FakeMonolithService(),
-      shopTokens = tokens,
-      shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = FakeShopifyGraphqlService(acmeShop)),
-    )
 }

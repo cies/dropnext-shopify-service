@@ -1,6 +1,5 @@
 package dropnext.dss.testutil.fake
 
-import dropnext.dss.boot.config.Config
 import dropnext.dss.domain.ShopifyAccessScope
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
@@ -23,6 +22,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+
 
 /**
  * Embedded CIO server that fakes a Shopify Admin Graphql endpoint.
@@ -50,7 +50,6 @@ class FakeShopifyGraphqlServer : RecordingFake {
   val calls: MutableList<RecordedCall> = CopyOnWriteArrayList()
 
   private val responses: MutableMap<String, CannedResponse> = mutableMapOf()
-  private val responseQueues: MutableMap<String, ArrayDeque<CannedResponse>> = mutableMapOf()
 
   private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
@@ -76,8 +75,7 @@ class FakeShopifyGraphqlServer : RecordingFake {
           val token = call.request.headers["X-Shopify-Access-Token"]
           calls.add(RecordedCall(op, vars, token, raw, call.request.local.uri.substringBefore('?')))
           val response =
-            dequeueResponse(op)
-              ?: responses[op]
+            responses[op]
               ?: CannedResponse("""{"data":null,"errors":[{"message":"no stub for $op"}]}""")
           response.headers.forEach { (name, value) -> call.response.header(name, value) }
           call.respondText(response.body, ContentType.Application.Json, response.status)
@@ -102,7 +100,6 @@ class FakeShopifyGraphqlServer : RecordingFake {
   override fun clear() {
     calls.clear()
     responses.clear()
-    responseQueues.clear()
     oauthCalls.clear()
     oauthAccessTokenResponse = COMPLETE_GRANT_RESPONSE
     oauthStatus = HttpStatusCode.OK
@@ -121,19 +118,6 @@ class FakeShopifyGraphqlServer : RecordingFake {
     responses[operationName] = CannedResponse(responseJson, status, headers)
   }
 
-  /** Stub a sequence of raw responses for [operationName]; each call dequeues the next entry. */
-  fun stubSequence(operationName: String, vararg responseJson: String) {
-    responseQueues[operationName] = ArrayDeque(responseJson.map { CannedResponse(it) })
-  }
-
-  /** Enqueue a response served before any static [stubRaw] / [stubData] stub for [operationName]. */
-  fun enqueueResponse(operationName: String, responseJson: String) {
-    responseQueues.getOrPut(operationName) { ArrayDeque() }.addLast(CannedResponse(responseJson))
-  }
-
-  private fun dequeueResponse(operationName: String): CannedResponse? =
-    responseQueues[operationName]?.removeFirstOrNull()
-
   /** Stub `{"data": <serialized payload>}` for [operationName] from a typed payload. */
   fun <T : Any> stubData(operationName: String, payload: T, serializer: KSerializer<T>) {
     val dataJson = json.encodeToJsonElement(serializer, payload)
@@ -142,19 +126,6 @@ class FakeShopifyGraphqlServer : RecordingFake {
     }
     responses[operationName] = CannedResponse(response.toString())
   }
-
-  /** The typed twin of [stubData] for a multi-call flow: each entry answers one call, in order. */
-  fun <T : Any> stubDataSequence(operationName: String, serializer: KSerializer<T>, vararg payloads: T) {
-    responseQueues[operationName] = ArrayDeque(
-      payloads.map { payload ->
-        CannedResponse(buildJsonObject { put("data", json.encodeToJsonElement(serializer, payload)) }.toString())
-      },
-    )
-  }
-
-
-  fun shopUrl(version: String = Config.SHOPIFY_API_VERSION): String =
-    "http://localhost:${runBlocking { server.engine.resolvedConnectors().first().port }}/admin/api/$version/graphql.json"
 }
 
 /**

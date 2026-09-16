@@ -1,7 +1,7 @@
 package dropnext.dss.lib.shopify.oauth
 
 import dropnext.dss.domain.ShopDomain
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
 
 
 class OutBoundShopifyOAuthPathsTest {

@@ -1,7 +1,7 @@
 package dropnext.dss.domain
 
 import dropnext.dss.contract.UpdateStoreApiKeyRequest
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
 
 
 class ValidateUpdateStoreApiKeyRequestTest {

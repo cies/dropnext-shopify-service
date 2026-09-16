@@ -1,7 +1,8 @@
 package dropnext.dss.lib.ktor
 
 import io.ktor.http.HttpStatusCode
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
+
 
 class DssErrorTest {
 

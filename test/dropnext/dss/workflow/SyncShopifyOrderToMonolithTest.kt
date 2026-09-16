@@ -2,11 +2,6 @@ package dropnext.dss.workflow
 
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
-import dropnext.dss.contract.CreateShopifyOrderRequest
-import dropnext.dss.contract.OrderLineItem
-import dropnext.dss.contract.ShippingAddress
-import dropnext.dss.lib.monolith.CreateOrderOutcome
-import dropnext.dss.lib.monolith.MonolithError
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.testutil.fake.FakeMonolithService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
@@ -14,33 +9,31 @@ import dropnext.dss.testutil.fixture.minimalOrder
 import dropnext.dss.testutil.fixture.orderWithoutFulfillmentOrders
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
 import dropnext.dss.testutil.helper.capturingLogs
+import dropnext.dss.testutil.helper.orderToCreateShopifyOrderRequest
 import dropnext.graphql.generated.getorderfordss.LineItemConnection
 import dropnext.graphql.generated.getorderfordss.LineItemEdge
-import kotlin.test.Test
 import kotlinx.coroutines.runBlocking
+import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.parallel.ResourceLock
-
 
 
 class SyncShopifyOrderToMonolithTest {
 
+  /** A redelivered `orders/create` is the normal way a 409 happens, so it reads as a success with the reason named. */
   @Test
-  fun `posts mapped order via FakeMonolithService`() {
-    val fake = FakeMonolithService()
-    val req = sampleCreateOrderRequest()
-    val result = runBlocking {
-      postMappedOrderToMonolith(fake, req, "orders/create")
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `a 409 from the monolith is logged as an accepted duplicate webhook`() {
+    val monolith = FakeMonolithService().apply { createOrderStatus = 409 }
+    val lines = capturingLogs {
+      runBlocking { postMappedOrderToMonolith(monolith, orderToCreateShopifyOrderRequest("acme", minimalOrder()), "orders/create") }
     }
-    assert(result == Success(CreateOrderOutcome.Created))
-    assert(fake.createOrderCalls.single().shopifySubdomain == "dropnext-staging")
-    assert(fake.createOrderCalls.single().shopifyOrderId == 1001L)
-  }
-
-  @Test
-  fun `a 409 from the monolith is the order already existing`() {
-    val fake = FakeMonolithService().apply { createOrderStatus = 409 }
-    val result = runBlocking { postMappedOrderToMonolith(fake, sampleCreateOrderRequest(), "orders/create") }
-    assert(result == Success(CreateOrderOutcome.AlreadyExisted))
+    val line = lines.single { "Monolith create order accepted" in it }
+    assert(
+      line.startsWith(
+        "INFO Monolith create order accepted (order already existed — duplicate webhook) " +
+          "topic=orders/create shopifyOrderId=1001 lines=1 {",
+      ),
+    )
   }
 
   @Test
@@ -141,20 +134,24 @@ class SyncShopifyOrderToMonolithTest {
     assert(!whenRefused.isTransient)
   }
 
+  /** The monolith's own trace id on our failure line is what lets the two services' logs be read side by side. */
   @Test
-  fun `surfaces monolith 500 as a rejection carrying the monolith's trace id`() {
-    val fake = FakeMonolithService().apply {
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `a monolith 500 is logged at error with the monolith's trace id and the order it was for`() {
+    val monolith = FakeMonolithService().apply {
       createOrderStatus = 500
-      createOrderErrorBody =
-        """{"error":"fail","code":"InternalError","trace_id":"fake123"}"""
+      createOrderErrorBody = """{"error":"order refused","code":"InternalError","trace_id":"monolith-trace-7"}"""
     }
-    val result = runBlocking {
-      postMappedOrderToMonolith(fake, sampleCreateOrderRequest(), "orders/create")
+    val lines = capturingLogs {
+      runBlocking { postMappedOrderToMonolith(monolith, orderToCreateShopifyOrderRequest("acme", minimalOrder()), "orders/create") }
     }
-    assert(result is Failure)
-    val error = (result as Failure).reason
-    assert(error is MonolithError.Rejected)
-    assert((error as MonolithError.Rejected).body.monolithTraceId == "fake123")
+    val line = lines.single { "Monolith postCreateOrder failed" in it }
+    assert(
+      line.startsWith(
+        "ERROR Monolith postCreateOrder failed: status=500 monolith_trace_id=monolith-trace-7 code=InternalError " +
+          "message=order refused topic=orders/create shopifyOrderId=1001 lines=1 fulfillmentStatus=null {",
+      ),
+    )
   }
 
   /** The one failure an operator has to act on must read as such, not as a network blip that will pass. */
@@ -173,18 +170,24 @@ class SyncShopifyOrderToMonolithTest {
     assert(monolith.createOrderCalls.isEmpty())
   }
 
-  /** A tip or a custom line is expected and goes at `info`; a line with a variant is sent, whether or not a fulfillment order holds it. */
+  /**
+   * A tip or a custom line is expected and goes at `info`; an id Shopify sent in a shape we cannot read is unexpected
+   * data and goes at `warn`. A line with a variant is sent, whether or not a fulfillment order holds it.
+   */
   @Test
   @ResourceLock(GLOBAL_LOG_REGISTRY)
-  fun `every omitted line item is logged with its reason`() {
+  fun `every omitted line item is logged with its reason, at warn when Shopify sent an id we cannot read`() {
     val mapped = minimalOrder().lineItems.edges.single().node
+    val variant = checkNotNull(mapped.variant)
     val tip = mapped.copy(id = "gid://shopify/LineItem/202", variant = null)
-    val unknownVariant = mapped.copy(
-      id = "gid://shopify/LineItem/203",
-      variant = mapped.variant!!.copy(legacyResourceId = "999"),
-    )
+    val unknownVariant = mapped.copy(id = "gid://shopify/LineItem/203", variant = variant.copy(legacyResourceId = "999"))
+    val unreadableVariantId =
+      mapped.copy(id = "gid://shopify/LineItem/204", variant = variant.copy(legacyResourceId = "not-a-number"))
+    val unreadableLineId = mapped.copy(id = "gid://shopify/LineItem/")
     val order = minimalOrder().copy(
-      lineItems = LineItemConnection(edges = listOf(mapped, tip, unknownVariant).map { LineItemEdge(node = it) }),
+      lineItems = LineItemConnection(
+        edges = listOf(mapped, tip, unknownVariant, unreadableVariantId, unreadableLineId).map { LineItemEdge(node = it) },
+      ),
     )
     val shopify = FakeShopifyGraphqlService().apply { orderForDssResult = Success(order) }
     val monolith = FakeMonolithService()
@@ -193,46 +196,14 @@ class SyncShopifyOrderToMonolithTest {
       runBlocking { syncShopifyOrderToMonolith(shopify, monolith, "gid://shopify/Order/1001", "orders/create") }
     }
 
-    val omitted = lines.filter { "omitted line item" in it }
-    assert(omitted.single().startsWith("INFO"))
-    assert("LineItem/202" in omitted.single())
-    assert("reason=no_variant" in omitted.single())
-    // The order went out with both variant-backed lines, the one on no fulfillment order included.
+    assert(
+      lines.filter { "omitted line item" in it }.map { it.substringBefore(" {") } == listOf(
+        "INFO Webhook orders/create: omitted line item gid://shopify/LineItem/202 reason=no_variant shopifyOrderId=1001",
+        "WARN Webhook orders/create: omitted line item gid://shopify/LineItem/204 reason=unparseable_variant_id shopifyOrderId=1001",
+        "WARN Webhook orders/create: omitted line item gid://shopify/LineItem/ reason=unparseable_line_item_id shopifyOrderId=1001",
+      ),
+    )
+    // The order went out with both readable variant-backed lines, the one on no fulfillment order included.
     assert(monolith.createOrderCalls.single().lineItems.map { it.productVariantId } == listOf(101L, 999L))
   }
-
-  private fun sampleCreateOrderRequest(): CreateShopifyOrderRequest =
-
-    CreateShopifyOrderRequest(
-      shopifySubdomain = "dropnext-staging",
-      shopifyOrderId = 1001L,
-      name = "#1001",
-      financialStatus = "Paid",
-      fulfillmentStatus = null,
-      createdAt = "2026-04-25T10:30:00Z",
-      shippingAddress = ShippingAddress(
-        firstName = null,
-        lastName = null,
-        address1 = "",
-        address2 = null,
-        city = "",
-        province = null,
-        provinceCode = null,
-        countryCode = "US",
-        zip = null,
-        phone = null,
-      ),
-      lineItems = listOf(
-        OrderLineItem(
-          shopifyLineItemId = 201L,
-          productVariantId = 101L,
-          quantity = 1,
-          snapshotOfVariantTitle = "Item",
-          snapshotOfProductTitle = "Product",
-          snapshotOfPriceAsString = "19.99",
-        ),
-      ),
-      totalAsString = "19.99",
-      currency = "USD",
-    )
 }

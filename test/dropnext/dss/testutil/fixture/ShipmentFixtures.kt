@@ -15,10 +15,12 @@ internal fun shipment(
   tracking: String = "1Z999",
   carrier: String? = "UPS",
   trackingUrl: String? = null,
+  /** Overrides [variantId] and [quantity] for a parcel that carries more than one variant. */
+  lines: List<Pair<Long, Int>> = listOf(variantId to quantity),
 ): Shipment =
   Shipment(
     trackingNumber = tracking,
     carrier = carrier,
     trackingUrl = trackingUrl,
-    lineItems = listOf(ShipmentLineItem(productVariantId = variantId, quantity = quantity)),
+    lineItems = lines.map { (id, qty) -> ShipmentLineItem(productVariantId = id, quantity = qty) },
   )

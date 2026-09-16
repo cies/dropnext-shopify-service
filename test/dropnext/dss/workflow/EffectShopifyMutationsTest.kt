@@ -7,8 +7,9 @@ import dropnext.dss.domain.ShopifyFulfillmentId
 import dropnext.dss.lib.shopify.graphql.FulfillmentLine
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
-import kotlin.test.Test
+import dropnext.dss.testutil.helper.failureReason
 import kotlinx.coroutines.runBlocking
+import org.junit.jupiter.api.Test
 
 
 class EffectShopifyMutationsTest {
@@ -55,7 +56,7 @@ class EffectShopifyMutationsTest {
       ),
     )
     assert(result is Failure)
-    assert((result as Failure).reason is ShopifyError.UserError)
+    assert(result.failureReason() is ShopifyError.UserError)
     assert(fake.createFulfillmentCalls.size == 2)
   }
 
@@ -71,7 +72,7 @@ class EffectShopifyMutationsTest {
       ),
     )
     assert(result is Failure)
-    assert((result as Failure).reason is ShopifyError.GraphqlError)
+    assert(result.failureReason() is ShopifyError.GraphqlError)
     assert(fake.createFulfillmentCalls.size == 1)
   }
 
@@ -79,14 +80,17 @@ class EffectShopifyMutationsTest {
   fun `the tracking of a create reaches the service as sent`() = runBlocking {
     val fake = FakeShopifyGraphqlService()
     fake.createFulfillmentResult = Success(ShopifyFulfillmentId(1L))
-    effectShopifyMutations(fake, listOf(createMutation(tracking = "TRK-X")))
+    effectShopifyMutations(fake, listOf(createMutation(tracking = "TRK-X", trackingUrl = "https://carrier.test/track/TRK-X")))
     val call = fake.createFulfillmentCalls.single()
     assert(call.tracking.number == "TRK-X")
     assert(call.tracking.company == "UPS")
+    assert(call.tracking.url == "https://carrier.test/track/TRK-X")
     assert(call.lines.single().lineItemId == "gid://shopify/FulfillmentOrderLineItem/401")
+    // The retailer's own store tells its customers; a `true` here would have Shopify email them on our behalf.
+    assert(!call.notifyCustomer)
   }
 
-  private fun createMutation(tracking: String = "1Z999") = ShopifyMutation.FulfillmentCreate(
+  private fun createMutation(tracking: String = "1Z999", trackingUrl: String? = null) = ShopifyMutation.FulfillmentCreate(
     lineItems = listOf(
       FulfillmentLine(
         fulfillmentOrderId = "gid://shopify/FulfillmentOrder/301",
@@ -96,7 +100,7 @@ class EffectShopifyMutationsTest {
     ),
     trackingNumber = tracking,
     carrier = "UPS",
-    trackingUrl = null,
+    trackingUrl = trackingUrl,
     notifyCustomer = false,
   )
 }

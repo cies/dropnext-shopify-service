@@ -4,7 +4,7 @@ import dropnext.dss.testutil.fixture.fulfillment
 import dropnext.dss.testutil.fixture.minimalOrder
 import dropnext.dss.testutil.fixture.orderWithFulfillments
 import dropnext.graphql.generated.enums.FulfillmentStatus
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
 
 
 class LiveFulfillmentsWithTrackingNumberTest {

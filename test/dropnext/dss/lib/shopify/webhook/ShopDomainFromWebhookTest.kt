@@ -1,6 +1,6 @@
 package dropnext.dss.lib.shopify.webhook
 
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
 
 
 class ShopDomainFromWebhookTest {

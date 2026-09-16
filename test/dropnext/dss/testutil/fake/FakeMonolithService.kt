@@ -34,6 +34,9 @@ class FakeMonolithService : MonolithService, RecordingFake {
   var putStoreApiKeyStatus: Int = 200
   var putStoreApiKeyStoreId: Long = 1L
 
+  /** When true, [putStoreApiKey] fails to reach the monolith at all: the install reports that with no status. */
+  var putStoreApiKeyTransportFailure: Boolean = false
+
   /** When true, [getStore] answers "no such store" — for testing missing-token paths. */
   var getStoreReturnsNotFound: Boolean = false
 
@@ -69,6 +72,7 @@ class FakeMonolithService : MonolithService, RecordingFake {
 
   override suspend fun putStoreApiKey(request: UpdateStoreApiKeyRequest): MonolithResult<StoreId> {
     putStoreApiKeyCalls.add(request)
+    if (putStoreApiKeyTransportFailure) return Failure(MonolithError.Transport("forced transport failure"))
     return when (putStoreApiKeyStatus) {
       200 -> Success(StoreId(putStoreApiKeyStoreId))
       else -> Failure(
@@ -120,6 +124,7 @@ class FakeMonolithService : MonolithService, RecordingFake {
     createOrderErrorBody = null
     putStoreApiKeyStatus = 200
     putStoreApiKeyStoreId = 1L
+    putStoreApiKeyTransportFailure = false
     getStoreReturnsNotFound = false
     getStoreTransportFailure = false
     getStoreToken = ShopifyAdminToken("shpat_fake")

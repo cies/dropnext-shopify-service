@@ -1,6 +1,6 @@
 package dropnext.dss.lib.shopify.token
 
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
 
 
 class ShopLookupTest {

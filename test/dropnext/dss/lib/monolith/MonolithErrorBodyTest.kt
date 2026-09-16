@@ -1,6 +1,7 @@
 package dropnext.dss.lib.monolith
 
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
+
 
 class MonolithErrorBodyTest {
 
@@ -66,18 +67,24 @@ class MonolithErrorBodyTest {
   }
 
   @Test
-  fun `parses non-json body as truncated message`() {
+  fun `keeps a body that is not JSON as the message text`() {
     val parsed = parseMonolithErrorBody("plain text oops")
     assert(parsed.message == "plain text oops")
     assert(parsed.code == null)
     assert(parsed.monolithTraceId == null)
   }
 
+  /** A proxy's error page can be any size, and the message ends up in a log line. */
   @Test
-  fun `parses json array root as truncated message`() {
+  fun `cuts a long body that is not JSON to 200 characters`() {
+    val parsed = parseMonolithErrorBody("x".repeat(300))
+    assert(parsed.message == "x".repeat(200))
+  }
+
+  @Test
+  fun `keeps a JSON root that is not an object as the message text`() {
     val parsed = parseMonolithErrorBody("[1,2,3]")
-    val message = parsed.message
-    assert(message != null && message.startsWith("[1,2,3"))
+    assert(parsed.message == "[1,2,3]")
   }
 
   @Test
@@ -97,5 +104,13 @@ class MonolithErrorBodyTest {
   fun `monolithError uses raw body when no structured message`() {
     val (msg, _) = monolithError(502, "bad gateway raw")
     assert(msg == "bad gateway raw")
+  }
+
+  /** A JSON object without `error` parses to no message, so the raw body is the message, cut to what a caller shows. */
+  @Test
+  fun `monolithError cuts a raw body without an error field to 512 characters`() {
+    val (msg, _) = monolithError(500, "{\"detail\":\"" + "x".repeat(600) + "\"}")
+    // The eleven characters of `{"detail":"` and then as much of the value as fits.
+    assert(msg == "{\"detail\":\"" + "x".repeat(501))
   }
 }

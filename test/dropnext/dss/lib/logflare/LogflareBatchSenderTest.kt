@@ -4,7 +4,6 @@ import dropnext.dss.domain.LogflareApiKey
 import dropnext.dss.testutil.fake.FakeLogflareServer
 import java.lang.management.ManagementFactory
 import java.util.concurrent.ConcurrentLinkedQueue
-import kotlin.test.Test
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
@@ -14,6 +13,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import org.junit.jupiter.api.Test
 
 
 /**
@@ -216,7 +216,9 @@ class LogflareBatchSenderTest {
   @Test
   fun `closing during a stalled handshake waits for it, bounded by the budget, without spinning`() {
     FakeLogflareServer().use { server ->
-      server.sourcesStallMillis = 800
+      // No known source, so the handshake is two stalled calls (the lookup and the create): at least 800 ms from the
+      // moment the first one arrives, well past the 300 ms `close` gives it, however late `close` is called.
+      server.sourcesStallMillis = 400
       val sender = senderFor(server, flushInterval = 1.minutes, closeDrainBudget = 300.milliseconds)
       sender.start("dropnext-test")
       sender.enqueue(entry("too early"))
@@ -226,7 +228,8 @@ class LogflareBatchSenderTest {
       sender.close()
 
       val cpuMillis = (threads.currentThreadCpuTime - cpuBefore) / 1_000_000
-      assert(cpuMillis < 150)
+      // A spinning drain loop burns the whole 300 ms budget on this thread; waiting for the handshake burns next to none.
+      assert(cpuMillis < 250)
       assert(errors.any { "1 events still queued" in it })
       assert(server.receivedEvents.isEmpty())
     }
@@ -266,6 +269,9 @@ class LogflareBatchSenderTest {
   /**
    * The drop path used to submit a flush task per dropped event onto the scheduled executor's
    * *unbounded* queue, which reintroduced the heap growth the bounded event queue exists to prevent.
+   *
+   * The executor's queue is private, so what this watches is the effect of such a task: a flush, which would ship the
+   * two queued events within milliseconds. With the interval at a minute, nothing else can flush during the wait.
    */
   @Test
   fun `overflow does not schedule work per dropped event`() {
@@ -276,9 +282,10 @@ class LogflareBatchSenderTest {
 
       (1..5_000).forEach { sender.enqueue(entry("event-$it")) }
 
-      // Nothing was scheduled, so nothing drained on its own: the queue still holds exactly its cap.
-      assert(sender.queuedEventCount == 2)
+      assert(server.awaitNoBatch(500.milliseconds))
       assert(messagesOf(server).isEmpty())
+      // Nothing drained on its own: the queue still holds exactly its cap.
+      assert(sender.queuedEventCount == 2)
       sender.close()
     }
   }
@@ -291,7 +298,8 @@ class LogflareBatchSenderTest {
   @Test
   fun `a burst of flush requests during a stalled flush submits one task`() {
     FakeLogflareServer().use { server ->
-      server.logsStallMillis = 1_000
+      // The burst below is 600 calls in memory, well under a millisecond once warm: 300 ms is room to spare.
+      server.logsStallMillis = 300
       // A batch of fifty, so the drain at the end is six round trips and not three hundred: with the classes running
       // concurrently, three hundred did not always fit in the five seconds `close` gives them.
       val sender = senderFor(server, maxBatchSize = 50, flushInterval = 1.minutes)
@@ -299,7 +307,7 @@ class LogflareBatchSenderTest {
       sender.start()
       sender.enqueue(entry("first"))
       assert(sender.requestFlush())
-      // The first flush is on the wire and stays there for a second; everything below happens meanwhile.
+      // The first flush is on the wire and stays there for the stall; everything below happens meanwhile.
       assert(server.awaitBatchStarted())
 
       (1..300).forEach { sender.enqueue(entry("burst-$it")) }
@@ -396,8 +404,9 @@ class LogflareBatchSenderTest {
 
       // Two shapes, deliberately: Logflare wants a bearer token on the management API and a raw
       // `X-API-KEY` on the ingest one, and sending the wrong one is a silent 401 in production.
-      assert("Bearer test-logflare-key" in server.receivedApiKeys)
-      assert("test-logflare-key" in server.receivedApiKeys)
+      // No source is known, so the handshake is a lookup and a create: two management calls.
+      assert(server.receivedSourcesAuthorizations == listOf("Bearer test-logflare-key", "Bearer test-logflare-key"))
+      assert(server.receivedIngestApiKeys == listOf("test-logflare-key"))
     }
   }
 

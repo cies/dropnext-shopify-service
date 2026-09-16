@@ -7,6 +7,8 @@ import dropnext.dss.lib.shopify.webhook.ShopifyHmacVerifierService
 import dropnext.dss.path.Paths
 import dropnext.dss.testutil.fake.FakeFlakyServer
 import dropnext.dss.testutil.fake.FakeMonolithHttpServer
+import dropnext.dss.testutil.fixture.ACME_SHOP
+import dropnext.dss.testutil.fixture.TEST_APP_SECRET
 import dropnext.dss.testutil.helper.base64HmacSha256
 import dropnext.dss.testutil.helper.testHttpClient
 import io.ktor.http.HttpStatusCode
@@ -14,8 +16,6 @@ import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 
 
-private val acmeShop = ShopDomain.parse("acme.myshopify.com")!!
-private const val APP_SECRET = "shpss_app_secret"
 private val BEARER = "m".repeat(32)
 
 
@@ -32,7 +32,7 @@ class HttpWarmUpLoopbackServiceTest {
     val port = server.start()
     try {
       server.enqueue(HttpStatusCode.Unauthorized, """{"error":"missing Shopify Admin token"}""")
-      val status = runBlocking { service(port).apiCheck(acmeShop, "trace-warm-up") }
+      val status = runBlocking { service(port).apiCheck(ACME_SHOP, "trace-warm-up") }
       assert(status == 401)
       val request = server.requests.single()
       assert(request.method == "GET")
@@ -51,7 +51,7 @@ class HttpWarmUpLoopbackServiceTest {
     val port = server.start()
     try {
       server.enqueue(HttpStatusCode.OK, """{"outcome":"skipped"}""")
-      val status = runBlocking { service(port).webhookDelivery(acmeShop, "trace-warm-up") }
+      val status = runBlocking { service(port).webhookDelivery(ACME_SHOP, "trace-warm-up") }
       assert(status == 200)
       val request = server.requests.single()
       assert(request.method == "POST")
@@ -62,7 +62,7 @@ class HttpWarmUpLoopbackServiceTest {
       assert(request.headers["X-Shopify-Webhook-Id"] == listOf(WARM_UP_WEBHOOK_ID))
       assert(request.headers["X-Trace-Id"] == listOf("trace-warm-up"))
       assert(request.body.isNotBlank())
-      assert(request.headers["X-Shopify-Hmac-Sha256"] == listOf(base64HmacSha256(APP_SECRET, request.body.toByteArray())))
+      assert(request.headers["X-Shopify-Hmac-Sha256"] == listOf(base64HmacSha256(TEST_APP_SECRET, request.body.toByteArray())))
     } finally {
       server.stop()
     }
@@ -72,7 +72,7 @@ class HttpWarmUpLoopbackServiceTest {
   fun `a request that gets no answer is null rather than an exception`() {
     FakeFlakyServer().use { upstream ->
       val port = upstream.baseUrl.substringAfterLast(':').toInt()
-      val status = runBlocking { service(port).apiCheck(acmeShop, "trace-warm-up") }
+      val status = runBlocking { service(port).apiCheck(ACME_SHOP, "trace-warm-up") }
       assert(status == null)
       assert(upstream.connectionCount >= 1)
     }
@@ -84,6 +84,6 @@ class HttpWarmUpLoopbackServiceTest {
     httpClient = testHttpClient(),
     port = port,
     monolithToDssApiKey = MonolithToDssApiKey(BEARER),
-    hmacVerifier = ShopifyHmacVerifierService(ShopifyAppSecret(APP_SECRET)),
+    hmacVerifier = ShopifyHmacVerifierService(ShopifyAppSecret(TEST_APP_SECRET)),
   )
 }

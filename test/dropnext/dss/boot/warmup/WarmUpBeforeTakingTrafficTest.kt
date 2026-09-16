@@ -86,6 +86,22 @@ class WarmUpBeforeTakingTrafficTest {
     assert(report.inbound.webhook == Skipped("budget"))
   }
 
+  /**
+   * What the budget exists for: a request to ourselves that hangs. It is cut off when the budget ends and says so,
+   * and the step after it is never started. The timeout rounds up to the millisecond, so the deadline has passed by
+   * the time the next step looks at it.
+   */
+  @Test
+  fun `a step that outlives the budget is cut short and the steps after it are skipped`() = runBlocking {
+    val loopback = FakeWarmUpLoopbackService().apply { answerDelay = 500.milliseconds }
+    val report = warmUp(loopback = loopback, budget = 100.milliseconds)
+    assert(report.outbound.monolith == Ok())
+    assert(report.inbound.apiCheck == Failed("budget"))
+    assert(report.inbound.webhook == Skipped("budget"))
+    assert(loopback.apiCheckCalls.size == 1)
+    assert(loopback.webhookDeliveryCalls.isEmpty())
+  }
+
   @Test
   fun `the two log lines name every step and, for a skip or a failure, why`() = runBlocking {
     val report = warmUp(
