@@ -11,6 +11,7 @@ import dropnext.dss.testutil.fixture.orderWithFulfillmentOrders
 import dropnext.dss.testutil.fixture.shipment
 import dropnext.graphql.generated.enums.FulfillmentOrderStatus
 import dropnext.graphql.generated.enums.FulfillmentStatus
+import dropnext.dss.testutil.fixture.COMPLETE_PAGE
 import dropnext.graphql.generated.getorderfordss.FulfillmentOrder
 import dropnext.graphql.generated.getorderfordss.FulfillmentOrderLineItem
 import dropnext.graphql.generated.getorderfordss.FulfillmentOrderLineItemConnection
@@ -174,6 +175,7 @@ class MatchShipmentToFulfillmentOrdersTest {
         id = "gid://shopify/FulfillmentOrder/301",
         status = FulfillmentOrderStatus.OPEN,
         lineItems = FulfillmentOrderLineItemConnection(
+          pageInfo = COMPLETE_PAGE,
           edges = listOf(FulfillmentOrderLineItemEdge(node = unreadableLine)),
         ),
       )
@@ -376,6 +378,7 @@ class MatchShipmentToFulfillmentOrdersTest {
       id = "gid://shopify/FulfillmentOrder/301",
       status = FulfillmentOrderStatus.OPEN,
       lineItems = FulfillmentOrderLineItemConnection(
+        pageInfo = COMPLETE_PAGE,
         edges = listOf(
           FulfillmentOrderLineItemEdge(
             node = FulfillmentOrderLineItem(
@@ -418,6 +421,7 @@ class MatchShipmentToFulfillmentOrdersTest {
       id = "gid://shopify/FulfillmentOrder/301",
       status = FulfillmentOrderStatus.OPEN,
       lineItems = FulfillmentOrderLineItemConnection(
+        pageInfo = COMPLETE_PAGE,
         edges = listOf(
           FulfillmentOrderLineItemEdge(
             node = unreadable

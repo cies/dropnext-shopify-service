@@ -1,4 +1,10 @@
-query GetOrderForDss($id: ID!) {
+query GetOrderForDss(
+  $id: ID!
+  $lineItemsFirst: Int!
+  $fulfillmentOrdersFirst: Int!
+  $fulfillmentOrderLineItemsFirst: Int!
+  $fulfillmentsFirst: Int!
+) {
   order(id: $id) {
     id
     name
@@ -25,7 +31,10 @@ query GetOrderForDss($id: ID!) {
       zip
       phone
     }
-    lineItems(first: 100) {
+    lineItems(first: $lineItemsFirst) {
+      pageInfo {
+        hasNextPage
+      }
       edges {
         node {
           id
@@ -43,12 +52,18 @@ query GetOrderForDss($id: ID!) {
         }
       }
     }
-    fulfillmentOrders(first: 50) {
+    fulfillmentOrders(first: $fulfillmentOrdersFirst) {
+      pageInfo {
+        hasNextPage
+      }
       edges {
         node {
           id
           status
-          lineItems(first: 100) {
+          lineItems(first: $fulfillmentOrderLineItemsFirst) {
+            pageInfo {
+              hasNextPage
+            }
             edges {
               node {
                 id
@@ -62,7 +77,7 @@ query GetOrderForDss($id: ID!) {
         }
       }
     }
-    fulfillments(first: 50) {
+    fulfillments(first: $fulfillmentsFirst) {
       id
       # A cancelled fulfillment keeps its tracking number, so it has to be told apart from a live one.
       status

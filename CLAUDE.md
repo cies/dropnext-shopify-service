@@ -136,8 +136,10 @@ credentials, so the human developer starts it — see "Operational boundary".
    cache is empty after a restart and the monolith does not answer) → `502`, because the shop may well have one and a
    `200` would lose the delivery.
 4. Dispatch on `ShopifyWebhookTopic`, each case one workflow function:
-   - `products/create`, `products/update`: `syncShopifyProductToMonolith` — `productById`, map with
-     `toProductVariantItems`, upsert the variants on the monolith (`upsertProductVariants`). Subscribed id-only
+   - `products/create`, `products/update`: `syncShopifyProductToMonolith` — `loadShopifyProduct` (`productById`
+     page by page, at most `WEBHOOK_MAX_VARIANT_PAGES`, so a larger product is refused as truncated rather than
+     outliving the webhook's budget), map with `toProductVariantItems`, upsert the variants on the monolith
+     (`upsertProductVariants`). Subscribed id-only
      (`id`, `admin_graphql_api_id`), like `orders/create`: the product is loaded anyway.
    - `products/delete`: `deleteShopifyProductFromMonolith` — the product id from the body (the only thing the
      body carries; the product can no longer be fetched), soft-delete its variants on the monolith
@@ -181,7 +183,14 @@ decode or does not pass the domain validators is a `400` shaped by `StatusPages`
 |---|---|---|
 | `POST /sync-shipments-with-fulfillments` | `SyncShipmentsWithFulfillmentsRequest` | `syncShopifyShipmentsToFulfillments`: reconciles DropNext shipments with the order's Shopify fulfillment orders (calculate → determine → effect the mutations). A shipment whose tracking number is already on a live fulfillment is skipped, so the monolith's re-send of a whole payload creates nothing twice. |
 | `POST /tracking-update` | `TrackingUpdateRequest` | `syncShopifyTrackingEvent`: a tracking status becomes a Shopify `FulfillmentEvent`. |
+| `GET /products/catalog?shop=` | — | `readShopifyCatalog`: every variant the shop has, grouped under its product (`ShopCatalogResponse`), plus `next_request_after_seconds`, the wait the shop's rate budget calls for before the monolith's next call. Walks `productVariants` to the end inside the DSS, waiting for the bucket to refill when it drops under half and asking again for a page that failed retryably; answers the whole catalog or fails, never a partial one, because the monolith soft-deletes whatever the answer omits. A throttled page waits for the refill Shopify reports; a cursor that does not advance fails the walk; the whole walk is bounded by `CATALOG_READ_BUDGET` (140 s, under the monolith's 150) and answers `502` past it, so it never outlives the caller. |
+| `POST /products/fetch` | `FetchProductsRequest` | `fetchShopifyProducts`: the named products (at most `MAX_PRODUCTS_PER_FETCH`) as the `ProductVariantItem`s a `products/update` webhook would upsert, the ids Shopify no longer has, and `next_request_after_seconds`. Loads one product at a time, every page of its variants (`loadShopifyProduct`), and fails the whole batch at the first failure; the whole fetch is bounded by `FETCH_PRODUCTS_BUDGET` (25 s, under the 30 s the monolith waits) and answers `502` past it. Reads only; the monolith stores the answer. |
 | `PUT /stores/api-key` | `UpdateStoreApiKeyRequest` | Caches the shop's Admin token in memory and forwards it to the monolith; answers `502` (or `404` for a store the monolith does not know) when the monolith did not persist it, with the token still cached. A blank `api_key` or a non-positive `shopify_shop_id` is a `400` before the cache is touched; `shopify_shop_id` is `null` when unknown. |
+
+A shop Shopify throttled is answered `429` on every monolith-facing route, with the contract's `ThrottledError` body
+(`retry_after_seconds`: the time the shop's point bucket needs to refill to half, from the budget Shopify reported, or
+ten seconds when it reported none) and the same number in `Retry-After`, so the monolith waits the shop's real refill
+rather than a backoff of its own.
 
 The other inbound routes are the OAuth pair (`/install`, `/oauth/callback`), the diagnostics endpoints (`/`,
 `/health`, `/api`, `/api/redirect-url`) and the per-shop webhook subscription pair (`/api/check`,
@@ -563,6 +572,12 @@ Files and types:
   everything else programs against that interface. The interface answers the `Order` and `Product` snapshots and
   takes two generated enums, so the layers that walk those may import generated types: `domain/fulfillment/`, the
   mappers and `workflow/` (`ArchitectureTest.graphqlGeneratedAllowList`). Handlers, routing, and presentation may not.
+- Page sizes reach an operation as variables, defined once as constants in `lib/shopify/graphql/`. Shopify refuses an
+  operation that declares a variable it does not use, and nothing else in the build would notice, so `ArchitectureTest`
+  checks every `.graphql` file for it.
+- Every answer's `extensions.cost` goes to `ShopifyQueryCostReporter`: a `warn` once per operation whose requested cost
+  is over `QUERY_COST_WARNING_THRESHOLD` (750 of Shopify's 1,000-point cap), and an `info` sample per shop and operation
+  at most once a minute (`Shopify query cost operation=… requested=… actual=… available=…`).
 - Bumping the Shopify API version touches several places that must agree; the procedure and the response-handling
   conventions are in `.claude/rules/graphql.md`.
 

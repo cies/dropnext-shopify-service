@@ -5,12 +5,16 @@ import dropnext.dss.domain.ProductCount
 import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopifyFulfillmentEventId
 import dropnext.dss.domain.ShopifyFulfillmentId
+import dropnext.dss.domain.ShopifyProductId
+import dropnext.dss.domain.ShopifyRateBudget
 import dropnext.dss.domain.ShopifyShopId
+import dropnext.dss.domain.ShopifyVariantId
 import dropnext.dss.domain.WebhookSubscriptionStatus
 import dropnext.graphql.generated.enums.FulfillmentEventStatus
 import dropnext.graphql.generated.enums.WebhookSubscriptionTopic
 import dropnext.graphql.generated.getorderfordss.Order
 import dropnext.graphql.generated.getproductbyid.Product
+import kotlin.time.Duration
 
 
 /**
@@ -43,8 +47,19 @@ interface ShopifyGraphqlService {
   /** `CurrentAppInstallationAccessScopes` — the scopes the shop granted this app, for a token whose exchange answer is long gone. */
   suspend fun accessScopeHandles(): ShopifyResult<List<String>>
 
-  /** `GetProductById` — the product to mirror after a `products/create` or `products/update` webhook; a successful `null` means Shopify has no such product. */
-  suspend fun productById(productGid: String): ShopifyResult<ShopProduct?>
+  /**
+   * `GetProductById` — one page of a product's variants, the first unless [variantsAfter] names Shopify's cursor to a
+   * later one; a successful `null` means Shopify has no such product. The answer is a whole product only when its
+   * [ShopProduct.nextVariantsCursor] is `null`: mirror a product through `loadShopifyProduct`, which follows the cursor.
+   */
+  suspend fun productById(productGid: String, variantsAfter: String? = null): ShopifyResult<ShopProduct?>
+
+  /**
+   * `GetProductVariantIdsPage` — one page of the shop's variants, each with its product. [after] is Shopify's own cursor, passed back as it came;
+   * `null` starts at the beginning. Single-shot on purpose — walking to the end is a workflow's job, because that
+   * walk has to pace itself against the shop's rate budget and this layer runs one operation.
+   */
+  suspend fun productVariantIdsPage(first: Int, after: String?): ShopifyResult<ShopifyCatalogPage>
 
   /** `GetOrderForDss` — the order snapshot the fulfillment workflows and the monolith order sync work from; [ShopifyError.NotFound] when Shopify has no such order. */
   suspend fun orderForDss(orderGid: String): ShopifyResult<Order>
@@ -105,7 +120,9 @@ typealias ShopifyResult<T> = Result<T, ShopifyError>
  * [UserError] and [NotFound] are Shopify refusing what we sent (a `400` / `404` for the caller);
  * [TokenRejected] is Shopify refusing *us* (a `401`, and no retry can help);
  * [GraphqlError], [HttpError] and [Network] are Shopify or the wire failing (a `502`);
- * [Undecodable] is an answer the generated client can no longer read.
+ * [Undecodable] is an answer the generated client can no longer read;
+ * [Truncated] is a list longer than this service loads, which no retry changes (a `500`);
+ * [TimedOut] is work spanning many calls that did not finish within its budget (a `502`).
  */
 sealed interface ShopifyError {
   val message: String
@@ -149,8 +166,16 @@ sealed interface ShopifyError {
    * Shopify answered with top-level `errors`, or without the data asked for. These arrive with HTTP `200`, and [codes]
    * holds their `extensions.code` (`THROTTLED`, `ACCESS_DENIED`, `MAX_COST_EXCEEDED`, a validation error's code): the
    * only thing that tells a throttled request from one that will never be allowed.
+   *
+   * [rateBudget] is what Shopify said was left of the shop's bucket when it refused, if it said. Shopify throttles with
+   * this error rather than with an HTTP status, and a throttled answer still carries the cost block, so this is where a
+   * caller learns how long to wait before asking again.
    */
-  data class GraphqlError(override val message: String, val codes: List<String> = emptyList()) : ShopifyError {
+  data class GraphqlError(
+    override val message: String,
+    val codes: List<String> = emptyList(),
+    val rateBudget: ShopifyRateBudget? = null,
+  ) : ShopifyError {
     /**
      * Of the coded errors only throttling and Shopify's internal errors pass. An error without any code is retried too:
      * most of those are this service's own, for an answer without the object it promised (no data, a mutation payload
@@ -181,6 +206,27 @@ sealed interface ShopifyError {
     override val message: String get() = "Shopify's answer could not be read: $detail"
     override val isRetryable: Boolean get() = false
   }
+
+  /**
+   * Shopify has more of [connection] than the [pageSize] this service asks for, so the snapshot is the first page of a
+   * longer list. Answered instead of the snapshot, because every reader downstream treats a list as complete: a mirror
+   * computed from a truncated one silently drops what it never saw, and a prune deletes it. Asking again loads the same
+   * page, so no retry helps — the query has to page.
+   */
+  data class Truncated(val connection: String, val pageSize: Int) : ShopifyError {
+    override val message: String get() = "Shopify has more $connection than the $pageSize this service loads"
+    override val isRetryable: Boolean get() = false
+  }
+
+  /**
+   * Work that spans many Shopify calls — reading a whole catalog — did not finish within [budget]. Its caller has
+   * stopped waiting by then, so going on would spend the shop's rate budget on an answer nobody reads. Retryable: the
+   * usual cause is a bucket drained by a burst of other traffic, which a later attempt may not meet.
+   */
+  data class TimedOut(val what: String, val budget: Duration) : ShopifyError {
+    override val message: String get() = "$what did not finish within $budget"
+    override val isRetryable: Boolean get() = true
+  }
 }
 
 /**
@@ -196,6 +242,8 @@ val ShopifyError.errorLabel: String
     is ShopifyError.UserError -> "shopify_user_error"
     is ShopifyError.NotFound -> "shopify_not_found"
     is ShopifyError.Undecodable -> "shopify_undecodable"
+    is ShopifyError.Truncated -> "shopify_truncated"
+    is ShopifyError.TimedOut -> "shopify_timed_out"
   }
 
 /** The `extensions.code` values Shopify documents as passing conditions: its rate limit and its own internal error. */
@@ -207,10 +255,41 @@ data class ShopIdentityInfo(
   val domain: ShopDomain,
 )
 
-/** A product together with the shop's currency, which the product payload itself does not carry. */
+/**
+ * How many of a product's variants one `GetProductById` call asks for. A choice of ours under Shopify's 250 per page;
+ * a product with more is paged, and the page cap of whoever pages it is counted in these.
+ */
+const val PRODUCT_VARIANTS_PAGE_SIZE: Int = 100
+
+/**
+ * A product together with the shop's currency, which the product payload itself does not carry, and what Shopify said
+ * was left of the shop's point bucket when it answered. [rateBudget] is `null` when Shopify sent no cost block; only a
+ * caller that paces itself over many products reads it, and the webhook path ignores it.
+ *
+ * [nextVariantsCursor] is Shopify's cursor to the product's next page of variants, and `null` once
+ * [product] holds them all.
+ */
 data class ShopProduct(
   val product: Product,
   val shopCurrencyCode: String,
+  val rateBudget: ShopifyRateBudget? = null,
+  val nextVariantsCursor: String? = null,
+)
+
+/**
+ * One page of the shop's variants. [nextCursor] is Shopify's `endCursor` while it has more and `null` at the end, so a
+ * caller loops until it is `null` and never has to understand what a cursor is.
+ */
+data class ShopifyCatalogPage(
+  val entries: List<ShopifyCatalogEntry>,
+  val nextCursor: String?,
+  val rateBudget: ShopifyRateBudget? = null,
+)
+
+/** One variant of the shop's catalog and the product it hangs under. */
+data class ShopifyCatalogEntry(
+  val productId: ShopifyProductId,
+  val productVariantId: ShopifyVariantId,
 )
 
 /** One line of a fulfillment to create: [quantity] of a fulfillment-order line item. */

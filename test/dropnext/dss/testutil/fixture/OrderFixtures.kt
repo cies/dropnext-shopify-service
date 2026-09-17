@@ -21,12 +21,23 @@ import dropnext.graphql.generated.getorderfordss.MoneyBag2
 import dropnext.graphql.generated.getorderfordss.MoneyV2
 import dropnext.graphql.generated.getorderfordss.MoneyV22
 import dropnext.graphql.generated.getorderfordss.Order
+import dropnext.graphql.generated.getorderfordss.PageInfo
 import dropnext.graphql.generated.getorderfordss.ProductVariant
 
 
+/**
+ * What every connection of a fixture reports unless the case is about truncation. A snapshot with another page is a
+ * failure, so a fixture that truncated by default would put every unrelated test on the unhappy path.
+ */
+internal val COMPLETE_PAGE = PageInfo(hasNextPage = false)
+
+/** [moreLineItems], [moreFulfillmentOrders] and [moreFoLineItems] each make one connection report another page. */
 internal fun minimalOrder(
   fulfillment: OrderDisplayFulfillmentStatus = OrderDisplayFulfillmentStatus.UNFULFILLED,
   financial: OrderDisplayFinancialStatus = OrderDisplayFinancialStatus.PAID,
+  moreLineItems: Boolean = false,
+  moreFulfillmentOrders: Boolean = false,
+  moreFoLineItems: Boolean = false,
 ): Order {
   val variant =
     ProductVariant(
@@ -52,9 +63,13 @@ internal fun minimalOrder(
     displayFinancialStatus = financial,
     displayFulfillmentStatus = fulfillment,
     shippingAddress = null,
-    lineItems = LineItemConnection(edges = listOf(LineItemEdge(node = lineItem))),
+    lineItems = LineItemConnection(
+      pageInfo = PageInfo(hasNextPage = moreLineItems),
+      edges = listOf(LineItemEdge(node = lineItem)),
+    ),
     fulfillmentOrders =
       FulfillmentOrderConnection(
+        pageInfo = PageInfo(hasNextPage = moreFulfillmentOrders),
         edges =
           listOf(
             FulfillmentOrderEdge(
@@ -64,6 +79,7 @@ internal fun minimalOrder(
                   status = FulfillmentOrderStatus.OPEN,
                   lineItems =
                     FulfillmentOrderLineItemConnection(
+                      pageInfo = PageInfo(hasNextPage = moreFoLineItems),
                       edges =
                         listOf(
                           FulfillmentOrderLineItemEdge(
@@ -99,12 +115,14 @@ internal fun orderWithFoQuantities(
     base.fulfillmentOrders.edges.single().node.copy(
       lineItems =
         FulfillmentOrderLineItemConnection(
+          pageInfo = COMPLETE_PAGE,
           edges = listOf(FulfillmentOrderLineItemEdge(node = foLine)),
         ),
     )
   return base.copy(
     fulfillmentOrders =
       FulfillmentOrderConnection(
+        pageInfo = COMPLETE_PAGE,
         edges = listOf(FulfillmentOrderEdge(node = fo)),
       ),
   )
@@ -135,6 +153,7 @@ internal fun orderWithTwoVariantFulfillmentOrders(
       status = FulfillmentOrderStatus.OPEN,
       lineItems =
         FulfillmentOrderLineItemConnection(
+          pageInfo = COMPLETE_PAGE,
           edges =
             listOf(
               FulfillmentOrderLineItemEdge(
@@ -154,6 +173,7 @@ internal fun orderWithTwoVariantFulfillmentOrders(
       status = FulfillmentOrderStatus.OPEN,
       lineItems =
         FulfillmentOrderLineItemConnection(
+          pageInfo = COMPLETE_PAGE,
           edges =
             listOf(
               FulfillmentOrderLineItemEdge(
@@ -170,6 +190,7 @@ internal fun orderWithTwoVariantFulfillmentOrders(
   return minimalOrder().copy(
     fulfillmentOrders =
       FulfillmentOrderConnection(
+        pageInfo = COMPLETE_PAGE,
         edges = listOf(FulfillmentOrderEdge(node = firstFo), FulfillmentOrderEdge(node = secondFo)),
       ),
   )
@@ -177,7 +198,7 @@ internal fun orderWithTwoVariantFulfillmentOrders(
 
 /** [minimalOrder] as `orders/create` can find it: Shopify routes an order into fulfillment orders after creating it. */
 internal fun orderWithoutFulfillmentOrders(): Order =
-  minimalOrder().copy(fulfillmentOrders = FulfillmentOrderConnection(edges = emptyList()))
+  minimalOrder().copy(fulfillmentOrders = FulfillmentOrderConnection(pageInfo = COMPLETE_PAGE, edges = emptyList()))
 
 /**
  * [minimalOrder] carrying one existing fulfillment, for the cancel-then-recreate paths and for the

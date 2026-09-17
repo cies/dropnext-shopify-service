@@ -5,6 +5,7 @@ import dev.forkhandles.result4k.Success
 import dropnext.dss.contract.UpsertProductVariantsRequest
 import dropnext.dss.lib.monolith.MonolithService
 import dropnext.dss.lib.monolith.logMonolithFailure
+import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlService
 import dropnext.dss.mapper.toProductVariantItems
 import io.github.oshai.kotlinlogging.KotlinLogging
@@ -13,16 +14,24 @@ import io.github.oshai.kotlinlogging.KotlinLogging
 private val log = KotlinLogging.logger {}
 
 /**
+ * The pages a product webhook may load, 500 variants at the current page size. Every page and the monolith upsert share
+ * the webhook's four-second budget, and running out of it is a `502` Shopify redelivers, again and again for the same
+ * product, until it removes a subscription that keeps failing. A larger product answers [ShopifyError.Truncated]
+ * instead, a `200` with an error line; such a product reaches the monolith only through the product fetch.
+ */
+const val WEBHOOK_MAX_VARIANT_PAGES: Int = 5
+
+/**
  * Mirrors one Shopify product into the monolith after a `products/create` or `products/update` webhook:
- * loads it (the webhook body is id-only), maps its variants, and upserts them. The outcome tells the
- * handler whether a redelivery of the webhook is worth asking for.
+ * loads it with every page of its variants (the webhook body is id-only), maps them, and upserts them.
+ * The outcome tells the handler whether a redelivery of the webhook is worth asking for.
  */
 suspend fun syncShopifyProductToMonolith(
   shopify: ShopifyGraphqlService,
   monolith: MonolithService,
   productGid: String,
 ): WebhookMirrorOutcome {
-  val shopProduct = when (val loaded = shopify.productById(productGid)) {
+  val shopProduct = when (val loaded = loadShopifyProduct(shopify, productGid, maxPages = WEBHOOK_MAX_VARIANT_PAGES)) {
     is Failure -> {
       log.warn { "Webhook product: could not load productGid=$productGid error=${loaded.reason.message}" }
       return WebhookMirrorOutcome.ShopifyFailed(loaded.reason)
@@ -32,7 +41,8 @@ suspend fun syncShopifyProductToMonolith(
       return WebhookMirrorOutcome.Skipped(WebhookSkipReason.PRODUCT_GONE)
     }
   }
-  log.info { "Webhook product loaded id=$productGid title=${shopProduct.product.title}" }
+  val variantCount = shopProduct.product.variants.edges.size
+  log.info { "Webhook product loaded id=$productGid title=${shopProduct.product.title} variants=$variantCount" }
   val variantItems = shopProduct.product.toProductVariantItems(shopProduct.shopCurrencyCode)
   if (variantItems.isEmpty()) return WebhookMirrorOutcome.Skipped(WebhookSkipReason.NO_MAPPABLE_LINES)
 

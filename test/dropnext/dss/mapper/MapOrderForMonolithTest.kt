@@ -11,6 +11,7 @@ import dropnext.graphql.generated.enums.CountryCode
 import dropnext.graphql.generated.enums.CurrencyCode
 import dropnext.graphql.generated.enums.OrderDisplayFinancialStatus
 import dropnext.graphql.generated.enums.OrderDisplayFulfillmentStatus
+import dropnext.dss.testutil.fixture.COMPLETE_PAGE
 import dropnext.graphql.generated.getorderfordss.LineItem
 import dropnext.graphql.generated.getorderfordss.LineItemConnection
 import dropnext.graphql.generated.getorderfordss.LineItemEdge
@@ -334,7 +335,7 @@ class MapOrderForMonolithTest {
   }
 
   private fun Order.withSingleLineItem(change: (LineItem) -> LineItem): Order =
-    copy(lineItems = LineItemConnection(edges = listOf(LineItemEdge(node = change(lineItems.edges.single().node)))))
+    copy(lineItems = LineItemConnection(pageInfo = COMPLETE_PAGE, edges = listOf(LineItemEdge(node = change(lineItems.edges.single().node)))))
 
   /** Protected customer data the monolith keeps with the order; an order without a customer has none. */
   @Test

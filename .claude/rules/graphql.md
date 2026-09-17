@@ -66,6 +66,11 @@ deprecated API use").
   new layer needs an allowlist entry with a one-line reason.
 - Never retry Shopify traffic: it uses the base HTTP client on purpose, because a retried mutation is a duplicated
   fulfillment. The monolith client is the one with retries.
+- `executeCosted` hands every answer's `extensions.cost` to the `ShopifyQueryCostReporter` the factory shares
+  between shops, and to the callers that pace themselves as a `ShopifyRateBudget`. Reading it never changes an answer.
+- A connection that can be longer than one page asks for `pageInfo`; the method that owns the payload answers
+  `ShopifyError.Truncated` for one it does not page, or the cursor for one a workflow pages (`loadShopifyProduct`,
+  `readShopifyCatalog`).
 - A `ShopifyGraphqlService` is bound to one shop and its token; get one through `ShopifyGraphqlServiceFactory.forShop`
   and treat `null` as "no Admin token".
 

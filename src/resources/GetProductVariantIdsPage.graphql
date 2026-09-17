@@ -1,0 +1,18 @@
+# One page of the shop's variants, each with the product it belongs to.
+#
+# The flat `productVariants` connection rather than `products` with nested variants:
+# the only listing that sees a variant removed from a product that still exists.
+query GetProductVariantIdsPage($first: Int!, $after: String) {
+  productVariants(first: $first, after: $after) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    nodes {
+      legacyResourceId
+      product {
+        legacyResourceId
+      }
+    }
+  }
+}

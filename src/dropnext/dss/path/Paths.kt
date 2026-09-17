@@ -35,4 +35,6 @@ object Paths {
   const val storesApiKey = "/stores/api-key"
   const val syncShipmentsWithFulfillments = "/sync-shipments-with-fulfillments"
   const val trackingUpdate = "/tracking-update"
+  const val productsCatalog = "/products/catalog"
+  const val productsFetch = "/products/fetch"
 }

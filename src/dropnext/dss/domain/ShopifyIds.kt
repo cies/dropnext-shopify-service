@@ -21,6 +21,11 @@ value class ShopifyProductId(val value: Long) {
 }
 
 @JvmInline
+value class ShopifyVariantId(val value: Long) {
+  override fun toString() = value.toString()
+}
+
+@JvmInline
 value class ShopifyFulfillmentId(val value: Long) {
   override fun toString() = value.toString()
 }

@@ -79,6 +79,11 @@ class WebhookDeliveryReportTest {
     val gone = report(WebhookMirrorOutcome.ShopifyFailed(ShopifyError.NotFound("order 1 not found")))
     assert(gone.errorLabel == "shopify_not_found")
     assert("order 1 not found" !in gone.logLine(200))
+    val truncated = report(WebhookMirrorOutcome.ShopifyFailed(ShopifyError.Truncated("product.variants", 100)))
+    assert(truncated.errorLabel == "shopify_truncated")
+    // No redelivery loads a different page, so Shopify must not be asked to try again.
+    assert(truncated.logLevel == WebhookDeliveryReport.LogLevel.ERROR)
+    assert("transient=false" in truncated.logLine(200))
   }
 
   /** Neither was refused: the token source did not answer, or the work did not finish in time. Shopify is asked to redeliver both. */

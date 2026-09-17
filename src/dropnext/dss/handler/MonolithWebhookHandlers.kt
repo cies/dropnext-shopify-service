@@ -2,6 +2,10 @@ package dropnext.dss.handler
 
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
+import dropnext.dss.contract.FetchProductsRequest
+import dropnext.dss.contract.FetchProductsResponse
+import dropnext.dss.contract.ShopCatalogProduct
+import dropnext.dss.contract.ShopCatalogResponse
 import dropnext.dss.contract.SyncShipmentsWithFulfillmentsRequest
 import dropnext.dss.contract.SyncShipmentsWithFulfillmentsResponse
 import dropnext.dss.contract.TrackingUpdateRequest
@@ -10,7 +14,10 @@ import dropnext.dss.contract.UpdateStoreApiKeyRequest
 import dropnext.dss.contract.UpdateStoreApiKeyResponse
 import dropnext.dss.domain.MonolithPersistOutcome
 import dropnext.dss.domain.ShopifyAdminToken
+import dropnext.dss.domain.ShopifyProductId
+import dropnext.dss.domain.ShopifyRateBudget
 import dropnext.dss.domain.ShopifyShopId
+import dropnext.dss.lib.ktor.inWholeSecondsRoundedUp
 import dropnext.dss.lib.ktor.respondError
 import dropnext.dss.lib.monolith.MonolithService
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlServiceFactory
@@ -18,12 +25,16 @@ import dropnext.dss.lib.shopify.token.ShopTokenStore
 import dropnext.dss.lib.slf4j.SHOP_MDC_KEY
 import dropnext.dss.lib.slf4j.withMdcEntries
 import dropnext.dss.workflow.persistTokenToMonolith
+import dropnext.dss.workflow.CATALOG_BUDGET_FLOOR
+import dropnext.dss.workflow.fetchShopifyProducts
+import dropnext.dss.workflow.readShopifyCatalog
 import dropnext.dss.workflow.syncShopifyShipmentsToFulfillments
 import dropnext.dss.workflow.syncShopifyTrackingEvent
 import io.github.oshai.kotlinlogging.KotlinLogging
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
+import io.ktor.server.util.getOrFail
 
 
 private val log = KotlinLogging.logger {}
@@ -83,6 +94,58 @@ class MonolithWebhookHandlers(
    * is cached before the monolith is asked and stays cached when that fails; the answer is then an
    * error, so the caller knows the monolith does not have it, rather than a `200` with a made-up id.
    */
+  /**
+   * `GET /products/catalog?shop=` — every variant the shop has, grouped under its product.
+   *
+   * The shop travels in the query string rather than a body because this is a read; the walk behind it can take
+   * minutes on a large catalog, which is why the monolith calls it from a job.
+   */
+  suspend fun handleProductsCatalog(call: ApplicationCall) {
+    val rawShop = call.request.queryParameters.getOrFail("shop")
+    val shop = call.shopDomainOrRespond(rawShop, "shop") ?: return
+    withMdcEntries(SHOP_MDC_KEY to shop.normalizedShopifyHost) {
+      val shopify = call.shopifyServiceOrRespond(shopifyGraphqlServiceFactory, shop) ?: return@withMdcEntries
+      when (val catalog = readShopifyCatalog(shopify)) {
+        is Success -> call.respond(
+          ShopCatalogResponse(
+            products = catalog.value.products.map {
+              ShopCatalogProduct(
+                productId = it.productId.value,
+                productVariantIds = it.productVariantIds.map { variantId -> variantId.value },
+              )
+            },
+            productCount = catalog.value.products.size,
+            productVariantCount = catalog.value.productVariantCount,
+            nextRequestAfterSeconds = catalog.value.rateBudget.nextRequestAfterSeconds(),
+          )
+        )
+        // The walk has logged its failure, with how far it got.
+        is Failure -> call.respondError(catalog.reason.toDssError())
+      }
+    }
+  }
+
+  /** `POST /products/fetch` — the named products as the variant items the monolith's upsert already takes. */
+  suspend fun handleFetchProducts(call: ApplicationCall) {
+    val request = call.receive<FetchProductsRequest>()
+    val shop = call.shopDomainOrRespond(request.shopifySubdomain, "shopify_subdomain") ?: return
+    withMdcEntries(SHOP_MDC_KEY to shop.normalizedShopifyHost) {
+      val shopify = call.shopifyServiceOrRespond(shopifyGraphqlServiceFactory, shop) ?: return@withMdcEntries
+      val productIds = request.shopifyProductIds.map(::ShopifyProductId)
+      when (val fetched = fetchShopifyProducts(shopify, productIds)) {
+        is Success -> call.respond(
+          FetchProductsResponse(
+            productVariants = fetched.value.productVariants,
+            missingProductIds = fetched.value.missingProductIds.map { it.value },
+            nextRequestAfterSeconds = fetched.value.rateBudget.nextRequestAfterSeconds(),
+          )
+        )
+        // The fetch has logged its failure, naming the product it failed on, which is more than this could say.
+        is Failure -> call.respondError(fetched.reason.toDssError())
+      }
+    }
+  }
+
   suspend fun handlePutStoreApiKey(call: ApplicationCall) {
     val request = call.receive<UpdateStoreApiKeyRequest>()
     val shop = call.shopDomainOrRespond(request.shopifySubdomain, "shopify_subdomain") ?: return
@@ -100,3 +163,11 @@ class MonolithWebhookHandlers(
     }
   }
 }
+
+/**
+ * How long the monolith should wait before its next call for this shop: the refill a bucket under
+ * [CATALOG_BUDGET_FLOOR] needs to get back to it, or nothing. Shopify's bucket model stays on this side of the contract;
+ * the monolith only honors the number. A shop that reported no budget is not asked to wait.
+ */
+private fun ShopifyRateBudget?.nextRequestAfterSeconds(): Int =
+  this?.takeIf { it.isBelow(CATALOG_BUDGET_FLOOR) }?.refillTo(CATALOG_BUDGET_FLOOR)?.inWholeSecondsRoundedUp() ?: 0

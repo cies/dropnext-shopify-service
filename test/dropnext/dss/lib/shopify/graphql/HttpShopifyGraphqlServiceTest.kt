@@ -6,6 +6,7 @@ import dropnext.dss.boot.config.Config
 import dropnext.dss.domain.ProductCount
 import dropnext.dss.domain.ShopifyFulfillmentEventId
 import dropnext.dss.domain.ShopifyFulfillmentId
+import dropnext.dss.domain.ShopifyRateBudget
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.domain.WebhookSubscriptionStatus
 import dropnext.dss.lib.json.AppJson
@@ -17,6 +18,8 @@ import dropnext.dss.testutil.fixture.fulfillment
 import dropnext.dss.testutil.fixture.minimalOrder
 import dropnext.dss.testutil.fixture.orderWithFulfillments
 import dropnext.dss.testutil.fixture.sampleProduct
+import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
+import dropnext.dss.testutil.helper.capturingLogs
 import dropnext.dss.testutil.helper.failureReason
 import dropnext.dss.testutil.helper.shopifyRewritingHttpClient
 import dropnext.dss.testutil.helper.shopifyServiceOn
@@ -68,6 +71,7 @@ import io.ktor.http.HttpStatusCode
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -75,6 +79,7 @@ import org.junit.jupiter.api.AutoClose
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
+import org.junit.jupiter.api.parallel.ResourceLock
 
 
 /**
@@ -179,11 +184,11 @@ class HttpShopifyGraphqlServiceTest {
         "legacyResourceId":"501","title":"Sample","description":"","descriptionHtml":"","vendor":"","productType":"",
         "tags":[],"handle":"sample","status":"ACTIVE","publishedAt":null,
         "createdAt":"2026-04-01T00:00:00Z","updatedAt":"2026-04-01T00:00:00Z",
-        "media":{"edges":[
+        "media":{"pageInfo":{"hasNextPage":false},"edges":[
           {"node":{"__typename":"Video","id":"gid://shopify/Video/1"}},
           {"node":{"__typename":"MediaImage","image":{"url":"https://cdn.example/cover.jpg"}}}
         ]},
-        "variants":{"edges":[]}
+        "variants":{"pageInfo":{"hasNextPage":false},"edges":[]}
       }}}
       """.trimIndent(),
     )
@@ -202,6 +207,296 @@ class HttpShopifyGraphqlServiceTest {
       GetProductById.Result.serializer(),
     )
     assert(shopify.productById("gid://shopify/Product/999") == Success(null))
+  }
+
+  /**
+   * The page sizes live in one place and reach Shopify as variables, so this pins the whole point of that: the number
+   * the query asked for is the number a pager's truncation message counts in. A first page sends no cursor, which
+   * Shopify reads as "from the start".
+   */
+  @Test
+  fun `productById asks for the page sizes it counts in and no cursor for the first page`() = runBlocking {
+    fake.stubData(
+      "GetProductById",
+      GetProductById.Result(
+        shop = GetProductByIdShop(currencyCode = CurrencyCode.EUR),
+        product = sampleProduct(variantId = "601"),
+      ),
+      GetProductById.Result.serializer(),
+    )
+    shopify.productById("gid://shopify/Product/501")
+
+    val variables = fake.calls.single().variables.jsonObject
+    assert(variables["mediaFirst"]?.jsonPrimitive?.int == 20)
+    assert(variables["variantsFirst"]?.jsonPrimitive?.int == PRODUCT_VARIANTS_PAGE_SIZE)
+    assert("variantsAfter" !in variables)
+  }
+
+  @Test
+  fun `productById sends the cursor of a later page`() = runBlocking {
+    fake.stubData(
+      "GetProductById",
+      GetProductById.Result(
+        shop = GetProductByIdShop(currencyCode = CurrencyCode.EUR),
+        product = sampleProduct(variantId = "701"),
+      ),
+      GetProductById.Result.serializer(),
+    )
+    val page = shopify.productById("gid://shopify/Product/501", variantsAfter = "cursor-1").successValue()
+
+    val variables = fake.calls.single().variables.jsonObject
+    assert(variables["variantsAfter"]?.jsonPrimitive?.content == "cursor-1")
+    assert(page?.product?.variants?.edges?.single()?.node?.legacyResourceId == "701")
+    assert(page?.nextVariantsCursor == null)
+  }
+
+  @Test
+  fun `orderForDss asks for every one of its page sizes`() = runBlocking {
+    fake.stubData(
+      "GetOrderForDss",
+      GetOrderForDss.Result(order = minimalOrder()),
+      GetOrderForDss.Result.serializer(),
+    )
+    shopify.orderForDss("gid://shopify/Order/1001")
+
+    val variables = fake.calls.single().variables.jsonObject
+    assert(variables["lineItemsFirst"]?.jsonPrimitive?.int == 100)
+    assert(variables["fulfillmentOrdersFirst"]?.jsonPrimitive?.int == 50)
+    assert(variables["fulfillmentOrderLineItemsFirst"]?.jsonPrimitive?.int == 100)
+    // Not a connection, so it cannot report truncation: it sits at Shopify's per-page ceiling.
+    assert(variables["fulfillmentsFirst"]?.jsonPrimitive?.int == 250)
+  }
+
+  /** A product with more variants than a page is not a failure here: the answer says where the next page starts. */
+  @Test
+  fun `productById answers a page of variants and the cursor to the next`() = runBlocking {
+    fake.stubData(
+      "GetProductById",
+      GetProductById.Result(
+        shop = GetProductByIdShop(currencyCode = CurrencyCode.EUR),
+        product = sampleProduct(variantId = "601", variantsCursor = "cursor-1"),
+      ),
+      GetProductById.Result.serializer(),
+    )
+    val page = shopify.productById("gid://shopify/Product/501").successValue()
+
+    assert(page?.nextVariantsCursor == "cursor-1")
+    assert(page?.product?.variants?.edges?.single()?.node?.legacyResourceId == "601")
+  }
+
+  /** An image count must not stop a variant sync: the product still reaches the monolith with the images it has. */
+  @Test
+  fun `productById answers a product whose media alone was truncated`() = runBlocking {
+    fake.stubData(
+      "GetProductById",
+      GetProductById.Result(
+        shop = GetProductByIdShop(currencyCode = CurrencyCode.EUR),
+        product = sampleProduct(variantId = "601", moreMedia = true),
+      ),
+      GetProductById.Result.serializer(),
+    )
+    val result = shopify.productById("gid://shopify/Product/501")
+    assert(result is Success)
+    assert(result.successValue()?.product?.legacyResourceId == "501")
+  }
+
+  @Test
+  fun `orderForDss refuses an order whose line items Shopify has more of`() = runBlocking {
+    fake.stubData(
+      "GetOrderForDss",
+      GetOrderForDss.Result(order = minimalOrder(moreLineItems = true)),
+      GetOrderForDss.Result.serializer(),
+    )
+    val result = shopify.orderForDss("gid://shopify/Order/1001")
+    assert(result is Failure)
+    assert(result.failureReason() == ShopifyError.Truncated("order.lineItems", 100))
+  }
+
+  @Test
+  fun `orderForDss refuses an order whose fulfillment orders Shopify has more of`() = runBlocking {
+    fake.stubData(
+      "GetOrderForDss",
+      GetOrderForDss.Result(order = minimalOrder(moreFulfillmentOrders = true)),
+      GetOrderForDss.Result.serializer(),
+    )
+    val result = shopify.orderForDss("gid://shopify/Order/1001")
+    assert(result is Failure)
+    assert(result.failureReason() == ShopifyError.Truncated("order.fulfillmentOrders", 50))
+  }
+
+  /** The name says which level ran over, so an operator reads the nesting off the error. */
+  @Test
+  fun `orderForDss names the nested connection when one fulfillment order has more lines`() = runBlocking {
+    fake.stubData(
+      "GetOrderForDss",
+      GetOrderForDss.Result(order = minimalOrder(moreFoLineItems = true)),
+      GetOrderForDss.Result.serializer(),
+    )
+    val result = shopify.orderForDss("gid://shopify/Order/1001")
+    assert(result is Failure)
+    assert(result.failureReason() == ShopifyError.Truncated("fulfillmentOrders.lineItems", 100))
+  }
+
+  @Test
+  fun `productVariantIdsPage reads the variants with their products and the next cursor`() = runBlocking {
+    fake.stubRaw(
+      "GetProductVariantIdsPage",
+      """
+      {"data":{"productVariants":{
+        "pageInfo":{"hasNextPage":true,"endCursor":"eyJsYXN0X2lkIjo0NH0="},
+        "nodes":[
+          {"legacyResourceId":"44","product":{"legacyResourceId":"8"}},
+          {"legacyResourceId":"45","product":{"legacyResourceId":"8"}}
+        ]
+      }}}
+      """.trimIndent(),
+    )
+    val page = shopify.productVariantIdsPage(first = 250, after = "previous").successValue()
+
+    assert(page.entries.map { it.productVariantId.value } == listOf(44L, 45L))
+    assert(page.entries.all { it.productId.value == 8L })
+    assert(page.nextCursor == "eyJsYXN0X2lkIjo0NH0=")
+    val variables = fake.calls.single().variables.jsonObject
+    assert(variables["first"]?.jsonPrimitive?.int == 250)
+    assert(variables["after"]?.jsonPrimitive?.content == "previous")
+  }
+
+  /** Shopify keeps a cursor on the last page too; answering it would make the walk ask for a page that is not there. */
+  @Test
+  fun `productVariantIdsPage answers no cursor on the last page`() = runBlocking {
+    fake.stubRaw(
+      "GetProductVariantIdsPage",
+      """{"data":{"productVariants":{"pageInfo":{"hasNextPage":false,"endCursor":"last"},"nodes":[]}}}""",
+    )
+    val page = shopify.productVariantIdsPage(first = 250, after = null).successValue()
+
+    assert(page.nextCursor == null)
+    assert(page.entries.isEmpty())
+    // The client leaves out a variable whose value is null, which Shopify reads as "from the start".
+    assert("after" !in fake.calls.single().variables.jsonObject)
+  }
+
+  @Test
+  fun `productVariantIdsPage leaves out a variant whose id does not parse`() = runBlocking {
+    fake.stubRaw(
+      "GetProductVariantIdsPage",
+      """
+      {"data":{"productVariants":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[
+        {"legacyResourceId":"not-a-number","product":{"legacyResourceId":"8"}},
+        {"legacyResourceId":"45","product":{"legacyResourceId":"8"}}
+      ]}}}
+      """.trimIndent(),
+    )
+    val page = shopify.productVariantIdsPage(first = 250, after = null).successValue()
+
+    assert(page.entries.map { it.productVariantId.value } == listOf(45L))
+  }
+
+  @Test
+  fun `the rate budget is read off the response envelope`() = runBlocking {
+    fake.stubRaw(
+      "GetProductVariantIdsPage",
+      """
+      {"data":{"productVariants":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}},
+       "extensions":{"cost":{"requestedQueryCost":252,"actualQueryCost":12,
+         "throttleStatus":{"maximumAvailable":2000.0,"currentlyAvailable":1988,"restoreRate":100.0}}}}
+      """.trimIndent(),
+    )
+    val page = shopify.productVariantIdsPage(first = 250, after = null).successValue()
+
+    // `currentlyAvailable` arrives as an integer here; the budget reads either.
+    assert(page.rateBudget == ShopifyRateBudget(maximumAvailable = 2000.0, currentlyAvailable = 1988.0, restoreRate = 100.0))
+  }
+
+  @Test
+  fun `productById carries the rate budget Shopify reported with the product`() = runBlocking {
+    fake.stubRaw(
+      "GetProductById",
+      """
+      {"data":{"shop":{"currencyCode":"EUR"},"product":{
+        "legacyResourceId":"501","title":"Sample","description":"","descriptionHtml":"","vendor":"","productType":"",
+        "tags":[],"handle":"sample","status":"ACTIVE","publishedAt":null,
+        "createdAt":"2026-04-01T00:00:00Z","updatedAt":"2026-04-01T00:00:00Z",
+        "media":{"pageInfo":{"hasNextPage":false},"edges":[]},
+        "variants":{"pageInfo":{"hasNextPage":false},"edges":[]}
+      }},
+       "extensions":{"cost":{"throttleStatus":{"maximumAvailable":1000.0,"currentlyAvailable":700.0,"restoreRate":50.0}}}}
+      """.trimIndent(),
+    )
+    val product = shopify.productById("gid://shopify/Product/501").successValue()
+
+    assert(product?.rateBudget == ShopifyRateBudget(maximumAvailable = 1000.0, currentlyAvailable = 700.0, restoreRate = 50.0))
+  }
+
+  /**
+   * The cost is reported on every answer that carries one, a refusal included, under the operation's own name: the
+   * warning is only useful if it says which query to change.
+   */
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `the cost Shopify reports is warned about by operation, on a refusal too`() {
+    val product = """
+      {"data":{"shop":{"currencyCode":"EUR"},"product":null},
+       "extensions":{"cost":{"requestedQueryCost":812,"actualQueryCost":3}}}
+    """.trimIndent()
+    val throttled = """
+      {"errors":[{"message":"Throttled","extensions":{"code":"THROTTLED"}}],
+       "extensions":{"cost":{"requestedQueryCost":900}}}
+    """.trimIndent()
+    fake.stubRaw("GetProductById", product)
+    fake.stubRaw("ShopIdentity", throttled)
+    val service = shopifyServiceOn(shopifyClient, costReporter = ShopifyQueryCostReporter())
+
+    val lines = capturingLogs {
+      runBlocking {
+        service.productById("gid://shopify/Product/501")
+        service.shopIdentity()
+      }
+    }
+
+    val warnings = lines.filter { it.startsWith("WARN Shopify query cost is near the cap") }
+    assert(warnings.size == 2)
+    assert("operation=GetProductById requested=812 actual=3" in warnings[0])
+    assert("operation=ShopIdentity requested=900 actual=null" in warnings[1])
+  }
+
+  /** A statistic must never fail a call: an envelope without the block, or with a block of the wrong shape, is no budget. */
+  @Test
+  fun `a missing or malformed cost block is no budget and still a success`() = runBlocking {
+    val body = { extensions: String ->
+      """{"data":{"productVariants":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}$extensions}"""
+    }
+    listOf(
+      "",
+      ""","extensions":{}""",
+      ""","extensions":{"cost":{"requestedQueryCost":1}}""",
+      ""","extensions":{"cost":"not a map"}""",
+      ""","extensions":{"cost":{"throttleStatus":{"maximumAvailable":"lots","currentlyAvailable":1,"restoreRate":1}}}""",
+    ).forEach { extensions ->
+      fake.clear()
+      fake.stubRaw("GetProductVariantIdsPage", body(extensions))
+      val result = shopify.productVariantIdsPage(first = 250, after = null)
+      assert(result is Success)
+      assert(result.successValue().rateBudget == null)
+    }
+  }
+
+  /** Shopify throttles with a `200` and an error, and still reports the bucket: that is how long a retry has to wait. */
+  @Test
+  fun `a throttled answer carries the rate budget Shopify reported with it`() = runBlocking {
+    fake.stubRaw(
+      "GetProductVariantIdsPage",
+      """
+      {"errors":[{"message":"Throttled","extensions":{"code":"THROTTLED"}}],
+       "extensions":{"cost":{"requestedQueryCost":252,
+         "throttleStatus":{"maximumAvailable":1000.0,"currentlyAvailable":12.0,"restoreRate":50.0}}}}
+      """.trimIndent(),
+    )
+    val result = shopify.productVariantIdsPage(first = 250, after = null)
+
+    val error = result.failureReason() as ShopifyError.GraphqlError
+    assert(error.codes == listOf("THROTTLED"))
+    assert(error.rateBudget == ShopifyRateBudget(maximumAvailable = 1000.0, currentlyAvailable = 12.0, restoreRate = 50.0))
   }
 
   @Test
@@ -1073,13 +1368,13 @@ id: String = "gid://shopify/Shop/1", domain: String = "acme.myshopify.com") {
       "totalPriceSet":{"shopMoney":{"amount":"39.98","currencyCode":"USD"}},
       "displayFinancialStatus":"PAID","displayFulfillmentStatus":"$displayFulfillmentStatus",
       "shippingAddress":null,
-      "lineItems":{"edges":[{"node":{
+      "lineItems":{"pageInfo":{"hasNextPage":false},"edges":[{"node":{
         "id":"gid://shopify/LineItem/201","quantity":2,"name":"T-Shirt - Blue","title":"T-Shirt",
         "originalUnitPriceSet":{"shopMoney":{"amount":"19.99"}},"variant":{"legacyResourceId":"101"}
       }}]},
-      "fulfillmentOrders":{"edges":[{"node":{
+      "fulfillmentOrders":{"pageInfo":{"hasNextPage":false},"edges":[{"node":{
         "id":"gid://shopify/FulfillmentOrder/301","status":"$fulfillmentOrderStatus",
-        "lineItems":{"edges":[{"node":{
+        "lineItems":{"pageInfo":{"hasNextPage":false},"edges":[{"node":{
           "id":"gid://shopify/FulfillmentOrderLineItem/401","remainingQuantity":2,"variant":{"legacyResourceId":"101"}
         }}]}
       }}]},

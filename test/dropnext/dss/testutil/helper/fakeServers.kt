@@ -5,6 +5,7 @@ import dropnext.dss.boot.config.Config
 import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.lib.shopify.graphql.HttpShopifyGraphqlService
+import dropnext.dss.lib.shopify.graphql.ShopifyQueryCostReporter
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlService
 import dropnext.dss.testutil.fake.FakeMonolithHttpServer
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlServer
@@ -43,8 +44,9 @@ internal fun shopifyServiceOn(
   /** The endpoint to talk to: the shop's own Admin URL, unless the case is about another one, such as a host that is down. */
   url: String = shopifyAdminGraphqlUrl(shop),
   onTokenRejected: () -> Unit = {},
+  costReporter: ShopifyQueryCostReporter = ShopifyQueryCostReporter(),
 ): ShopifyGraphqlService =
-  HttpShopifyGraphqlService(shop, GraphQLKtorClient(URI(url).toURL(), shopifyClient), token, onTokenRejected)
+  HttpShopifyGraphqlService(shop, GraphQLKtorClient(URI(url).toURL(), shopifyClient), token, onTokenRejected, costReporter)
 
 /**
  * The Admin Graphql endpoint of a real shop. Derived from the configured API version rather than spelled out, so

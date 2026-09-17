@@ -190,7 +190,12 @@ When a shipment line's `product_variant_id` does not appear on any open fulfillm
 
 ## Known limitations
 
-- `GetOrderForDss` loads at most 100 line items, 50 fulfillment orders with 100 lines each, and 50 fulfillments, and nothing reports a longer list: an order past those limits is matched against a partial snapshot, and a tracking number on the fifty-first fulfillment is not found.
+- `GetOrderForDss` loads at most 100 line items and 50 fulfillment orders with 100 lines each. Each of those now
+  reports whether Shopify has more, and an order past any of them fails the call instead of being matched against a
+  partial snapshot: `/sync-shipments-with-fulfillments` and `/tracking-update` answer `500`.
+- `fulfillments` is not a connection — it takes a `first:` that simply truncates, with no way to report that it
+  did — so it is loaded at 250 and a tracking number on the two-hundred-and-fifty-first fulfillment is still not
+  found, silently. That is the one truncation left in this query.
 - Matching is by variant only.
 - `/tracking-update` trims the tracking number, compares it case-sensitively, ignores cancelled fulfillments, and takes the first live fulfillment that carries it.
 

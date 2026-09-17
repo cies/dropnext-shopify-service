@@ -12,7 +12,10 @@ import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.domain.ShopifyFulfillmentEventId
 import dropnext.dss.domain.ShopifyFulfillmentId
+import dropnext.dss.domain.ShopifyProductId
+import dropnext.dss.domain.ShopifyQueryCost
 import dropnext.dss.domain.ShopifyShopId
+import dropnext.dss.domain.ShopifyVariantId
 import dropnext.dss.domain.WebhookSubscriptionStatus
 import dropnext.dss.lib.shopify.legacyIdFromGid
 import dropnext.graphql.generated.CurrentAppInstallationAccessScopes
@@ -22,6 +25,7 @@ import dropnext.graphql.generated.FulfillmentCreateWithLineItems
 import dropnext.graphql.generated.FulfillmentEventCreateMutation
 import dropnext.graphql.generated.GetOrderForDss
 import dropnext.graphql.generated.GetProductById
+import dropnext.graphql.generated.GetProductVariantIdsPage
 import dropnext.graphql.generated.GetWebhookSubscriptions
 import dropnext.graphql.generated.ProductsCount
 import dropnext.graphql.generated.RegisterWebhook
@@ -36,6 +40,7 @@ import dropnext.graphql.generated.inputs.FulfillmentEventInput
 import dropnext.graphql.generated.inputs.FulfillmentOrderLineItemInput
 import dropnext.graphql.generated.inputs.FulfillmentOrderLineItemsInput
 import dropnext.graphql.generated.inputs.FulfillmentTrackingInput
+import io.github.oshai.kotlinlogging.KotlinLogging
 import io.ktor.client.plugins.ResponseException
 import io.ktor.client.request.header
 import io.ktor.http.HttpStatusCode
@@ -45,6 +50,30 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 
 
+private val log = KotlinLogging.logger {}
+
+/**
+ * How much of each connection our operations ask for. The `.graphql` files take these as variables rather than
+ * spelling a number, so each one is defined here once: the value the query used and the value a
+ * [ShopifyError.Truncated] message names cannot drift apart.
+ *
+ * [PRODUCT_VARIANTS_PAGE_SIZE] lives beside the service interface, because the workflow that pages a product names it too.
+ *
+ * **These are our choices, bounded by Shopify's limits — not limits themselves.** What Shopify fixes is the
+ * surrounding frame: a connection's `first:` may not exceed **250**, a single query may not cost more than
+ * [SHOPIFY_QUERY_COST_CAP] points (a query past [QUERY_COST_WARNING_THRESHOLD] is warned about), and a product may have
+ * up to **2048** variants. Raising one of these therefore costs query points against
+ * the shop's bucket, which the live webhook traffic draws on too, and cannot buy completeness on its own — a product
+ * past 250 variants needs paging, not a bigger page.
+ *
+ * `ORDER_FULFILLMENTS_PAGE_SIZE` is the odd one: `Order.fulfillments` is a plain truncating list, not a connection, so
+ * it cannot report that it cut the answer short. It sits at Shopify's per-page ceiling because that is the only lever
+ * there is, and what it still misses is documented in `docs/FULFILLMENT_VERIFICATION.md`.
+ */
+private const val PRODUCT_MEDIA_PAGE_SIZE = 20
+private const val ORDER_LINE_ITEMS_PAGE_SIZE = 100
+private const val ORDER_FULFILLMENT_ORDERS_PAGE_SIZE = 50
+private const val ORDER_FULFILLMENTS_PAGE_SIZE = 250
 
 /**
  * Production [ShopifyGraphqlService] — speaks real Graphql to a shop's Admin API endpoint over
@@ -60,6 +89,7 @@ class HttpShopifyGraphqlService(
   private val gqlClient: GraphQLKtorClient,
   private val accessToken: ShopifyAdminToken,
   private val onTokenRejected: () -> Unit = {},
+  private val costReporter: ShopifyQueryCostReporter = ShopifyQueryCostReporter(),
 ) : ShopifyGraphqlService {
 
   override suspend fun shopIdentity(): ShopifyResult<ShopIdentityInfo> =
@@ -79,15 +109,66 @@ class HttpShopifyGraphqlService(
   override suspend fun accessScopeHandles(): ShopifyResult<List<String>> =
     execute(CurrentAppInstallationAccessScopes()).map { data -> data.currentAppInstallation.accessScopes.map { it.handle } }
 
-  override suspend fun productById(productGid: String): ShopifyResult<ShopProduct?> =
-    execute(GetProductById(GetProductById.Variables(productGid))).map { data ->
-      data.product?.let { ShopProduct(product = it, shopCurrencyCode = data.shop.currencyCode.name) }
+  override suspend fun productById(productGid: String, variantsAfter: String?): ShopifyResult<ShopProduct?> =
+    executeCosted(
+      GetProductById(
+        GetProductById.Variables(
+          id = productGid,
+          mediaFirst = PRODUCT_MEDIA_PAGE_SIZE,
+          variantsFirst = PRODUCT_VARIANTS_PAGE_SIZE,
+          variantsAfter = variantsAfter,
+        )
+      )
+    ).map { (data, cost) ->
+      val product = data.product ?: return@map null
+      // Images are the one truncation worth tolerating: a product carrying too many of them still has to reach the
+      // monolith, and the variants -- what the catalog is actually made of -- are paged. A later page reads the same
+      // images again, so only the first one says so.
+      if (variantsAfter == null && product.media.pageInfo.hasNextPage) {
+        log.warn { "Product media truncated productGid=$productGid first=$PRODUCT_MEDIA_PAGE_SIZE" }
+      }
+      val variantsPage = product.variants.pageInfo
+      ShopProduct(
+        product = product,
+        shopCurrencyCode = data.shop.currencyCode.name,
+        rateBudget = cost?.budget,
+        nextVariantsCursor = variantsPage.endCursor.takeIf { variantsPage.hasNextPage },
+      )
     }
 
+  override suspend fun productVariantIdsPage(first: Int, after: String?): ShopifyResult<ShopifyCatalogPage> =
+    executeCosted(GetProductVariantIdsPage(GetProductVariantIdsPage.Variables(first = first, after = after)))
+      .map { (data, cost) ->
+        val connection = data.productVariants
+        ShopifyCatalogPage(
+          // A variant or product whose id will not parse is left out rather than failing the page: it could never
+          // match a monolith row, which keys on the numeric id, so it is not a difference anyone could act on.
+          entries = connection.nodes.mapNotNull { node ->
+            val variantId = node.legacyResourceId.toLongOrNull() ?: return@mapNotNull null
+            val productId = node.product.legacyResourceId.toLongOrNull() ?: return@mapNotNull null
+            ShopifyCatalogEntry(ShopifyProductId(productId), ShopifyVariantId(variantId))
+          },
+          nextCursor = connection.pageInfo.endCursor.takeIf { connection.pageInfo.hasNextPage },
+          rateBudget = cost?.budget,
+        )
+      }
+
   override suspend fun orderForDss(orderGid: String): ShopifyResult<Order> =
-    execute(GetOrderForDss(GetOrderForDss.Variables(orderGid))).flatMap { data ->
-      data.order?.let { Success(it) }
-        ?: Failure(ShopifyError.NotFound("order ${legacyIdFromGid(orderGid) ?: orderGid} not found"))
+    execute(
+      GetOrderForDss(
+        GetOrderForDss.Variables(
+          id = orderGid,
+          lineItemsFirst = ORDER_LINE_ITEMS_PAGE_SIZE,
+          fulfillmentOrdersFirst = ORDER_FULFILLMENT_ORDERS_PAGE_SIZE,
+          fulfillmentOrderLineItemsFirst = ORDER_LINE_ITEMS_PAGE_SIZE,
+          fulfillmentsFirst = ORDER_FULFILLMENTS_PAGE_SIZE,
+        )
+      )
+    ).flatMap { data ->
+      val order = data.order
+        ?: return@flatMap Failure(ShopifyError.NotFound("order ${legacyIdFromGid(orderGid) ?: orderGid} not found"))
+      order.truncatedConnectionOrNull()?.let { return@flatMap Failure(it) }
+      Success(order)
     }
 
   override suspend fun cancelFulfillment(fulfillmentGid: String): ShopifyResult<Unit> =
@@ -225,8 +306,11 @@ class HttpShopifyGraphqlService(
    * are one. Anything else thrown here is a bug, and a bug answered as a network failure would be retried by Shopify
    * eight times and by the monolith into its dead-letter queue while never reaching the unhandled-error line, so it
    * propagates to `StatusPages` and its `500` instead.
+   *
+   * Whatever Shopify says the query cost goes to the [costReporter], on a refusal too: a throttled answer reports the
+   * bucket that refused it, which is when that number is most worth having.
    */
-  private suspend fun <T : Any> execute(request: GraphQLClientRequest<T>): ShopifyResult<T> {
+  private suspend fun <T : Any> executeCosted(request: GraphQLClientRequest<T>): ShopifyResult<Costed<T>> {
     val response = try {
       gqlClient.execute(request) { header("X-Shopify-Access-Token", accessToken.value) }
     } catch (e: ResponseException) {
@@ -240,19 +324,44 @@ class HttpShopifyGraphqlService(
       return Failure(ShopifyError.Network(e.message ?: "network error"))
     }
 
+    val cost = response.extensions.toShopifyQueryCostOrNull()
+    cost?.let { costReporter.report(shop, request.operationName ?: "unnamed", it) }
     val errors = response.errors
     if (!errors.isNullOrEmpty()) {
       return Failure(
         ShopifyError.GraphqlError(
           message = errors.joinToString("; ") { it.message },
           codes = errors.mapNotNull { it.code() }.distinct(),
+          rateBudget = cost?.budget,
         ),
       )
     }
     val data = response.data ?: return Failure(ShopifyError.GraphqlError("empty response"))
-    return Success(data)
+    return Success(Costed(data, cost))
   }
+
+  /** The data alone, for the callers that have nothing to pace. */
+  private suspend fun <T : Any> execute(request: GraphQLClientRequest<T>): ShopifyResult<T> =
+    executeCosted(request).map { it.data }
 }
+
+/**
+ * The first connection of the snapshot that has another page, named the way the query nests it so an operator reads
+ * which level ran over. One rule for all three readers of this order: the order ingest, the fulfillment sync and the
+ * tracking update all treat what they were handed as the whole order.
+ */
+private fun Order.truncatedConnectionOrNull(): ShopifyError.Truncated? = when {
+  lineItems.pageInfo.hasNextPage ->
+    ShopifyError.Truncated("order.lineItems", ORDER_LINE_ITEMS_PAGE_SIZE)
+  fulfillmentOrders.pageInfo.hasNextPage ->
+    ShopifyError.Truncated("order.fulfillmentOrders", ORDER_FULFILLMENT_ORDERS_PAGE_SIZE)
+  fulfillmentOrders.edges.any { it.node.lineItems.pageInfo.hasNextPage } ->
+    ShopifyError.Truncated("fulfillmentOrders.lineItems", ORDER_LINE_ITEMS_PAGE_SIZE)
+  else -> null
+}
+
+/** A payload and what Shopify said it cost, if it said. */
+private data class Costed<T : Any>(val data: T, val cost: ShopifyQueryCost?)
 
 private fun GraphQLClientError.code(): String? = when (val code = extensions?.get("code")) {
   is String -> code

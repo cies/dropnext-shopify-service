@@ -1,4 +1,4 @@
-query GetProductById($id: ID!) {
+query GetProductById($id: ID!, $mediaFirst: Int!, $variantsFirst: Int!, $variantsAfter: String) {
   shop {
     currencyCode
   }
@@ -15,7 +15,10 @@ query GetProductById($id: ID!) {
     publishedAt
     createdAt
     updatedAt
-    media(first: 20) {
+    media(first: $mediaFirst) {
+      pageInfo {
+        hasNextPage
+      }
       edges {
         node {
           __typename
@@ -38,7 +41,11 @@ query GetProductById($id: ID!) {
         }
       }
     }
-    variants(first: 100) {
+    variants(first: $variantsFirst, after: $variantsAfter) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
       edges {
         node {
           legacyResourceId

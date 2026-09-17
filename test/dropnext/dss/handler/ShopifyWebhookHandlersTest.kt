@@ -356,6 +356,27 @@ class ShopifyWebhookHandlersTest {
     }
   }
 
+  /**
+   * A redelivery loads the same first page, so asking Shopify for one only burns the eight attempts it allows before it
+   * drops the subscription. The delivery is acknowledged and the countable label is what an operator alerts on.
+   */
+  @Test
+  fun `products_update on a product with more variants than we load is acknowledged with 200`() {
+    val monolith = FakeMonolithService()
+    val shopify = FakeShopifyGraphqlService().apply {
+      productByIdResult = Failure(ShopifyError.Truncated("product.variants", 100))
+    }
+    withDssApp(testDependencies(monolith = monolith, shopify = shopify)) { client ->
+      val r = client.signedWebhook(
+        "products/update",
+        """{"id":502,"admin_graphql_api_id":"gid://shopify/Product/502","domain":"acme.myshopify.com"}""",
+      )
+      assert(r.status == HttpStatusCode.OK)
+      assert(r.body<WebhookDeliveryResponse>().error == "shopify_truncated")
+      assert(monolith.upsertProductVariantsCalls.isEmpty())
+    }
+  }
+
   /** A request the monolith refuses gets the same answer on every redelivery, so Shopify is not asked for one. */
   @Test
   fun `orders_create the monolith refuses with a 4xx is acknowledged with 200`() {

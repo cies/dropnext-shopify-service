@@ -1,5 +1,6 @@
 package dropnext.dss.lib.shopify.graphql
 
+import kotlin.time.Duration.Companion.seconds
 import org.junit.jupiter.api.Test
 
 
@@ -38,5 +39,22 @@ class ShopifyGraphqlServiceTest {
     assert(!ShopifyError.UserError(listOf("quantity exceeds remaining")).isRetryable)
     assert(!ShopifyError.NotFound("order 1 not found").isRetryable)
     assert(!ShopifyError.Undecodable("Unexpected JSON token").isRetryable)
+    assert(!ShopifyError.Truncated("product.variants", 100).isRetryable)
+    // A later walk may meet a bucket less drained.
+    assert(ShopifyError.TimedOut("reading the shop's catalog", 140.seconds).isRetryable)
+  }
+
+  @Test
+  fun `a timed-out walk says what did not finish and within how long`() {
+    val timedOut = ShopifyError.TimedOut("reading the shop's catalog", 140.seconds)
+    assert(timedOut.message == "reading the shop's catalog did not finish within 2m 20s")
+    assert(timedOut.errorLabel == "shopify_timed_out")
+  }
+
+  /** The message is what an operator acts on, so it has to name both the connection and the ceiling it hit. */
+  @Test
+  fun `a truncated connection says which one it was and how far the query looked`() {
+    val truncated = ShopifyError.Truncated("product.variants", 100)
+    assert(truncated.message == "Shopify has more product.variants than the 100 this service loads")
   }
 }

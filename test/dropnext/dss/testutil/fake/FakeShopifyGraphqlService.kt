@@ -13,6 +13,7 @@ import dropnext.dss.lib.shopify.graphql.FulfillmentLine
 import dropnext.dss.lib.shopify.graphql.FulfillmentTracking
 import dropnext.dss.lib.shopify.graphql.ShopIdentityInfo
 import dropnext.dss.lib.shopify.graphql.ShopProduct
+import dropnext.dss.lib.shopify.graphql.ShopifyCatalogPage
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlService
 import dropnext.dss.lib.shopify.graphql.ShopifyResult
@@ -49,7 +50,21 @@ class FakeShopifyGraphqlService(
   val accessScopeHandlesCalls: MutableList<ShopDomain> = mutableListOf()
 
   var productByIdResult: ShopifyResult<ShopProduct?> = Success(null)
+
+  /** Drained one page per call, so a test can serve a product's variants in pages; the single result is used once it runs out. */
+  val productByIdResultQueue: MutableList<ShopifyResult<ShopProduct?>> = mutableListOf()
   val productByIdCalls: MutableList<String> = mutableListOf()
+
+  /** The `variantsAfter` cursor of each `productById` call, in step with [productByIdCalls]. */
+  val productByIdCursors: MutableList<String?> = mutableListOf()
+
+  var productVariantIdsPageResult: ShopifyResult<ShopifyCatalogPage> =
+    Success(ShopifyCatalogPage(entries = emptyList(), nextCursor = null))
+
+  /** Drained one page per call, so a test can walk several pages; the single result is used once it runs out. */
+  val productVariantIdsPageResultQueue: MutableList<ShopifyResult<ShopifyCatalogPage>> = mutableListOf()
+
+  val productVariantIdsPageCalls: MutableList<RecordedCatalogPageCall> = mutableListOf()
 
   var orderForDssResult: ShopifyResult<Order> = Failure(ShopifyError.NotFound("order not found"))
 
@@ -101,9 +116,16 @@ class FakeShopifyGraphqlService(
     return accessScopeHandlesResult
   }
 
-  override suspend fun productById(productGid: String): ShopifyResult<ShopProduct?> {
+  override suspend fun productById(productGid: String, variantsAfter: String?): ShopifyResult<ShopProduct?> {
     productByIdCalls.add(productGid)
-    return productByIdResult
+    productByIdCursors.add(variantsAfter)
+    return if (productByIdResultQueue.isNotEmpty()) productByIdResultQueue.removeAt(0) else productByIdResult
+  }
+
+  override suspend fun productVariantIdsPage(first: Int, after: String?): ShopifyResult<ShopifyCatalogPage> {
+    productVariantIdsPageCalls.add(RecordedCatalogPageCall(first, after))
+    return if (productVariantIdsPageResultQueue.isNotEmpty()) productVariantIdsPageResultQueue.removeAt(0)
+    else productVariantIdsPageResult
   }
 
   override suspend fun orderForDss(orderGid: String): ShopifyResult<Order> {
@@ -174,6 +196,10 @@ class FakeShopifyGraphqlService(
     shopIdentityCalls.clear()
     accessScopeHandlesCalls.clear()
     productByIdCalls.clear()
+    productByIdCursors.clear()
+    productByIdResultQueue.clear()
+    productVariantIdsPageCalls.clear()
+    productVariantIdsPageResultQueue.clear()
     orderForDssCalls.clear()
     orderForDssDelay = Duration.ZERO
     orderForDssGate = null
@@ -187,6 +213,9 @@ class FakeShopifyGraphqlService(
     deleteWebhookSubscriptionCalls.clear()
   }
 }
+
+/** One page asked of the catalog walk: the size it wanted and the cursor it carried. */
+data class RecordedCatalogPageCall(val first: Int, val after: String?)
 
 data class RecordedCreateFulfillmentCall(
   val lines: List<FulfillmentLine>,

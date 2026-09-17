@@ -503,6 +503,34 @@ class ArchitectureTest {
   }
 
   /**
+   * Shopify refuses an operation that declares a variable it never uses, on every call and for every shop. The client
+   * generator does not apply that rule and the fakes do not either, so without this check the refusal is first seen in
+   * production. The typical cause is a page size added as a variable while the selection still reads another one.
+   */
+  @Test
+  fun `every variable a Graphql operation declares is used in it`() {
+    val operationFiles = File(projectRoot, "src/resources").listFiles { file -> file.extension == "graphql" }.orEmpty()
+    assert(operationFiles.isNotEmpty()) // After a move of the operations the sweep below would pass on nothing.
+    val comment = Regex("#[^\n]*")
+    val declaration = Regex("""\$(\w+)\s*:""")
+    val offenders = operationFiles.sortedBy { it.name }.flatMap { file ->
+      val text = comment.replace(file.readText(), "")
+      val headerEnd = text.indexOf('{')
+      val header = text.substring(0, headerEnd)
+      val body = text.substring(headerEnd)
+      declaration.findAll(header)
+        .map { it.groupValues[1] }
+        .filterNot { name -> Regex("""\$$name\b""").containsMatchIn(body) }
+        .map { name -> "  - ${file.name}: \$$name" }
+        .toList()
+    }
+    if (offenders.isNotEmpty()) {
+      println("ERROR: these Graphql variables are declared but never used:\n" + offenders.joinToString("\n"))
+    }
+    assert(offenders.isEmpty())
+  }
+
+  /**
    * A secret renders as `"***"` and nothing else, and it must not be able to leave the process
    * through serialization. A secret that quietly serialized itself into a payload or interpolated
    * itself into a log line would not be visible to a reviewer; this rule is.

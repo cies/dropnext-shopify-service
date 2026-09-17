@@ -1,9 +1,14 @@
 package dropnext.dss.testutil.fixture
 
+import dropnext.dss.domain.ShopifyRateBudget
+import dropnext.dss.lib.shopify.graphql.ShopProduct
 import dropnext.graphql.generated.enums.ProductStatus
 import dropnext.graphql.generated.getproductbyid.Media
 import dropnext.graphql.generated.getproductbyid.MediaConnection
+import dropnext.graphql.generated.getproductbyid.MediaConnection2
 import dropnext.graphql.generated.getproductbyid.MediaEdge
+import dropnext.graphql.generated.getproductbyid.PageInfo
+import dropnext.graphql.generated.getproductbyid.PageInfo2
 import dropnext.graphql.generated.getproductbyid.Product
 import dropnext.graphql.generated.getproductbyid.ProductVariant
 import dropnext.graphql.generated.getproductbyid.ProductVariantConnection
@@ -17,6 +22,10 @@ import dropnext.graphql.generated.getproductbyid.SelectedOption
  *
  * [variantId] null builds a product with no variants, which is what the "nothing to upsert" paths
  * need. [variants] replaces it for a product with several variants or one the case shapes itself.
+ *
+ * Both connections report a complete page unless a case says otherwise: a fixture that had more to load by default
+ * would make every other test assert paging or a truncation. [variantsCursor] is the cursor to the next page of
+ * variants, and makes the page one with more after it.
  */
 internal fun sampleProduct(
   legacyResourceId: String = "501",
@@ -33,7 +42,9 @@ internal fun sampleProduct(
   createdAt: String = "2026-04-01T00:00:00Z",
   updatedAt: String = "2026-04-01T00:00:00Z",
   media: List<Media> = emptyList(),
+  moreMedia: Boolean = false,
   variants: List<ProductVariant> = listOfNotNull(variantId?.let { sampleProductVariant(it) }),
+  variantsCursor: String? = null,
 ): Product = Product(
   legacyResourceId = legacyResourceId,
   title = title,
@@ -47,8 +58,14 @@ internal fun sampleProduct(
   publishedAt = publishedAt,
   createdAt = createdAt,
   updatedAt = updatedAt,
-  media = MediaConnection(edges = media.map { MediaEdge(node = it) }),
-  variants = ProductVariantConnection(edges = variants.map { ProductVariantEdge(node = it) }),
+  media = MediaConnection(
+    pageInfo = PageInfo(hasNextPage = moreMedia),
+    edges = media.map { MediaEdge(node = it) },
+  ),
+  variants = ProductVariantConnection(
+    pageInfo = PageInfo2(hasNextPage = variantsCursor != null, endCursor = variantsCursor),
+    edges = variants.map { ProductVariantEdge(node = it) },
+  ),
 )
 
 internal fun sampleProductVariant(
@@ -66,5 +83,26 @@ internal fun sampleProductVariant(
   barcode = barcode,
   price = price,
   selectedOptions = selectedOptions,
-  media = MediaConnection(edges = media.map { MediaEdge(node = it) }),
+  media = MediaConnection2(edges = media.map { MediaEdge(node = it) }),
+)
+
+/**
+ * One page of a product as `productById` answers it: [variantIds] on this page, and [nextCursor] when Shopify has more.
+ * The pages of one product share its header, as Shopify's do.
+ */
+internal fun sampleProductPage(
+  variantIds: List<Long>,
+  nextCursor: String? = null,
+  legacyResourceId: String = "501",
+  shopCurrencyCode: String = "EUR",
+  rateBudget: ShopifyRateBudget? = null,
+): ShopProduct = ShopProduct(
+  product = sampleProduct(
+    legacyResourceId = legacyResourceId,
+    variants = variantIds.map { sampleProductVariant(it.toString()) },
+    variantsCursor = nextCursor,
+  ),
+  shopCurrencyCode = shopCurrencyCode,
+  rateBudget = rateBudget,
+  nextVariantsCursor = nextCursor,
 )

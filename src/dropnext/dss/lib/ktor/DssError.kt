@@ -1,11 +1,16 @@
 package dropnext.dss.lib.ktor
 
 import dropnext.dss.contract.ApiError
+import dropnext.dss.contract.ThrottledError
 import dropnext.dss.lib.slf4j.currentTraceId
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
+import kotlin.math.ceil
+import kotlin.time.Duration
+import kotlin.time.DurationUnit
 
 
 /**
@@ -72,8 +77,26 @@ sealed interface DssError {
   /** 502 — upstream call (Shopify Admin, monolith) failed, and the request cannot continue. */
   data class UpstreamFailure(override val message: String) : DssError
 
+  /**
+   * 429 — Shopify throttled the shop. [retryAfter] is how long its point bucket needs to be worth asking again, and it
+   * travels in the body as well as in `Retry-After`, so a caller pacing itself against the shop's budget waits the
+   * right time rather than a guessed backoff.
+   */
+  data class Throttled(val retryAfter: Duration) : DssError {
+    override val message: String = "Shopify throttled this shop"
+  }
+
   /** 500 — a bug. The message is deliberately generic; the details are in the log under the trace id. */
   data object Internal : DssError {
+    override val message: String = "internal error"
+  }
+
+  /**
+   * 500 — the request is fine and nothing upstream failed, but this service cannot answer it correctly: a shop whose
+   * data outgrew what the queries load. Not a `502`, which would say Shopify is at fault, and not a `4xx`, which the
+   * monolith drops for good; the same generic message as [Internal], with the specifics in the log.
+   */
+  data object Unsupported : DssError {
     override val message: String = "internal error"
   }
 }
@@ -99,7 +122,11 @@ fun DssError.toHttpStatus(): HttpStatusCode = when (this) {
   is DssError.ShopifyAdminTokenUnavailable,
     -> HttpStatusCode.BadGateway
 
-  is DssError.Internal -> HttpStatusCode.InternalServerError
+  is DssError.Throttled -> HttpStatusCode.TooManyRequests
+
+  is DssError.Internal,
+  is DssError.Unsupported,
+    -> HttpStatusCode.InternalServerError
 }
 
 /**
@@ -108,6 +135,16 @@ fun DssError.toHttpStatus(): HttpStatusCode = when (this) {
  * quote it back when it logs a refused call; there is no error code vocabulary on this side yet.
  */
 suspend fun ApplicationCall.respondError(e: DssError) {
+  if (e is DssError.Throttled) {
+    // Whole seconds, rounded up: waiting a fraction less than the refill would be throttled again.
+    val seconds = e.retryAfter.inWholeSecondsRoundedUp().coerceAtLeast(1)
+    response.headers.append(HttpHeaders.RetryAfter, seconds.toString())
+    respond(
+      e.toHttpStatus(),
+      ThrottledError(error = e.message, code = null, traceId = currentTraceId(), retryAfterSeconds = seconds),
+    )
+    return
+  }
   respond(e.toHttpStatus(), ApiError(error = e.message, traceId = currentTraceId()))
 }
 
@@ -115,3 +152,9 @@ suspend fun ApplicationCall.respondError(e: DssError) {
 suspend fun ApplicationCall.respondTextError(e: DssError) {
   respondText(e.message, status = e.toHttpStatus())
 }
+
+/**
+ * A wait as whole seconds, the unit the contract and `Retry-After` speak, rounded up: waiting a fraction less than the
+ * bucket needs would only be throttled again.
+ */
+fun Duration.inWholeSecondsRoundedUp(): Int = ceil(toDouble(DurationUnit.SECONDS)).toInt()

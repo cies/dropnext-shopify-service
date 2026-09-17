@@ -1,6 +1,9 @@
 package dropnext.dss.lib.ktor
 
 import io.ktor.http.HttpStatusCode
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 import org.junit.jupiter.api.Test
 
 
@@ -71,6 +74,19 @@ class DssErrorTest {
   @Test
   fun `upstream failure maps to 502`() {
     assert(DssError.UpstreamFailure("network down").toHttpStatus() == HttpStatusCode.BadGateway)
+  }
+
+  /** Waiting a fraction less than the bucket needs would only be throttled again. */
+  @Test
+  fun `a wait in whole seconds is rounded up`() {
+    assert(1500.milliseconds.inWholeSecondsRoundedUp() == 2)
+    assert(2.seconds.inWholeSecondsRoundedUp() == 2)
+    assert(Duration.ZERO.inWholeSecondsRoundedUp() == 0)
+  }
+
+  @Test
+  fun `throttled maps to 429`() {
+    assert(DssError.Throttled(10.seconds).toHttpStatus() == HttpStatusCode.TooManyRequests)
   }
 
   @Test

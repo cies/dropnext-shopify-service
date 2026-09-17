@@ -3,6 +3,7 @@ package dropnext.dss.domain.fulfillment
 import dropnext.dss.testutil.fixture.openFulfillmentOrder
 import dropnext.dss.testutil.fixture.orderWithFulfillmentOrders
 import dropnext.graphql.generated.enums.FulfillmentOrderStatus
+import dropnext.dss.testutil.fixture.COMPLETE_PAGE
 import dropnext.graphql.generated.getorderfordss.FulfillmentOrder
 import dropnext.graphql.generated.getorderfordss.FulfillmentOrderLineItem
 import dropnext.graphql.generated.getorderfordss.FulfillmentOrderLineItemConnection
@@ -47,7 +48,7 @@ class OpenFulfillmentLinesTest {
     val fulfillmentOrder = FulfillmentOrder(
       id = "gid://shopify/FulfillmentOrder/301",
       status = FulfillmentOrderStatus.OPEN,
-      lineItems = FulfillmentOrderLineItemConnection(edges = listOf(FulfillmentOrderLineItemEdge(node = unreadable))),
+      lineItems = FulfillmentOrderLineItemConnection(pageInfo = COMPLETE_PAGE, edges = listOf(FulfillmentOrderLineItemEdge(node = unreadable))),
     )
     assert(openFulfillmentLines(orderWithFulfillmentOrders(fulfillmentOrder)).isEmpty())
   }

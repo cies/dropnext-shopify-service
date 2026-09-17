@@ -10,6 +10,7 @@ import dropnext.dss.testutil.fixture.orderWithoutFulfillmentOrders
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
 import dropnext.dss.testutil.helper.capturingLogs
 import dropnext.dss.testutil.helper.orderToCreateShopifyOrderRequest
+import dropnext.dss.testutil.fixture.COMPLETE_PAGE
 import dropnext.graphql.generated.getorderfordss.LineItemConnection
 import dropnext.graphql.generated.getorderfordss.LineItemEdge
 import kotlinx.coroutines.runBlocking
@@ -110,7 +111,7 @@ class SyncShopifyOrderToMonolithTest {
   fun `an order without a variant-backed line is skipped without asking the monolith`() {
     val order = minimalOrder()
     val tipOnly = order.copy(
-      lineItems = LineItemConnection(edges = listOf(LineItemEdge(node = order.lineItems.edges.single().node.copy(variant = null)))),
+      lineItems = LineItemConnection(pageInfo = COMPLETE_PAGE, edges = listOf(LineItemEdge(node = order.lineItems.edges.single().node.copy(variant = null)))),
     )
     val monolith = FakeMonolithService()
     val shopify = FakeShopifyGraphqlService().apply { orderForDssResult = Success(tipOnly) }
@@ -186,6 +187,7 @@ class SyncShopifyOrderToMonolithTest {
     val unreadableLineId = mapped.copy(id = "gid://shopify/LineItem/")
     val order = minimalOrder().copy(
       lineItems = LineItemConnection(
+        pageInfo = COMPLETE_PAGE,
         edges = listOf(mapped, tip, unknownVariant, unreadableVariantId, unreadableLineId).map { LineItemEdge(node = it) },
       ),
     )

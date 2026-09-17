@@ -25,6 +25,9 @@ class HttpShopifyGraphqlServiceFactory(
 
   private val gqlClientCache = GraphqlClientCache(httpClient)
 
+  // One for every shop's service: what it has already reported has to outlive the per-request services.
+  private val costReporter = ShopifyQueryCostReporter()
+
   override suspend fun forShop(shop: ShopDomain): ShopLookup<ShopifyGraphqlService> =
     tokens.resolve(shop).map { token ->
       HttpShopifyGraphqlService(
@@ -34,6 +37,7 @@ class HttpShopifyGraphqlServiceFactory(
         // A rejected token is dropped so the next request re-resolves it from the monolith, which may
         // hold a newer one from a reinstall this instance never saw.
         onTokenRejected = { tokens.forget(shop, token) },
+        costReporter = costReporter,
       )
     }
 }
