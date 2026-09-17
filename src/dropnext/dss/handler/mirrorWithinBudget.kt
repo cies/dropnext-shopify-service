@@ -1,8 +1,8 @@
 package dropnext.dss.handler
 
 import dropnext.dss.contract.CreateShopifyOrderRequest
-import dropnext.dss.contract.DeleteProductVariantsRequest
 import dropnext.dss.contract.UpsertProductVariantsRequest
+import dropnext.dss.domain.ShopifyProductId
 import dropnext.dss.lib.monolith.CreateOrderOutcome
 import dropnext.dss.lib.monolith.MonolithResult
 import dropnext.dss.lib.monolith.MonolithService
@@ -57,8 +57,8 @@ private class WriteTrackingMonolithService(private val delegate: MonolithService
   override suspend fun upsertProductVariants(request: UpsertProductVariantsRequest): MonolithResult<UpsertedProductVariants> =
     write { delegate.upsertProductVariants(request) }
 
-  override suspend fun deleteProductVariants(request: DeleteProductVariantsRequest): MonolithResult<Int> =
-    write { delegate.deleteProductVariants(request) }
+  override suspend fun deleteProductVariants(shopifySubdomain: String, productId: ShopifyProductId): MonolithResult<Int> =
+    write { delegate.deleteProductVariants(shopifySubdomain, productId) }
 
   private inline fun <T> write(block: () -> T): T {
     writeStarted = true

@@ -1,7 +1,7 @@
 package dropnext.dss.handler
 
 import dev.forkhandles.result4k.Success
-import dropnext.dss.contract.DeleteProductVariantsRequest
+import dropnext.dss.domain.ShopifyProductId
 import dropnext.dss.lib.shopify.graphql.PRODUCT_VARIANTS_PAGE_SIZE
 import dropnext.dss.testutil.fake.FakeMonolithService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
@@ -100,7 +100,7 @@ class MirrorWithinBudgetTest {
     val monolith = FakeMonolithService().apply { writeDelay = 1.seconds }
 
     val outcome = mirrorWithinBudget(monolith, budget = 500.milliseconds, writeGrace = 2.seconds) { tracked ->
-      tracked.deleteProductVariants(DeleteProductVariantsRequest(shopifySubdomain = "acme", productId = 503L))
+      tracked.deleteProductVariants("acme", ShopifyProductId(503L))
       WebhookMirrorOutcome.Mirrored
     }
 

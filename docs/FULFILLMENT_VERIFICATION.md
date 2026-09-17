@@ -3,11 +3,15 @@
 > **Temporary note.** This document describes the sync as it runs since 2026-08-31: additive, never cancelling,
 > matched against live remaining quantity, skipping a shipment whose tracking number is already on a live fulfillment.
 > Two gaps are known (see "Known gaps"). The planned design is in
-> `specs/shipment-sync-by-tracking-number/`: `000-analysis-cancel-and-recreate.md` explains why the cancel went and
-> what that broke, `010-skip-shipments-already-fulfilled.md` (landed) makes a re-sent payload safe,
-> `020-cancel-replaced-fulfillments.md` cancels exactly the fulfillments whose tracking numbers the monolith names as
-> replaced (the supplier portal's shipment split), `030-report-per-shipment-outcomes.md` changes the response, and
-> `040-rewrite-the-fulfillment-docs.md` rewrites this document to the landed design and removes this note.
+> `specs/shipment-sync-by-tracking-number/` (with its monolith half in the monolith's folder of the same name):
+> `000-analysis-and-design.md` explains the design and what goes wrong today,
+> `010-skip-shipments-already-fulfilled.md` (landed) makes a re-sent payload safe,
+> `020-skip-shipments-that-do-not-fit.md` stops over-shipping from failing the sync,
+> `030-notify-customers-of-new-tracking-numbers.md` turns on Shopify's shipping emails,
+> `040-report-per-shipment-outcomes.md` changes the response,
+> `050-reconcile-every-live-shipment.md` has the monolith send every live shipment and cancels the fulfillments of
+> retired ones, and `060-rewrite-the-fulfillment-docs.md` rewrites this document to the landed design and removes this
+> note.
 
 Checklist for verifying **supplier shipment → Shopify fulfillment** via the monolith → DSS path. DSS does not call the Supplier API directly; the monolith bridges supplier events to DSS webhooks defined in the contract spec, [`src/resources/monolith-dss-openapi.json`](../src/resources/monolith-dss-openapi.json).
 
@@ -186,7 +190,7 @@ When a shipment line's `product_variant_id` does not appear on any open fulfillm
 - Per skipped line at `warn`: `sync-shipments skipped line … tracking=… variant=… reason=no_open_fo qty=…`; per shipment with no matched line: `sync-shipments skipped shipment … tracking=… reason=all_lines_unmatched`.
 - Shopify webhooks (Step A) are answered `200` when a redelivery could not do better and `502` when Shopify or the monolith did not answer, throttled, or answered a `5xx`. Every verified delivery logs one `Webhook done topic=… webhook_id=… outcome=… answered=…` line: `info` for mirrored and skipped, `warn` for a transient failure, `error` for a permanent one.
 - Shopify redelivers a failed delivery up to eight times in four hours and removes the subscription after repeated failures within 24 hours ([Shopify: troubleshoot webhooks](https://shopify.dev/docs/apps/build/webhooks/troubleshooting-webhooks)). `GET /api/check?shop=…` (bearer auth) shows whether each handled topic is still subscribed.
-- Every fulfillment is created with `notifyCustomer = false`: Shopify sends the customer no shipping e-mail through this path.
+- Every fulfillment is created with `notifyCustomer = false`: Shopify sends the customer no shipping email through this path.
 
 ## Known limitations
 

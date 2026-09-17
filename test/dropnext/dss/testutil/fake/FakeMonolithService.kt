@@ -3,10 +3,10 @@ package dropnext.dss.testutil.fake
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
 import dropnext.dss.contract.CreateShopifyOrderRequest
-import dropnext.dss.contract.DeleteProductVariantsRequest
 import dropnext.dss.contract.UpdateStoreApiKeyRequest
 import dropnext.dss.contract.UpsertProductVariantsRequest
 import dropnext.dss.domain.ShopifyAdminToken
+import dropnext.dss.domain.ShopifyProductId
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.domain.StoreId
 import dropnext.dss.lib.monolith.CreateOrderOutcome
@@ -20,13 +20,16 @@ import kotlin.time.Duration
 import kotlinx.coroutines.delay
 
 
+/** What one [FakeMonolithService.deleteProductVariants] call was asked. */
+data class DeleteProductVariantsCall(val shopifySubdomain: String, val productId: ShopifyProductId)
+
 /** In-memory [MonolithService] for business-logic tests (no HTTP, no mock frameworks). */
 class FakeMonolithService : MonolithService, RecordingFake {
   val createOrderCalls: MutableList<CreateShopifyOrderRequest> = mutableListOf()
   val putStoreApiKeyCalls: MutableList<UpdateStoreApiKeyRequest> = mutableListOf()
   val getStoreCalls: MutableList<String> = mutableListOf()
   val upsertProductVariantsCalls: MutableList<UpsertProductVariantsRequest> = mutableListOf()
-  val deleteProductVariantsCalls: MutableList<DeleteProductVariantsRequest> = mutableListOf()
+  val deleteProductVariantsCalls: MutableList<DeleteProductVariantsCall> = mutableListOf()
 
   /** `200` created, `409` already existed, anything else is answered as a rejection with [createOrderErrorBody]. */
   var createOrderStatus: Int = 200
@@ -100,8 +103,8 @@ class FakeMonolithService : MonolithService, RecordingFake {
     }
   }
 
-  override suspend fun deleteProductVariants(request: DeleteProductVariantsRequest): MonolithResult<Int> {
-    deleteProductVariantsCalls.add(request)
+  override suspend fun deleteProductVariants(shopifySubdomain: String, productId: ShopifyProductId): MonolithResult<Int> {
+    deleteProductVariantsCalls.add(DeleteProductVariantsCall(shopifySubdomain, productId))
     delay(writeDelay)
     return when (deleteProductVariantsStatus) {
       200 -> Success(deleteProductVariantsDeleted)

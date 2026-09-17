@@ -3,6 +3,7 @@ package dropnext.dss.handler
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
 import dropnext.dss.domain.ShopDomain
+import dropnext.dss.domain.ShopifyProductId
 import dropnext.dss.lib.shopify.graphql.ShopProduct
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlService
@@ -261,7 +262,7 @@ class ShopifyWebhookHandlersTest {
       assert(r.status == HttpStatusCode.OK)
       val deleteReq = monolith.deleteProductVariantsCalls.single()
       assert(deleteReq.shopifySubdomain == "acme")
-      assert(deleteReq.productId == 503L)
+      assert(deleteReq.productId == ShopifyProductId(503L))
       // The product is gone from Shopify: nothing to fetch.
       assert(shopify.productByIdCalls.isEmpty())
     }
@@ -274,7 +275,7 @@ class ShopifyWebhookHandlersTest {
     withDssApp(testDependencies(monolith = monolith)) { client ->
       val r = client.signedWebhook("products/delete", """{"id":503}""")
       assert(r.status == HttpStatusCode.OK)
-      assert(monolith.deleteProductVariantsCalls.single().productId == 503L)
+      assert(monolith.deleteProductVariantsCalls.single().productId == ShopifyProductId(503L))
     }
   }
 

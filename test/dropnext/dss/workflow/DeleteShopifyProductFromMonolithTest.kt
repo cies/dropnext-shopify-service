@@ -26,7 +26,7 @@ class DeleteShopifyProductFromMonolithTest {
     assert(outcome == WebhookMirrorOutcome.Mirrored)
     val request = monolith.deleteProductVariantsCalls.single()
     assert(request.shopifySubdomain == "acme")
-    assert(request.productId == 503L)
+    assert(request.productId == deletedProduct)
   }
 
   /** The request names only the product, so the monolith's answer is the one place the variant count shows up. */

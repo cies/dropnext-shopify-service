@@ -3,7 +3,6 @@ package dropnext.dss.lib.monolith
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
 import dropnext.dss.contract.CreateShopifyOrderRequest
-import dropnext.dss.contract.DeleteProductVariantsRequest
 import dropnext.dss.contract.DeleteProductVariantsResponse
 import dropnext.dss.contract.StoreResponse
 import dropnext.dss.contract.UpdateStoreApiKeyRequest
@@ -12,6 +11,7 @@ import dropnext.dss.contract.UpsertProductVariantsRequest
 import dropnext.dss.contract.UpsertProductVariantsResponse
 import dropnext.dss.domain.DssToMonolithApiKey
 import dropnext.dss.domain.ShopifyAdminToken
+import dropnext.dss.domain.ShopifyProductId
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.domain.StoreId
 import dropnext.dss.lib.json.MonolithJson
@@ -121,12 +121,14 @@ class HttpMonolithService(
       }
     }
 
-  override suspend fun deleteProductVariants(request: DeleteProductVariantsRequest): MonolithResult<Int> =
+  override suspend fun deleteProductVariants(shopifySubdomain: String, productId: ShopifyProductId): MonolithResult<Int> =
     monolithCall({
+      // The product goes in the query string: a body on a `DELETE` has no defined meaning, and an intermediary may
+      // drop it or refuse the request.
       httpClient.delete(url(OutBoundMonolithPaths.productVariants)) {
-        contentType(ContentType.Application.Json)
         applyDefaults()
-        setBody(MonolithJson.encodeToString(DeleteProductVariantsRequest.serializer(), request))
+        parameter("shopify_subdomain", shopifySubdomain)
+        parameter("product_id", productId.value)
       }
     }) { response, body ->
       response.decodeOk(body, DeleteProductVariantsResponse.serializer()) { it.deleted }

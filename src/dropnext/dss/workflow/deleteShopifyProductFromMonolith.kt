@@ -2,7 +2,6 @@ package dropnext.dss.workflow
 
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
-import dropnext.dss.contract.DeleteProductVariantsRequest
 import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopifyProductId
 import dropnext.dss.lib.monolith.MonolithService
@@ -22,11 +21,7 @@ suspend fun deleteShopifyProductFromMonolith(
   shop: ShopDomain,
   productId: ShopifyProductId,
 ): WebhookMirrorOutcome {
-  val request = DeleteProductVariantsRequest(
-    shopifySubdomain = shop.subdomainOnly,
-    productId = productId.value,
-  )
-  return when (val result = monolith.deleteProductVariants(request)) {
+  return when (val result = monolith.deleteProductVariants(shop.subdomainOnly, productId)) {
     is Success -> {
       log.info { "Monolith delete variants ok: ${result.value} deleted productId=$productId" }
       WebhookMirrorOutcome.Mirrored

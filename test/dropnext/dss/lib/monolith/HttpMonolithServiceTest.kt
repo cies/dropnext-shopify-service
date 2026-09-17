@@ -2,13 +2,13 @@ package dropnext.dss.lib.monolith
 
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
-import dropnext.dss.contract.DeleteProductVariantsRequest
 import dropnext.dss.contract.ProductStatus
 import dropnext.dss.contract.ProductVariantItem
 import dropnext.dss.contract.UpdateStoreApiKeyRequest
 import dropnext.dss.contract.UpsertProductVariantsRequest
 import dropnext.dss.domain.DssToMonolithApiKey
 import dropnext.dss.domain.ShopifyAdminToken
+import dropnext.dss.domain.ShopifyProductId
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.domain.StoreId
 import dropnext.dss.lib.json.MonolithJson
@@ -239,20 +239,21 @@ class HttpMonolithServiceTest {
   fun `deleteProductVariants on 200 answers the deleted count`() = withMonolith { server, httpClient, baseUrl ->
     server.enqueue(HttpStatusCode.OK, """{"deleted":2}""")
     val result =
-      service(httpClient, baseUrl).deleteProductVariants(
-        DeleteProductVariantsRequest(shopifySubdomain = "acme", productId = 8000000001L),
-      )
+      service(httpClient, baseUrl).deleteProductVariants("acme", ShopifyProductId(8000000001L))
     assert(result == Success(2))
     val recorded = server.requests.single()
     assert(recorded.method == "DELETE")
     assert(recorded.path == "/product-variants")
-    assert("\"product_id\":8000000001" in recorded.body)
+    assert(recorded.query == mapOf("shopify_subdomain" to listOf("acme"), "product_id" to listOf("8000000001")))
+    // A body on a `DELETE` has no defined meaning, and an intermediary may drop it or refuse the request.
+    assert(recorded.body == "")
+    assert(recorded.contentType() == null)
   }
 
   @Test
   fun `deleteProductVariants on 500 is Rejected`() = withMonolith { server, httpClient, baseUrl ->
     server.enqueue(HttpStatusCode.InternalServerError, """{"error":"nope"}""")
-    val result = service(httpClient, baseUrl).deleteProductVariants(DeleteProductVariantsRequest("acme", 1L))
+    val result = service(httpClient, baseUrl).deleteProductVariants("acme", ShopifyProductId(1L))
     assert(rejectedOrNull(result)?.status == 500)
   }
 

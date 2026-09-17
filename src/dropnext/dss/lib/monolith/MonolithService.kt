@@ -2,10 +2,10 @@ package dropnext.dss.lib.monolith
 
 import dev.forkhandles.result4k.Result
 import dropnext.dss.contract.CreateShopifyOrderRequest
-import dropnext.dss.contract.DeleteProductVariantsRequest
 import dropnext.dss.contract.UpdateStoreApiKeyRequest
 import dropnext.dss.contract.UpsertProductVariantsRequest
 import dropnext.dss.domain.ShopifyAdminToken
+import dropnext.dss.domain.ShopifyProductId
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.domain.StoreId
 
@@ -31,8 +31,11 @@ interface MonolithService {
    */
   suspend fun upsertProductVariants(request: UpsertProductVariantsRequest): MonolithResult<UpsertedProductVariants>
 
-  /** `DELETE` to [OutBoundMonolithPaths.productVariants] — soft-delete variants that no longer exist in Shopify. Answers the deleted count. */
-  suspend fun deleteProductVariants(request: DeleteProductVariantsRequest): MonolithResult<Int>
+  /**
+   * `DELETE` to [OutBoundMonolithPaths.productVariants] with `?shopify_subdomain=…&product_id=…` — soft-delete the
+   * variants of a product that no longer exists in Shopify. Answers the deleted count.
+   */
+  suspend fun deleteProductVariants(shopifySubdomain: String, productId: ShopifyProductId): MonolithResult<Int>
 }
 
 /** What every [MonolithService] call returns. */
