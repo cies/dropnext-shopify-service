@@ -34,6 +34,7 @@ import java.time.Clock
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeSource
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Semaphore
 
 
@@ -139,6 +140,8 @@ fun dssDependencies(
   /** The two the delivery report's timings are read from; a test hands in a fixed pair to assert what it printed. */
   webhookClock: Clock = Clock.systemUTC(),
   webhookTimeSource: TimeSource = TimeSource.Monotonic,
+  /** How the monolith-facing reads wait for a shop's Shopify bucket; a test hands in one that records instead. */
+  shopifyReadPause: suspend (Duration) -> Unit = { delay(it) },
   readiness: Readiness = Readiness(),
   /** The requests the warm-up sends the service itself: the shared client, to the port the server binds. */
   warmUpLoopback: WarmUpLoopbackService = HttpWarmUpLoopbackService(
@@ -176,6 +179,7 @@ fun dssDependencies(
     shopifyGraphqlServiceFactory,
     monolithService,
     shopTokens,
+    shopifyReadPause,
   ),
   readiness = readiness,
   // The workflow keeps its own deadline and reports the steps it had to cut short or skip; the module's bound, a

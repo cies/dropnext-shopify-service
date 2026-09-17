@@ -83,6 +83,36 @@ class ToDssErrorTest {
     assert(throttled.toDssError() == DssError.Throttled(1.seconds))
   }
 
+  /**
+   * Shopify runs a query only when the bucket holds what it requests, so a refill to half is not enough for a query that
+   * costs more than half: 600 of 1,000 points left is above the floor, and an 800-point query still needs 200 more.
+   */
+  @Test
+  fun `a throttled answer waits until the bucket holds the query's requested cost`() {
+    val aboveTheFloor = emptyBucket.copy(currentlyAvailable = 600.0)
+    val throttled = ShopifyError.GraphqlError(
+      "Throttled", codes = listOf("THROTTLED"), rateBudget = aboveTheFloor, requestedCost = 800,
+    )
+
+    assert(throttled.toDssError() == DssError.Throttled(4.seconds))
+  }
+
+  /** Below the floor, the refill to it is the longer wait, whatever the query costs. */
+  @Test
+  fun `a throttled answer for a cheap query still waits for the floor`() {
+    val low = emptyBucket.copy(currentlyAvailable = 100.0)
+    val throttled = ShopifyError.GraphqlError("Throttled", codes = listOf("THROTTLED"), rateBudget = low, requestedCost = 150)
+
+    assert(throttled.toDssError() == DssError.Throttled(8.seconds))
+  }
+
+  @Test
+  fun `a Graphql error that is not a throttle is an upstream failure`() {
+    val denied = ShopifyError.GraphqlError("Access denied", codes = listOf("ACCESS_DENIED"), rateBudget = emptyBucket)
+
+    assert(denied.toDssError() == DssError.UpstreamFailure("Access denied"))
+  }
+
   @Test
   fun `Shopify's own 429 is throttling too`() {
     assert(ShopifyError.HttpError(429).toDssError() == DssError.Throttled(10.seconds))

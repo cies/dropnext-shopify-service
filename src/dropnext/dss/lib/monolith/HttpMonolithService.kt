@@ -108,7 +108,7 @@ class HttpMonolithService(
       }
     }
 
-  override suspend fun upsertProductVariants(request: UpsertProductVariantsRequest): MonolithResult<Int> =
+  override suspend fun upsertProductVariants(request: UpsertProductVariantsRequest): MonolithResult<UpsertedProductVariants> =
     monolithCall({
       httpClient.post(url(OutBoundMonolithPaths.productVariants)) {
         contentType(ContentType.Application.Json)
@@ -116,7 +116,9 @@ class HttpMonolithService(
         setBody(MonolithJson.encodeToString(UpsertProductVariantsRequest.serializer(), request))
       }
     }) { response, body ->
-      response.decodeOk(body, UpsertProductVariantsResponse.serializer()) { it.upserted }
+      response.decodeOk(body, UpsertProductVariantsResponse.serializer()) {
+        UpsertedProductVariants(upserted = it.upserted, deleted = it.deleted)
+      }
     }
 
   override suspend fun deleteProductVariants(request: DeleteProductVariantsRequest): MonolithResult<Int> =

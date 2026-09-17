@@ -10,6 +10,7 @@ import dropnext.dss.testutil.fake.FakeMonolithService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
 import dropnext.dss.testutil.fixture.sampleProduct
 import dropnext.dss.testutil.fixture.sampleProductPage
+import dropnext.dss.testutil.fixture.sampleProductVariant
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
 import dropnext.dss.testutil.helper.capturingLogs
 import kotlinx.coroutines.runBlocking
@@ -41,6 +42,26 @@ class SyncShopifyProductToMonolithTest {
     assert(upsert.shopifySubdomain == "acme")
     assert(upsert.productVariants.single().productVariantId == 9001L)
     assert(upsert.productVariants.single().priceCurrency == "EUR")
+    // The load fails rather than return part of a product, so the variants sent are all of them.
+    assert(upsert.productVariantsComplete == true)
+  }
+
+  /** The monolith soft-deletes what a complete request leaves out, and the mapper left one out. */
+  @Test
+  fun `a product with a variant the mapper cannot key is not sent as complete`() = runBlocking {
+    val monolith = FakeMonolithService()
+    val product = sampleProduct(
+      legacyResourceId = "501",
+      variants = listOf(sampleProductVariant("9001"), sampleProductVariant("not-a-number")),
+    )
+    val shopify = FakeShopifyGraphqlService().apply { productByIdResult = Success(ShopProduct(product, "EUR")) }
+
+    val outcome = syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID)
+
+    assert(outcome == WebhookMirrorOutcome.Mirrored)
+    val upsert = monolith.upsertProductVariantsCalls.single()
+    assert(upsert.productVariants.map { it.productVariantId } == listOf(9001L))
+    assert(upsert.productVariantsComplete == false)
   }
 
   @Test
@@ -86,6 +107,7 @@ class SyncShopifyProductToMonolithTest {
     assert(shopify.productByIdCursors == listOf(null, "c1"))
     val upsert = monolith.upsertProductVariantsCalls.single()
     assert(upsert.productVariants.map { it.productVariantId } == (1L..150L).toList())
+    assert(upsert.productVariantsComplete == true)
   }
 
   /**

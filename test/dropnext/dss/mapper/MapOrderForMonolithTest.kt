@@ -61,6 +61,7 @@ class MapOrderForMonolithTest {
           snapshotOfVariantTitle = "T-Shirt - Blue",
           snapshotOfProductTitle = "T-Shirt",
           snapshotOfPriceAsString = "19.99",
+          shopifyProductId = 501L,
         ),
       ),
       totalAsString = "39.98",
@@ -325,6 +326,22 @@ class MapOrderForMonolithTest {
     val order = minimalOrder().withSingleLineItem { it.copy(variant = it.variant!!.copy(legacyResourceId = "abc")) }
     val mapping = mapOrderForMonolith("dropnext-staging", orderId, order)
     assert(mapping.omittedLineItems.single().reason == OrderLineItemOmission.UNPARSEABLE_VARIANT_ID)
+  }
+
+  /** The monolith holds a line for a variant it has not mirrored only when it knows the product to fetch. */
+  @Test
+  fun `a line whose product Shopify no longer has is still mapped, without a product id`() {
+    val order = minimalOrder().withSingleLineItem { it.copy(product = null) }
+    val mapping = mapOrderForMonolith("dropnext-staging", orderId, order)
+    assert(mapping.request.lineItems.single().shopifyProductId == null)
+    assert(mapping.omittedLineItems.isEmpty())
+  }
+
+  @Test
+  fun `a line whose product id is not numeric is still mapped, without a product id`() {
+    val order = minimalOrder().withSingleLineItem { it.copy(product = it.product!!.copy(legacyResourceId = "abc")) }
+    val mapping = mapOrderForMonolith("dropnext-staging", orderId, order)
+    assert(mapping.request.lineItems.single().shopifyProductId == null)
   }
 
   @Test

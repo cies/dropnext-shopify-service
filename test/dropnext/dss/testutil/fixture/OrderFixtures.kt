@@ -22,6 +22,7 @@ import dropnext.graphql.generated.getorderfordss.MoneyV2
 import dropnext.graphql.generated.getorderfordss.MoneyV22
 import dropnext.graphql.generated.getorderfordss.Order
 import dropnext.graphql.generated.getorderfordss.PageInfo
+import dropnext.graphql.generated.getorderfordss.Product
 import dropnext.graphql.generated.getorderfordss.ProductVariant
 
 
@@ -51,6 +52,7 @@ internal fun minimalOrder(
       title = "T-Shirt",
       originalUnitPriceSet = MoneyBag2(shopMoney = MoneyV22(amount = "19.99")),
       variant = variant,
+      product = Product(legacyResourceId = "501"),
     )
   return Order(
     id = "gid://shopify/Order/1001",

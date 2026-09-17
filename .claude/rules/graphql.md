@@ -65,7 +65,8 @@ deprecated API use").
   snapshots the interface answers. Handlers, routing and presentation program against the interface's own types; a
   new layer needs an allowlist entry with a one-line reason.
 - Never retry Shopify traffic: it uses the base HTTP client on purpose, because a retried mutation is a duplicated
-  fulfillment. The monolith client is the one with retries.
+  fulfillment. The monolith client is the one with retries. The one exception is `ShopifyReadPacer` in `workflow/`,
+  which paces and retries runs of reads (the catalog walk, the product fetch) and must never wrap a mutation.
 - `executeCosted` hands every answer's `extensions.cost` to the `ShopifyQueryCostReporter` the factory shares
   between shops, and to the callers that pace themselves as a `ShopifyRateBudget`. Reading it never changes an answer.
 - A connection that can be longer than one page asks for `pageInfo`; the method that owns the payload answers

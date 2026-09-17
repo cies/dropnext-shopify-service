@@ -5,7 +5,6 @@ import dev.forkhandles.result4k.Success
 import dropnext.dss.domain.ShopifyProductId
 import dropnext.dss.domain.ShopifyRateBudget
 import dropnext.dss.domain.ShopifyVariantId
-import dropnext.dss.lib.shopify.graphql.ShopifyCatalogPage
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlService
 import dropnext.dss.lib.shopify.graphql.ShopifyResult
@@ -74,10 +73,8 @@ data class ShopCatalogEntry(
  * store. That is also why there is no cursor in the answer — a cursor is an invitation to act on half a catalog.
  *
  * **It paces itself.** Two hundred pages back to back would empty a Standard plan's bucket and take the shop's order
- * webhooks down with it, so the walk reads the budget off each answer and waits for a refill when it drops under
- * [budgetFloor]. A page that failed in a way a retry can fix is asked for again after the same refill, or after a short
- * backoff when Shopify said nothing about the bucket: the one place this service retries Shopify, and safe precisely
- * because it is a read. The rule against retrying exists so a mutation is never sent twice.
+ * webhooks down with it, so the walk goes through a [ShopifyReadPacer]: it waits for a refill when the bucket drops
+ * under [budgetFloor], and asks again for a page that failed in a way a retry can fix.
  *
  * **It is bounded as a whole**, by [deadline], not only page by page. [pause] is injected so a test can see what the
  * walk would have waited without waiting.
@@ -93,7 +90,7 @@ suspend fun readShopifyCatalog(
   deadline: Duration = CATALOG_READ_BUDGET,
   pause: suspend (Duration) -> Unit = { delay(it) },
 ): ShopifyResult<ShopCatalog> {
-  val walk = CatalogWalk(shopify, pageSize, maxPages, budgetFloor, pageRetries, pause)
+  val walk = CatalogWalk(shopify, pageSize, maxPages, ShopifyReadPacer(budgetFloor, pageRetries, pause))
   val result = withTimeoutOrNull(deadline) { walk.run() }
     ?: Failure(ShopifyError.TimedOut("reading the shop's catalog", deadline))
 
@@ -117,27 +114,24 @@ private class CatalogWalk(
   private val shopify: ShopifyGraphqlService,
   private val pageSize: Int,
   private val maxPages: Int,
-  private val budgetFloor: Double,
-  private val pageRetries: Int,
-  private val pause: suspend (Duration) -> Unit,
+  private val pacer: ShopifyReadPacer,
 ) {
   // Insertion-ordered so a product whose variants straddle a page boundary still lands under one entry, once.
   private val grouped = LinkedHashMap<ShopifyProductId, MutableList<ShopifyVariantId>>()
 
-  private var budget: ShopifyRateBudget? = null
-
   var pages = 0
     private set
 
-  var waited: Duration = Duration.ZERO
-    private set
+  val waited: Duration get() = pacer.waited
 
   suspend fun run(): ShopifyResult<ShopCatalog> {
     var cursor: String? = null
     while (true) {
       if (pages >= maxPages) return Failure(ShopifyError.Truncated("productVariants", maxPages * pageSize))
 
-      val page = when (val answered = pageWithRetries(cursor)) {
+      val after = cursor
+      val answered = pacer.read({ it.rateBudget }) { shopify.productVariantIdsPage(first = pageSize, after = after) }
+      val page = when (answered) {
         is Failure -> return answered
         is Success -> answered.value
       }
@@ -145,49 +139,23 @@ private class CatalogWalk(
       page.entries.forEach { entry ->
         grouped.getOrPut(entry.productId) { mutableListOf() }.add(entry.productVariantId)
       }
-      budget = page.rateBudget ?: budget
 
       val next = page.nextCursor ?: break
       // Shopify handing back the cursor it was just given would loop until the page backstop, reading the same page
       // over and over; nothing in its answer changes on a retry of the page, but a fresh walk may go differently.
       if (next == cursor) return Failure(ShopifyError.GraphqlError("Shopify answered the cursor it was given as the next one"))
       cursor = next
-      budget?.takeIf { it.isBelow(budgetFloor) }?.let { wait(it.refillTo(budgetFloor)) }
     }
 
     return Success(
       ShopCatalog(
         products = grouped.map { (productId, variantIds) -> ShopCatalogEntry(productId, variantIds) },
         productVariantCount = grouped.values.sumOf { it.size },
-        rateBudget = budget,
+        rateBudget = pacer.budget,
       )
     )
   }
 
   fun failureLine(reason: ShopifyError): String =
     "Catalog read failed pages=$pages waited_ms=${waited.inWholeMilliseconds} error=${reason.errorLabel}: ${reason.message}"
-
-  private suspend fun pageWithRetries(cursor: String?): ShopifyResult<ShopifyCatalogPage> {
-    var attempt = 0
-    while (true) {
-      val answered = shopify.productVariantIdsPage(first = pageSize, after = cursor)
-      if (answered !is Failure || !answered.reason.isRetryable || attempt >= pageRetries) return answered
-      attempt++
-      // A throttled answer says how empty the bucket is; waiting less than its refill would only be throttled again.
-      // Without that, the last page's report stands in, and the backoff is the floor under both.
-      val reported = (answered.reason as? ShopifyError.GraphqlError)?.rateBudget ?: budget
-      val refill = reported?.refillTo(budgetFloor) ?: Duration.ZERO
-      log.warn { "Catalog page failed, asking again attempt=$attempt error=${answered.reason.errorLabel}" }
-      wait(maxOf(THROTTLE_BACKOFF * attempt, refill))
-    }
-  }
-
-  private suspend fun wait(duration: Duration) {
-    if (duration <= Duration.ZERO) return
-    waited += duration
-    pause(duration)
-  }
 }
-
-/** Multiplied by the attempt number; a throttled bucket needs seconds, not milliseconds, to be worth asking again. */
-private val THROTTLE_BACKOFF: Duration = 1.seconds

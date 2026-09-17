@@ -35,6 +35,7 @@ import io.ktor.server.application.ApplicationCall
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
 import io.ktor.server.util.getOrFail
+import kotlin.time.Duration
 
 
 private val log = KotlinLogging.logger {}
@@ -50,6 +51,7 @@ class MonolithWebhookHandlers(
   private val shopifyGraphqlServiceFactory: ShopifyGraphqlServiceFactory,
   private val monolithService: MonolithService,
   private val shopTokens: ShopTokenStore,
+  private val shopifyReadPause: suspend (Duration) -> Unit,
 ) {
 
   suspend fun handleSyncShipments(call: ApplicationCall) {
@@ -90,11 +92,6 @@ class MonolithWebhookHandlers(
   }
 
   /**
-   * `PUT /stores/api-key` — remembers a Shopify Admin token and forwards it to the monolith. The token
-   * is cached before the monolith is asked and stays cached when that fails; the answer is then an
-   * error, so the caller knows the monolith does not have it, rather than a `200` with a made-up id.
-   */
-  /**
    * `GET /products/catalog?shop=` — every variant the shop has, grouped under its product.
    *
    * The shop travels in the query string rather than a body because this is a read; the walk behind it can take
@@ -105,7 +102,7 @@ class MonolithWebhookHandlers(
     val shop = call.shopDomainOrRespond(rawShop, "shop") ?: return
     withMdcEntries(SHOP_MDC_KEY to shop.normalizedShopifyHost) {
       val shopify = call.shopifyServiceOrRespond(shopifyGraphqlServiceFactory, shop) ?: return@withMdcEntries
-      when (val catalog = readShopifyCatalog(shopify)) {
+      when (val catalog = readShopifyCatalog(shopify, pause = shopifyReadPause)) {
         is Success -> call.respond(
           ShopCatalogResponse(
             products = catalog.value.products.map {
@@ -132,12 +129,13 @@ class MonolithWebhookHandlers(
     withMdcEntries(SHOP_MDC_KEY to shop.normalizedShopifyHost) {
       val shopify = call.shopifyServiceOrRespond(shopifyGraphqlServiceFactory, shop) ?: return@withMdcEntries
       val productIds = request.shopifyProductIds.map(::ShopifyProductId)
-      when (val fetched = fetchShopifyProducts(shopify, productIds)) {
+      when (val fetched = fetchShopifyProducts(shopify, productIds, pause = shopifyReadPause)) {
         is Success -> call.respond(
           FetchProductsResponse(
             productVariants = fetched.value.productVariants,
             missingProductIds = fetched.value.missingProductIds.map { it.value },
-            nextRequestAfterSeconds = fetched.value.rateBudget.nextRequestAfterSeconds(),
+            nextRequestAfterSeconds = fetched.value.nextRequestAfter.inWholeSecondsRoundedUp(),
+            unfetchedProductIds = fetched.value.unfetchedProductIds.map { it.value },
           )
         )
         // The fetch has logged its failure, naming the product it failed on, which is more than this could say.
@@ -146,6 +144,11 @@ class MonolithWebhookHandlers(
     }
   }
 
+  /**
+   * `PUT /stores/api-key` — remembers a Shopify Admin token and forwards it to the monolith. The token
+   * is cached before the monolith is asked and stays cached when that fails; the answer is then an
+   * error, so the caller knows the monolith does not have it, rather than a `200` with a made-up id.
+   */
   suspend fun handlePutStoreApiKey(call: ApplicationCall) {
     val request = call.receive<UpdateStoreApiKeyRequest>()
     val shop = call.shopDomainOrRespond(request.shopifySubdomain, "shopify_subdomain") ?: return

@@ -1,10 +1,17 @@
 package dropnext.dss.handler
 
+import dev.forkhandles.result4k.Success
 import dropnext.dss.contract.DeleteProductVariantsRequest
+import dropnext.dss.lib.shopify.graphql.PRODUCT_VARIANTS_PAGE_SIZE
 import dropnext.dss.testutil.fake.FakeMonolithService
+import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
 import dropnext.dss.testutil.fixture.minimalOrder
+import dropnext.dss.testutil.fixture.sampleProductPage
 import dropnext.dss.testutil.helper.orderToCreateShopifyOrderRequest
+import dropnext.dss.workflow.WEBHOOK_MAX_VARIANT_PAGES
 import dropnext.dss.workflow.WebhookMirrorOutcome
+import dropnext.dss.workflow.syncShopifyProductToMonolith
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
@@ -118,5 +125,83 @@ class MirrorWithinBudgetTest {
     assert(outcome == WebhookMirrorOutcome.TimedOut)
     assert(monolith.getStoreCalls.single() == "acme")
     assert(testScheduler.currentTime == 500.milliseconds.inWholeMilliseconds)
+  }
+
+  // ---------- a product at the webhook's page cap ----------
+
+  /**
+   * A product webhook may load up to [WEBHOOK_MAX_VARIANT_PAGES] pages and then upsert all their variants, inside the
+   * same [WEBHOOK_MIRROR_BUDGET]. These cases run the real workflow under the real budget and grace, with latencies
+   * that are assumptions, not measurements: a 100-variant `GetProductById` page and a 500-variant upsert, which the
+   * monolith writes one row at a time. They show where the budget holds and where a delivery of such a product becomes a
+   * `502` that Shopify redelivers, for the same product, every time.
+   */
+  private fun productAtThePageCap(pageLatency: Duration): FakeShopifyGraphqlService =
+    FakeShopifyGraphqlService().apply {
+      productByIdDelay = pageLatency
+      (0 until WEBHOOK_MAX_VARIANT_PAGES).forEach { page ->
+        val variantIds = (page * PRODUCT_VARIANTS_PAGE_SIZE + 1L..(page + 1L) * PRODUCT_VARIANTS_PAGE_SIZE).toList()
+        val nextCursor = if (page < WEBHOOK_MAX_VARIANT_PAGES - 1) "c${page + 1}" else null
+        productByIdResultQueue += Success(sampleProductPage(variantIds, nextCursor = nextCursor))
+      }
+    }
+
+  private suspend fun mirrorProductAtThePageCap(shopify: FakeShopifyGraphqlService, monolith: FakeMonolithService) =
+    mirrorWithinBudget(monolith, WEBHOOK_MIRROR_BUDGET, WEBHOOK_WRITE_GRACE) { tracked ->
+      syncShopifyProductToMonolith(shopify, tracked, "gid://shopify/Product/501")
+    }
+
+  @Test
+  fun `a product at the page cap fits the budget when Shopify and the monolith answer briskly`() = runTest {
+    val shopify = productAtThePageCap(pageLatency = 400.milliseconds)
+    val monolith = FakeMonolithService().apply { writeDelay = 1200.milliseconds }
+
+    val outcome = mirrorProductAtThePageCap(shopify, monolith)
+
+    assert(outcome == WebhookMirrorOutcome.Mirrored)
+    assert(monolith.upsertProductVariantsCalls.single().productVariants.size == 500)
+    // Five pages at 0.4 s and an upsert of 1.2 s: 0.8 s to spare.
+    assert(testScheduler.currentTime == 3200L)
+  }
+
+  /** The grace is what saves this one: the upsert started inside the budget and lands within the grace. */
+  @Test
+  fun `a product at the page cap with slower pages still lands when the upsert started inside the budget`() = runTest {
+    val shopify = productAtThePageCap(pageLatency = 600.milliseconds)
+    val monolith = FakeMonolithService().apply { writeDelay = 1500.milliseconds }
+
+    val outcome = mirrorProductAtThePageCap(shopify, monolith)
+
+    assert(outcome == WebhookMirrorOutcome.Mirrored)
+    assert(testScheduler.currentTime == 4500L)
+  }
+
+  /** Nothing was written, so nothing is lost; but the redelivery loads the same five slow pages. */
+  @Test
+  fun `a product at the page cap whose pages outlast the budget is timed out before anything is written`() = runTest {
+    val shopify = productAtThePageCap(pageLatency = 850.milliseconds)
+    val monolith = FakeMonolithService()
+
+    val outcome = mirrorProductAtThePageCap(shopify, monolith)
+
+    assert(outcome == WebhookMirrorOutcome.TimedOut)
+    assert(monolith.upsertProductVariantsCalls.isEmpty())
+    assert(testScheduler.currentTime == WEBHOOK_MIRROR_BUDGET.inWholeMilliseconds)
+  }
+
+  /**
+   * The worst shape: the upsert is on the wire when the grace runs out. The monolith may well commit it, yet Shopify is
+   * told `502` and redelivers the whole product.
+   */
+  @Test
+  fun `a product at the page cap whose upsert outlasts the grace is timed out after the write was sent`() = runTest {
+    val shopify = productAtThePageCap(pageLatency = 700.milliseconds)
+    val monolith = FakeMonolithService().apply { writeDelay = 1500.milliseconds }
+
+    val outcome = mirrorProductAtThePageCap(shopify, monolith)
+
+    assert(outcome == WebhookMirrorOutcome.TimedOut)
+    assert(monolith.upsertProductVariantsCalls.single().productVariants.size == 500)
+    assert(testScheduler.currentTime == (WEBHOOK_MIRROR_BUDGET + WEBHOOK_WRITE_GRACE).inWholeMilliseconds)
   }
 }

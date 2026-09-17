@@ -24,13 +24,22 @@ const val MAX_VARIANT_PAGES: Int = 25
  * got. Any failure of any page is the answer: asking again starts from the first page, which is harmless for a read.
  *
  * The answer carries the first page's header and the last page's rate budget, the one that is current.
+ *
+ * With a [pacer] every page waits for the shop's bucket and a retryable failure is asked again; a caller that cannot
+ * wait, such as a webhook with seconds to spare, passes none and gets each page's answer as it comes.
  */
 suspend fun loadShopifyProduct(
   shopify: ShopifyGraphqlService,
   productGid: String,
   maxPages: Int = MAX_VARIANT_PAGES,
+  pacer: ShopifyReadPacer? = null,
 ): ShopifyResult<ShopProduct?> {
-  val first = when (val loaded = shopify.productById(productGid)) {
+  suspend fun page(cursor: String?): ShopifyResult<ShopProduct?> {
+    val call: suspend () -> ShopifyResult<ShopProduct?> = { shopify.productById(productGid, variantsAfter = cursor) }
+    return pacer?.read({ it?.rateBudget }, call) ?: call()
+  }
+
+  val first = when (val loaded = page(cursor = null)) {
     is Failure -> return loaded
     is Success -> loaded.value ?: return loaded
   }
@@ -43,18 +52,18 @@ suspend fun loadShopifyProduct(
     val cursor = last.nextVariantsCursor ?: break
     if (pages >= maxPages) return Failure(ShopifyError.Truncated("product.variants", maxPages * PRODUCT_VARIANTS_PAGE_SIZE))
 
-    val page = when (val loaded = shopify.productById(productGid, variantsAfter = cursor)) {
+    val next = when (val loaded = page(cursor)) {
       is Failure -> return loaded
       is Success -> loaded.value ?: return Success(null)
     }
     pages++
     // Shopify handing back the cursor it was just given would read the same page until the cap, and answer its
     // variants several times over.
-    if (page.nextVariantsCursor == cursor) {
+    if (next.nextVariantsCursor == cursor) {
       return Failure(ShopifyError.GraphqlError("Shopify answered the variants cursor it was given as the next one"))
     }
-    edges += page.product.variants.edges
-    last = page
+    edges += next.product.variants.edges
+    last = next
   }
 
   val variants = first.product.variants.copy(pageInfo = last.product.variants.pageInfo, edges = edges)

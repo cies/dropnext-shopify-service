@@ -6,6 +6,7 @@ import dropnext.dss.contract.UpsertProductVariantsRequest
 import dropnext.dss.lib.monolith.CreateOrderOutcome
 import dropnext.dss.lib.monolith.MonolithResult
 import dropnext.dss.lib.monolith.MonolithService
+import dropnext.dss.lib.monolith.UpsertedProductVariants
 import dropnext.dss.workflow.WebhookMirrorOutcome
 import kotlin.time.Duration
 import kotlinx.coroutines.async
@@ -53,7 +54,7 @@ private class WriteTrackingMonolithService(private val delegate: MonolithService
   override suspend fun postCreateOrder(request: CreateShopifyOrderRequest): MonolithResult<CreateOrderOutcome> =
     write { delegate.postCreateOrder(request) }
 
-  override suspend fun upsertProductVariants(request: UpsertProductVariantsRequest): MonolithResult<Int> =
+  override suspend fun upsertProductVariants(request: UpsertProductVariantsRequest): MonolithResult<UpsertedProductVariants> =
     write { delegate.upsertProductVariants(request) }
 
   override suspend fun deleteProductVariants(request: DeleteProductVariantsRequest): MonolithResult<Int> =

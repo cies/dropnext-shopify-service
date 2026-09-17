@@ -49,10 +49,17 @@ suspend fun syncShopifyProductToMonolith(
   val request = UpsertProductVariantsRequest(
     shopifySubdomain = shopify.shop.subdomainOnly,
     productVariants = variantItems,
+    // The load failed rather than return a partial variant list, so the product is complete unless the mapper dropped
+    // a variant. Only then may the monolith soft-delete the variants the request leaves out.
+    productVariantsComplete = variantItems.size == variantCount,
   )
   return when (val result = monolith.upsertProductVariants(request)) {
     is Success -> {
-      log.info { "Monolith upsert variants ok: ${result.value} upserted" }
+      val written = result.value
+      log.info {
+        "Monolith upsert variants ok: upserted=${written.upserted} deleted=${written.deleted} " +
+          "complete=${request.productVariantsComplete}"
+      }
       WebhookMirrorOutcome.Mirrored
     }
     is Failure -> {

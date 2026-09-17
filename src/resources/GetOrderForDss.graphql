@@ -49,6 +49,11 @@ query GetOrderForDss(
           variant {
             legacyResourceId
           }
+          # Lets the monolith hold a line for a variant it has not mirrored yet, and fetch the product afterwards.
+          # Asked of the line rather than of its variant, so the variant stays the one type the fulfillment orders share.
+          product {
+            legacyResourceId
+          }
         }
       }
     }

@@ -25,8 +25,11 @@ interface MonolithService {
   /** `GET` to [OutBoundMonolithPaths.stores] with `?shopify_subdomain=…`; a successful `null` means the monolith knows no such store. */
   suspend fun getStore(shopifySubdomain: String): MonolithResult<MonolithStore?>
 
-  /** `POST` to [OutBoundMonolithPaths.productVariants] — upsert product variants from a Shopify products/create or products/update webhook. Answers the upserted count. */
-  suspend fun upsertProductVariants(request: UpsertProductVariantsRequest): MonolithResult<Int>
+  /**
+   * `POST` to [OutBoundMonolithPaths.productVariants] — upsert product variants from a Shopify products/create or
+   * products/update webhook. Answers what the monolith wrote, the variants a complete request replaced included.
+   */
+  suspend fun upsertProductVariants(request: UpsertProductVariantsRequest): MonolithResult<UpsertedProductVariants>
 
   /** `DELETE` to [OutBoundMonolithPaths.productVariants] — soft-delete variants that no longer exist in Shopify. Answers the deleted count. */
   suspend fun deleteProductVariants(request: DeleteProductVariantsRequest): MonolithResult<Int>
@@ -65,6 +68,9 @@ val MonolithError.errorLabel: String
   }
 
 enum class CreateOrderOutcome { Created, AlreadyExisted }
+
+/** The rows an upsert inserted or updated, and the variants a complete one soft-deleted (`0` for any other). */
+data class UpsertedProductVariants(val upserted: Int, val deleted: Int)
 
 data class MonolithStore(
   val storeId: StoreId,

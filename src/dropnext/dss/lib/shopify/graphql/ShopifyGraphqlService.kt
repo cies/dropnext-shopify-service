@@ -15,6 +15,7 @@ import dropnext.graphql.generated.enums.WebhookSubscriptionTopic
 import dropnext.graphql.generated.getorderfordss.Order
 import dropnext.graphql.generated.getproductbyid.Product
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
 
 
 /**
@@ -169,12 +170,14 @@ sealed interface ShopifyError {
    *
    * [rateBudget] is what Shopify said was left of the shop's bucket when it refused, if it said. Shopify throttles with
    * this error rather than with an HTTP status, and a throttled answer still carries the cost block, so this is where a
-   * caller learns how long to wait before asking again.
+   * caller learns how long to wait before asking again. [requestedCost] is what the refused query asked for, which the
+   * bucket has to hold before Shopify runs it: see [throttledRetryAfter].
    */
   data class GraphqlError(
     override val message: String,
     val codes: List<String> = emptyList(),
     val rateBudget: ShopifyRateBudget? = null,
+    val requestedCost: Int? = null,
   ) : ShopifyError {
     /**
      * Of the coded errors only throttling and Shopify's internal errors pass. An error without any code is retried too:
@@ -247,7 +250,37 @@ val ShopifyError.errorLabel: String
   }
 
 /** The `extensions.code` values Shopify documents as passing conditions: its rate limit and its own internal error. */
-private val RETRYABLE_GRAPHQL_ERROR_CODES = setOf("THROTTLED", "INTERNAL_SERVER_ERROR")
+private val RETRYABLE_GRAPHQL_ERROR_CODES = setOf(THROTTLED_CODE, "INTERNAL_SERVER_ERROR")
+
+private const val THROTTLED_CODE = "THROTTLED"
+
+/**
+ * What a throttled answer tells its caller to wait when Shopify said nothing about the bucket. Ten seconds refills half
+ * of a 1,000-point bucket at the slowest documented restore rate, so a caller that honors it is unlikely to be
+ * throttled again straight away.
+ */
+val DEFAULT_THROTTLED_RETRY_AFTER: Duration = 10.seconds
+
+/**
+ * How long to wait before asking Shopify again after this failure, or `null` when it is not a throttle.
+ *
+ * The wait refills the bucket to [floor], the share every read here leaves free for the shop's live traffic, and to the
+ * refused query's own requested cost, whichever takes longer. [lastKnownBudget] stands in when the refusal carried no
+ * budget. Never under a second: asking again at once would only be refused again.
+ */
+fun ShopifyError.throttledRetryAfter(floor: Double, lastKnownBudget: ShopifyRateBudget? = null): Duration? =
+  when (this) {
+    is ShopifyError.GraphqlError -> {
+      if (THROTTLED_CODE !in codes) {
+        null
+      } else {
+        val budget = rateBudget ?: lastKnownBudget
+        budget?.retryAfterThrottle(floor, requestedCost)?.coerceAtLeast(1.seconds) ?: DEFAULT_THROTTLED_RETRY_AFTER
+      }
+    }
+    is ShopifyError.HttpError -> if (httpStatus == 429) DEFAULT_THROTTLED_RETRY_AFTER else null
+    else -> null
+  }
 
 /** The shop's canonical host and numeric id, as Shopify reports them. */
 data class ShopIdentityInfo(

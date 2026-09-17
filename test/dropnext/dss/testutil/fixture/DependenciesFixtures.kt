@@ -53,6 +53,8 @@ internal fun testDependencies(
   webhookMirrorSlots: Semaphore = Semaphore(MAX_CONCURRENT_MIRRORS),
   webhookClock: Clock = Clock.systemUTC(),
   webhookTimeSource: TimeSource = TimeSource.Monotonic,
+  // A read that waits for a shop's bucket would wait real seconds in a request test; the workflow tests assert the waits.
+  shopifyReadPause: suspend (Duration) -> Unit = {},
 ): DssDependencies = dssDependencies(
   config = config,
   httpClient = httpClient,
@@ -65,4 +67,5 @@ internal fun testDependencies(
   webhookMirrorSlots = webhookMirrorSlots,
   webhookClock = webhookClock,
   webhookTimeSource = webhookTimeSource,
+  shopifyReadPause = shopifyReadPause,
 )

@@ -84,6 +84,8 @@ fun mapOrderForMonolith(
       snapshotOfVariantTitle = li.name,
       snapshotOfProductTitle = li.title,
       snapshotOfPriceAsString = shopifyMoneyAmountForWire(li.originalUnitPriceSet.shopMoney.amount),
+      // Absent for a product deleted since the order; the monolith then holds the line only if it knows the variant.
+      shopifyProductId = li.product?.legacyResourceId?.toLongOrNull(),
     )
   }
   val currency = order.totalPriceSet.shopMoney.currencyCode.name

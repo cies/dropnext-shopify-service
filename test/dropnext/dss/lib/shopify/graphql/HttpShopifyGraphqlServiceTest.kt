@@ -497,6 +497,7 @@ class HttpShopifyGraphqlServiceTest {
     val error = result.failureReason() as ShopifyError.GraphqlError
     assert(error.codes == listOf("THROTTLED"))
     assert(error.rateBudget == ShopifyRateBudget(maximumAvailable = 1000.0, currentlyAvailable = 12.0, restoreRate = 50.0))
+    assert(error.requestedCost == 252)
   }
 
   @Test
@@ -1370,7 +1371,8 @@ id: String = "gid://shopify/Shop/1", domain: String = "acme.myshopify.com") {
       "shippingAddress":null,
       "lineItems":{"pageInfo":{"hasNextPage":false},"edges":[{"node":{
         "id":"gid://shopify/LineItem/201","quantity":2,"name":"T-Shirt - Blue","title":"T-Shirt",
-        "originalUnitPriceSet":{"shopMoney":{"amount":"19.99"}},"variant":{"legacyResourceId":"101"}
+        "originalUnitPriceSet":{"shopMoney":{"amount":"19.99"}},"variant":{"legacyResourceId":"101"},
+        "product":{"legacyResourceId":"501"}
       }}]},
       "fulfillmentOrders":{"pageInfo":{"hasNextPage":false},"edges":[{"node":{
         "id":"gid://shopify/FulfillmentOrder/301","status":"$fulfillmentOrderStatus",

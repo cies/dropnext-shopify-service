@@ -333,6 +333,7 @@ class HttpShopifyGraphqlService(
           message = errors.joinToString("; ") { it.message },
           codes = errors.mapNotNull { it.code() }.distinct(),
           rateBudget = cost?.budget,
+          requestedCost = cost?.requested,
         ),
       )
     }

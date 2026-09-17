@@ -215,11 +215,12 @@ class HttpMonolithServiceTest {
   // ---------- upsertProductVariants ----------
 
   @Test
-  fun `upsertProductVariants on 200 answers the upserted count`() = withMonolith { server, httpClient, baseUrl ->
-    server.enqueue(HttpStatusCode.OK, """{"upserted":3}""")
+  fun `upsertProductVariants on 200 answers the upserted and deleted counts`() = withMonolith { server, httpClient, baseUrl ->
+    server.enqueue(HttpStatusCode.OK, """{"upserted":3,"deleted":1}""")
     val request =
       UpsertProductVariantsRequest(shopifySubdomain = "acme", productVariants = listOf(sampleVariantItem()))
-    assert(service(httpClient, baseUrl).upsertProductVariants(request) == Success(3))
+    val result = service(httpClient, baseUrl).upsertProductVariants(request)
+    assert(result == Success(UpsertedProductVariants(upserted = 3, deleted = 1)))
     val recorded = server.requests.single()
     assert(recorded.method == "POST")
     assert(recorded.path == "/product-variants")
@@ -283,8 +284,10 @@ class HttpMonolithServiceTest {
       line.keys == setOf(
         "shopify_line_item_id", "product_variant_id", "quantity",
         "snapshot_of_variant_title", "snapshot_of_product_title", "snapshot_of_price_as_string",
+        "shopify_product_id",
       ),
     )
+    assert(line["shopify_product_id"]?.jsonPrimitive?.content == "501")
     assert(line["snapshot_of_price_as_string"]?.jsonPrimitive?.content == "19.99")
     val address = sent["shipping_address"]!!.jsonObject
     assert(address["first_name"] == JsonNull)
@@ -293,11 +296,17 @@ class HttpMonolithServiceTest {
 
   @Test
   fun `upsertProductVariants sends every variant field in snake_case with explicit nulls`() = withMonolith { server, httpClient, baseUrl ->
-    server.enqueue(HttpStatusCode.OK, """{"upserted":1}""")
-    service(httpClient, baseUrl).upsertProductVariants(UpsertProductVariantsRequest(shopifySubdomain = "acme", productVariants = listOf(sampleVariantItem())))
+    server.enqueue(HttpStatusCode.OK, """{"upserted":1,"deleted":0}""")
+    val request = UpsertProductVariantsRequest(
+      shopifySubdomain = "acme",
+      productVariants = listOf(sampleVariantItem()),
+      productVariantsComplete = true,
+    )
+    service(httpClient, baseUrl).upsertProductVariants(request)
 
     val sent = MonolithJson.parseToJsonElement(server.requests.single().body).jsonObject
-    assert(sent.keys == setOf("shopify_subdomain", "product_variants"))
+    assert(sent.keys == setOf("shopify_subdomain", "product_variants", "product_variants_complete"))
+    assert(sent["product_variants_complete"]?.jsonPrimitive?.content == "true")
     val variant = sent["product_variants"]!!.jsonArray.single().jsonObject
     assert(
       variant.keys == setOf(

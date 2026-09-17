@@ -1,13 +1,11 @@
 package dropnext.dss.handler
 
 import dropnext.dss.domain.MonolithPersistOutcome
-import dropnext.dss.domain.ShopifyRateBudget
 import dropnext.dss.lib.ktor.DssError
 import dropnext.dss.lib.shopify.graphql.ShopifyError
+import dropnext.dss.lib.shopify.graphql.throttledRetryAfter
 import dropnext.dss.lib.shopify.oauth.OAuthError
 import dropnext.dss.workflow.CATALOG_BUDGET_FLOOR
-import kotlin.time.Duration
-import kotlin.time.Duration.Companion.seconds
 
 
 /**
@@ -25,10 +23,8 @@ fun ShopifyError.toDssError(): DssError = when (this) {
   is ShopifyError.NotFound -> DssError.NotFound(message)
   is ShopifyError.UserError -> DssError.InvalidRequest(message)
   is ShopifyError.TokenRejected -> DssError.ShopifyAdminTokenRejected(httpStatus)
-  is ShopifyError.GraphqlError ->
-    if (THROTTLED_CODE in codes) DssError.Throttled(retryAfterFor(rateBudget)) else DssError.UpstreamFailure(message)
-  is ShopifyError.HttpError ->
-    if (httpStatus == 429) DssError.Throttled(DEFAULT_THROTTLED_RETRY_AFTER) else DssError.UpstreamFailure(message)
+  is ShopifyError.GraphqlError, is ShopifyError.HttpError ->
+    throttledRetryAfter(CATALOG_BUDGET_FLOOR)?.let { DssError.Throttled(it) } ?: DssError.UpstreamFailure(message)
   is ShopifyError.Network -> DssError.UpstreamFailure(message)
   // The decoder's complaint quotes Shopify's body, which can carry customer data: the log has it, the caller gets the gist.
   is ShopifyError.Undecodable -> DssError.UpstreamFailure("Shopify's answer could not be read")
@@ -37,22 +33,6 @@ fun ShopifyError.toDssError(): DssError = when (this) {
   // A `5xx`, so the monolith retries it: a later attempt may find the shop's rate budget less drained.
   is ShopifyError.TimedOut -> DssError.UpstreamFailure(message)
 }
-
-private const val THROTTLED_CODE = "THROTTLED"
-
-/**
- * What a throttled answer tells its caller to wait when Shopify said nothing about the bucket. Ten seconds refills half
- * of a 1,000-point bucket at the slowest documented restore rate, so a caller that honors it is unlikely to be
- * throttled again straight away.
- */
-private val DEFAULT_THROTTLED_RETRY_AFTER: Duration = 10.seconds
-
-/**
- * How long Shopify needs to refill the shop's bucket to the share every read here leaves free for the shop's live
- * traffic, never less than a second: a retry at once would only be throttled again.
- */
-private fun retryAfterFor(budget: ShopifyRateBudget?): Duration =
-  budget?.refillTo(CATALOG_BUDGET_FLOOR)?.coerceAtLeast(1.seconds) ?: DEFAULT_THROTTLED_RETRY_AFTER
 
 /**
  * A merchant's browser reads these. A code Shopify refused is theirs to redo, so the answer says to start the

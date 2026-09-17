@@ -14,6 +14,7 @@ import dropnext.dss.lib.monolith.MonolithError
 import dropnext.dss.lib.monolith.MonolithResult
 import dropnext.dss.lib.monolith.MonolithService
 import dropnext.dss.lib.monolith.MonolithStore
+import dropnext.dss.lib.monolith.UpsertedProductVariants
 import dropnext.dss.lib.monolith.monolithError
 import kotlin.time.Duration
 import kotlinx.coroutines.delay
@@ -90,11 +91,11 @@ class FakeMonolithService : MonolithService, RecordingFake {
     }
   }
 
-  override suspend fun upsertProductVariants(request: UpsertProductVariantsRequest): MonolithResult<Int> {
+  override suspend fun upsertProductVariants(request: UpsertProductVariantsRequest): MonolithResult<UpsertedProductVariants> {
     upsertProductVariantsCalls.add(request)
     delay(writeDelay)
     return when (upsertProductVariantsStatus) {
-      200 -> Success(request.productVariants.size)
+      200 -> Success(UpsertedProductVariants(upserted = request.productVariants.size, deleted = 0))
       else -> Failure(rejected(upsertProductVariantsStatus, """{"error":"forced fail","code":"VariantError","trace_id":"fake-upsert"}"""))
     }
   }

@@ -58,6 +58,9 @@ class FakeShopifyGraphqlService(
   /** The `variantsAfter` cursor of each `productById` call, in step with [productByIdCalls]. */
   val productByIdCursors: MutableList<String?> = mutableListOf()
 
+  /** How long each `productById` call takes to answer: what makes a product of many pages outlive a webhook's budget. */
+  var productByIdDelay: Duration = Duration.ZERO
+
   var productVariantIdsPageResult: ShopifyResult<ShopifyCatalogPage> =
     Success(ShopifyCatalogPage(entries = emptyList(), nextCursor = null))
 
@@ -119,6 +122,7 @@ class FakeShopifyGraphqlService(
   override suspend fun productById(productGid: String, variantsAfter: String?): ShopifyResult<ShopProduct?> {
     productByIdCalls.add(productGid)
     productByIdCursors.add(variantsAfter)
+    delay(productByIdDelay)
     return if (productByIdResultQueue.isNotEmpty()) productByIdResultQueue.removeAt(0) else productByIdResult
   }
 
@@ -198,6 +202,7 @@ class FakeShopifyGraphqlService(
     productByIdCalls.clear()
     productByIdCursors.clear()
     productByIdResultQueue.clear()
+    productByIdDelay = Duration.ZERO
     productVariantIdsPageCalls.clear()
     productVariantIdsPageResultQueue.clear()
     orderForDssCalls.clear()

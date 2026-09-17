@@ -730,6 +730,29 @@ class MonolithWebhookHandlersTest {
     }
   }
 
+  /** A batch throttled part-way still answers what it loaded, so the monolith keeps it and asks for the rest later. */
+  @Test
+  fun `products-fetch answers the products it loaded before a throttle and the ones it did not get to`() {
+    val halfFull = ShopifyRateBudget(maximumAvailable = 1000.0, currentlyAvailable = 600.0, restoreRate = 50.0)
+    val throttled = ShopifyError.GraphqlError("Throttled", codes = listOf("THROTTLED"), rateBudget = halfFull, requestedCost = 800)
+    val fakeShopify = FakeShopifyGraphqlService().apply {
+      productByIdResultQueue += Success(ShopProduct(sampleProduct(legacyResourceId = "501", variantId = "9001"), "EUR"))
+      productByIdResult = Failure(throttled)
+    }
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.productsFetch) {
+        contentType(ContentType.Application.Json)
+        setBody(fetchRequest(501L, 502L, 503L))
+      }
+      assert(r.status == HttpStatusCode.OK)
+      val body = r.body<FetchProductsResponse>()
+      assert(body.productVariants.map { it.productVariantId } == listOf(9001L))
+      assert(body.unfetchedProductIds == listOf(502L, 503L))
+      // The bucket has to hold the refused 800-point query: 200 points more at 50 a second.
+      assert(body.nextRequestAfterSeconds == 4)
+    }
+  }
+
   /**
    * A throttled shop says how long to wait, in the body the contract declares and in `Retry-After`: the shop's own
    * refill time, here 500 points short of half a bucket refilling at 50 a second.
