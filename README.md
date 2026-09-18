@@ -58,7 +58,7 @@ All Kotlin lives under `src/dropnext/dss/` (we set `srcDir("src")` in Gradle to 
 | [`dependencies.kt`](src/dropnext/dss/dependencies.kt) | Assembles `DssDependencies` (HTTP clients, services, handlers); tests override per-collaborator. |
 | [`config/`](src/dropnext/dss/config) | `Config.from(env)`: every env var read once, secrets wrapped; plus the `.env` reader. |
 | [`path/`](src/dropnext/dss/path) | URL path constants — `Paths` (inbound), `OutBoundMonolithPaths` (generated), `OutBoundShopifyOAuthPaths`. Single source of truth. |
-| [`domain/`](src/dropnext/dss/domain) | The vocabulary every layer shares and that depends on nothing: `ShopDomain`, ids and secrets as value classes, the install report; `fulfillment/` holds the pure shipment ↔ fulfillment-order matcher and request validation. |
+| [`domain/`](src/dropnext/dss/domain) | The vocabulary every layer shares and that depends on nothing: `ShopDomain`, ids and secrets as value classes, the install report; `fulfillment/` holds the pure shipment ↔ fulfillment-order matcher, a package's content and the cancel plan, and request validation. |
 | [`mapper/`](src/dropnext/dss/mapper) | Shopify snapshot → monolith contract DTO (order, product, money). |
 | [`workflow/`](src/dropnext/dss/workflow) | Multi-step orchestration that doesn't touch HTTP types directly: shop install, order/product sync, shipment ↔ fulfillment sync, tracking events, webhook registration. |
 | [`handler/`](src/dropnext/dss/handler) | Ktor handlers — `ApplicationCall → response`: decode, validate, resolve the shop, call a workflow, map its answer. |

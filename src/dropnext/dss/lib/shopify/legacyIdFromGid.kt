@@ -1,5 +1,6 @@
 package dropnext.dss.lib.shopify
 
+import dropnext.dss.domain.ShopifyFulfillmentId
 import dropnext.dss.domain.ShopifyOrderId
 import dropnext.dss.domain.ShopifyProductId
 
@@ -11,3 +12,5 @@ fun legacyIdFromGid(gid: String): Long? =
 fun orderGid(orderId: ShopifyOrderId): String = "gid://shopify/Order/${orderId.value}"
 
 fun productGid(productId: ShopifyProductId): String = "gid://shopify/Product/${productId.value}"
+
+fun fulfillmentGid(fulfillmentId: ShopifyFulfillmentId): String = "gid://shopify/Fulfillment/${fulfillmentId.value}"

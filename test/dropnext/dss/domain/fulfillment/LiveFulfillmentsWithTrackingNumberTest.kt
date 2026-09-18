@@ -60,4 +60,23 @@ class LiveFulfillmentsWithTrackingNumberTest {
   fun `an order without fulfillments has none`() {
     assert(liveFulfillmentsWithTrackingNumber(minimalOrder(), "TRK-A").isEmpty())
   }
+
+  // ---------- every fulfillment, whatever its status ----------
+
+  /** A number the order has ever carried is not new to it, even after its fulfillment was canceled. */
+  @Test
+  fun `the lookup over every fulfillment keeps a canceled one that carries the tracking number`() {
+    val order = orderWithFulfillments(
+      fulfillment(8000L, listOf("TRK-A"), status = FulfillmentStatus.CANCELLED),
+      fulfillment(8001L, listOf("TRK-B")),
+    )
+    assert(fulfillmentsWithTrackingNumber(order, "TRK-A").map { it.id } == listOf("gid://shopify/Fulfillment/8000"))
+  }
+
+  @Test
+  fun `the lookup over every fulfillment trims and compares case-sensitively like the live one`() {
+    val order = orderWithFulfillments(fulfillment(8000L, listOf(" TRK-A\t")), fulfillment(8001L, listOf("trk-b")))
+    assert(fulfillmentsWithTrackingNumber(order, "TRK-A ").size == 1)
+    assert(fulfillmentsWithTrackingNumber(order, "TRK-B").isEmpty())
+  }
 }

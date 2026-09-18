@@ -1,0 +1,17 @@
+query GetFulfillmentContent($id: ID!, $fulfillmentLineItemsFirst: Int!) {
+  fulfillment(id: $id) {
+    fulfillmentLineItems(first: $fulfillmentLineItemsFirst) {
+      pageInfo {
+        hasNextPage
+      }
+      nodes {
+        quantity
+        lineItem {
+          variant {
+            legacyResourceId
+          }
+        }
+      }
+    }
+  }
+}

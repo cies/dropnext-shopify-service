@@ -10,6 +10,7 @@ import dropnext.dss.domain.ShopifyRateBudget
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.domain.ShopifyVariantId
 import dropnext.dss.domain.WebhookSubscriptionStatus
+import dropnext.dss.domain.fulfillment.PackageContent
 import dropnext.graphql.generated.enums.FulfillmentEventStatus
 import dropnext.graphql.generated.enums.WebhookSubscriptionTopic
 import dropnext.graphql.generated.getorderfordss.Order
@@ -65,9 +66,20 @@ interface ShopifyGraphqlService {
   /** `GetOrderForDss` — the order snapshot the fulfillment workflows and the monolith order sync work from; [ShopifyError.NotFound] when Shopify has no such order. */
   suspend fun orderForDss(orderGid: String): ShopifyResult<Order>
 
+  /**
+   * `GetFulfillmentContent` — what one fulfillment holds, per variant; [PackageContent.Unknown] when a line names no
+   * variant or no quantity. [ShopifyError.NotFound] when Shopify has no such fulfillment, [ShopifyError.Truncated] when
+   * it has more lines than one page.
+   */
+  suspend fun fulfillmentContent(fulfillmentGid: String): ShopifyResult<PackageContent>
+
   // ---------- fulfillment primitives (composed by the workflow functions) ----------
 
-  /** `FulfillmentCancel` — cancels a single Shopify fulfillment by GID; a success when Shopify's answer carries the fulfillment as cancelled, whatever user errors come with it. */
+  /**
+   * `FulfillmentCancel` — cancels a single Shopify fulfillment by GID; a success when Shopify's answer carries the
+   * fulfillment as canceled, whatever user errors come with it. Any other payload is a [ShopifyError.UserError]:
+   * Shopify answered and did not cancel.
+   */
   suspend fun cancelFulfillment(fulfillmentGid: String): ShopifyResult<Unit>
 
   /** `FulfillmentCreateWithLineItems` — creates one fulfillment spanning one or more fulfillment orders and answers its id. */

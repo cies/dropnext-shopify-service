@@ -6,22 +6,29 @@ import dropnext.dss.boot.config.DssMode
 import dropnext.dss.contract.ApiError
 import dropnext.dss.contract.FetchProductsRequest
 import dropnext.dss.contract.FetchProductsResponse
-import dropnext.dss.contract.ShopCatalogResponse
-import dropnext.dss.contract.ThrottledError
+import dropnext.dss.contract.FulfillmentCancellationEntry
+import dropnext.dss.contract.FulfillmentCancellationOutcome
 import dropnext.dss.contract.ShipmentLineItem
+import dropnext.dss.contract.ShipmentSkipReason
+import dropnext.dss.contract.ShipmentSyncEntry
+import dropnext.dss.contract.ShipmentSyncOutcome
+import dropnext.dss.contract.ShopCatalogResponse
+import dropnext.dss.contract.SyncShipmentsWithFulfillmentsFailure
 import dropnext.dss.contract.SyncShipmentsWithFulfillmentsRequest
 import dropnext.dss.contract.SyncShipmentsWithFulfillmentsResponse
+import dropnext.dss.contract.ThrottledError
 import dropnext.dss.contract.TrackingUpdateRequest
 import dropnext.dss.contract.TrackingUpdateResponse
 import dropnext.dss.contract.UpdateStoreApiKeyRequest
 import dropnext.dss.contract.UpdateStoreApiKeyResponse
+import dropnext.dss.domain.MAX_PRODUCTS_PER_FETCH
 import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.domain.ShopifyFulfillmentEventId
 import dropnext.dss.domain.ShopifyFulfillmentId
 import dropnext.dss.domain.ShopifyProductId
 import dropnext.dss.domain.ShopifyRateBudget
 import dropnext.dss.domain.ShopifyVariantId
-import dropnext.dss.domain.MAX_PRODUCTS_PER_FETCH
+import dropnext.dss.domain.fulfillment.PackageContent
 import dropnext.dss.lib.ktor.DssError
 import dropnext.dss.lib.shopify.graphql.FulfillmentLine
 import dropnext.dss.lib.shopify.graphql.FulfillmentTracking
@@ -30,6 +37,7 @@ import dropnext.dss.lib.shopify.graphql.ShopifyCatalogEntry
 import dropnext.dss.lib.shopify.graphql.ShopifyCatalogPage
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.lib.shopify.token.InMemoryShopTokenStore
+import dropnext.dss.lib.shopify.token.ShopLookup
 import dropnext.dss.lib.slf4j.ROUTE_MDC_KEY
 import dropnext.dss.lib.slf4j.SHOP_MDC_KEY
 import dropnext.dss.path.Paths
@@ -39,13 +47,16 @@ import dropnext.dss.testutil.fake.FakeShopifyGraphqlServiceFactory
 import dropnext.dss.testutil.fixture.ACME_SHOP
 import dropnext.dss.testutil.fixture.fulfillment
 import dropnext.dss.testutil.fixture.minimalOrder
+import dropnext.dss.testutil.fixture.orderWithFoQuantities
 import dropnext.dss.testutil.fixture.orderWithFulfillment
 import dropnext.dss.testutil.fixture.orderWithFulfillments
+import dropnext.dss.testutil.fixture.orderWithTwoVariantFulfillmentOrders
 import dropnext.dss.testutil.fixture.sampleProduct
 import dropnext.dss.testutil.fixture.shipment
 import dropnext.dss.testutil.fixture.testConfig
 import dropnext.dss.testutil.fixture.testDependencies
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
+import dropnext.dss.testutil.helper.MutableTimeSource
 import dropnext.dss.testutil.helper.capturingLogs
 import dropnext.dss.testutil.helper.mdcOf
 import dropnext.dss.testutil.helper.withDssApp
@@ -61,6 +72,12 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.parallel.ResourceLock
 
@@ -133,9 +150,9 @@ class MonolithWebhookHandlersTest {
 
   // ---------- sync-shipments success + dry-run ----------
 
-  /** Which shipments match which lines is the matcher's; the handler owns the order it loads and the ids it answers. */
+  /** Which shipments match which lines is the matcher's; the handler owns the order it loads and the report it answers. */
   @Test
-  fun `sync-shipments creates the fulfillment and answers its id in new_fulfillment_ids`() {
+  fun `sync-shipments creates the fulfillment and reports it as created with its id`() {
     val fakeShopify = FakeShopifyGraphqlService()
     fakeShopify.orderForDssResult = Success(minimalOrder())
     fakeShopify.createFulfillmentResult = Success(ShopifyFulfillmentId(5001L))
@@ -145,7 +162,8 @@ class MonolithWebhookHandlersTest {
         setBody(validSyncRequest())
       }
       assert(r.status == HttpStatusCode.OK)
-      assert(r.body<SyncShipmentsWithFulfillmentsResponse>().newFulfillmentIds == listOf(5001L))
+      val expected = listOf(ShipmentSyncEntry("1Z999", ShipmentSyncOutcome.CREATED, fulfillmentId = 5001L))
+      assert(r.body<SyncShipmentsWithFulfillmentsResponse>().shipments == expected)
       assert(fakeShopify.orderForDssCalls == listOf("gid://shopify/Order/1001"))
       val created = fakeShopify.createFulfillmentCalls.single()
       val expectedLine = FulfillmentLine(
@@ -158,8 +176,9 @@ class MonolithWebhookHandlersTest {
     }
   }
 
+  /** An over-shipment is a normal outcome: nothing is created for it, and the monolith is told the run went fine. */
   @Test
-  fun `sync-shipments returns 400 on dry-run quantity failure before create`() {
+  fun `sync-shipments answers 200 without creating anything for a shipment that does not fit`() {
     val fakeShopify = FakeShopifyGraphqlService()
     fakeShopify.orderForDssResult = Success(minimalOrder())
     withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
@@ -175,10 +194,429 @@ class MonolithWebhookHandlersTest {
           ),
         )
       }
-      assert(r.status == HttpStatusCode.BadRequest)
-      assert("exceeds remaining" in r.errorMessage())
+      assert(r.status == HttpStatusCode.OK)
+      val expected = listOf(ShipmentSyncEntry("1Z999", ShipmentSyncOutcome.SKIPPED, skipReason = ShipmentSkipReason.NO_ROOM))
+      assert(r.body<SyncShipmentsWithFulfillmentsResponse>().shipments == expected)
       assert(fakeShopify.cancelFulfillmentCalls.isEmpty())
       assert(fakeShopify.createFulfillmentCalls.isEmpty())
+    }
+  }
+
+  /** One unit left after an earlier fulfillment, and a shipment of two: skipped, not refused, and not clipped. */
+  @Test
+  fun `sync-shipments answers 200 for an over-shipment after an earlier fulfillment`() {
+    val fakeShopify = FakeShopifyGraphqlService()
+    fakeShopify.orderForDssResult = Success(orderWithFoQuantities(remaining = 1).copy(fulfillments = listOf(fulfillment(8000L, listOf("TRK-A")))))
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(
+          validSyncRequest().copy(
+            shipments = listOf(
+              validSyncRequest().shipments.single().copy(
+                trackingNumber = "TRK-B",
+                lineItems = listOf(ShipmentLineItem(productVariantId = 101L, quantity = 2)),
+              ),
+            ),
+          ),
+        )
+      }
+      assert(r.status == HttpStatusCode.OK)
+      val expected = listOf(ShipmentSyncEntry("TRK-B", ShipmentSyncOutcome.SKIPPED, skipReason = ShipmentSkipReason.NO_ROOM))
+      assert(r.body<SyncShipmentsWithFulfillmentsResponse>().shipments == expected)
+      assert(fakeShopify.createFulfillmentCalls.isEmpty())
+    }
+  }
+
+  /** A re-ship entered before the job ran: the original takes the two units, the re-ship stays out of Shopify. */
+  @Test
+  fun `sync-shipments answers 200 with only the original created when a re-ship shares its payload`() {
+    val fakeShopify = FakeShopifyGraphqlService()
+    fakeShopify.orderForDssResult = Success(minimalOrder())
+    fakeShopify.createFulfillmentResult = Success(ShopifyFulfillmentId(5001L))
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+      val original = validSyncRequest().shipments.single().copy(
+        trackingNumber = "TRK-A",
+        lineItems = listOf(ShipmentLineItem(productVariantId = 101L, quantity = 2)),
+      )
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(validSyncRequest().copy(shipments = listOf(original, original.copy(trackingNumber = "TRK-B"))))
+      }
+      assert(r.status == HttpStatusCode.OK)
+      val expected = listOf(
+        ShipmentSyncEntry("TRK-A", ShipmentSyncOutcome.CREATED, fulfillmentId = 5001L),
+        ShipmentSyncEntry("TRK-B", ShipmentSyncOutcome.SKIPPED, skipReason = ShipmentSkipReason.NO_ROOM),
+      )
+      assert(r.body<SyncShipmentsWithFulfillmentsResponse>().shipments == expected)
+      assert(fakeShopify.createFulfillmentCalls.single().tracking.number == "TRK-A")
+    }
+  }
+
+  // ---------- sync-shipments report ----------
+
+  /** What the monolith decodes: the keys, the outcome spellings, and a null id left out rather than sent as `null`. */
+  @Test
+  fun `sync-shipments answers the report of a mixed payload in the contract's JSON`() {
+    val fakeShopify = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Success(
+        orderWithTwoVariantFulfillmentOrders().copy(fulfillments = listOf(fulfillment(3990L, listOf("TRK-DONE")))),
+      )
+      createFulfillmentResultQueue += Success(ShopifyFulfillmentId(4001L))
+      createFulfillmentResultQueue += Failure(ShopifyError.UserError(listOf("tracking number invalid")))
+    }
+    val request = validSyncRequest().copy(
+      shipments = listOf(
+        shipment(tracking = "TRK-NEW", variantId = 101L),
+        shipment(tracking = "TRK-DONE", variantId = 101L),
+        shipment(tracking = "TRK-BIG", variantId = 202L, quantity = 5),
+        shipment(tracking = "TRK-ALIEN", variantId = 999L),
+        shipment(tracking = "TRK-BAD", variantId = 202L),
+      ),
+    )
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(request)
+      }
+      assert(r.status == HttpStatusCode.OK)
+      val body = r.body<JsonObject>()
+      assert(body.keys == setOf("shipments", "cancellations"))
+      assert(body.getValue("cancellations").jsonArray.isEmpty())
+      val entries = body.getValue("shipments").jsonArray.map { it.jsonObject }
+      assert(entries[0] == jsonEntry("tracking_number" to "TRK-NEW", "outcome" to "created", "fulfillment_id" to 4001L))
+      assert(entries[1] == jsonEntry("tracking_number" to "TRK-DONE", "outcome" to "already_fulfilled", "fulfillment_id" to 3990L))
+      assert(entries[2] == jsonEntry("tracking_number" to "TRK-BIG", "outcome" to "skipped", "skip_reason" to "no_room"))
+      assert(entries[3] == jsonEntry("tracking_number" to "TRK-ALIEN", "outcome" to "skipped", "skip_reason" to "not_on_order"))
+      assert(entries[4] == jsonEntry("tracking_number" to "TRK-BAD", "outcome" to "refused"))
+      assert(entries.size == 5)
+    }
+  }
+
+  /** A refusal is about one shipment: the run went through the others, so the monolith is not asked to retry. */
+  @Test
+  fun `sync-shipments answers 200 when Shopify refuses a create`() {
+    val fakeShopify = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Success(minimalOrder())
+      createFulfillmentResult = Failure(ShopifyError.UserError(listOf("tracking number invalid")))
+    }
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(validSyncRequest())
+      }
+      assert(r.status == HttpStatusCode.OK)
+      val expected = listOf(ShipmentSyncEntry("1Z999", ShipmentSyncOutcome.REFUSED))
+      assert(r.body<SyncShipmentsWithFulfillmentsResponse>().shipments == expected)
+    }
+  }
+
+  /** An order whose shipments are all gone is still a sync, and its answer is an empty report. */
+  @Test
+  fun `sync-shipments answers 200 with an empty report for an empty shipments list`() {
+    val fakeShopify = FakeShopifyGraphqlService().apply { orderForDssResult = Success(minimalOrder()) }
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(validSyncRequest().copy(shipments = emptyList()))
+      }
+      assert(r.status == HttpStatusCode.OK)
+      val body = r.body<SyncShipmentsWithFulfillmentsResponse>()
+      assert(body.shipments == emptyList<ShipmentSyncEntry>())
+      assert(body.cancellations == emptyList<FulfillmentCancellationEntry>())
+      assert(fakeShopify.createFulfillmentCalls.isEmpty())
+    }
+  }
+
+  /** What landed before the stop is in the answer, beside the error the monolith already reads. */
+  @Test
+  fun `sync-shipments answers 502 with the report when Shopify fails on the second create`() {
+    val fakeShopify = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Success(minimalOrder())
+      createFulfillmentResultQueue += Success(ShopifyFulfillmentId(5001L))
+      createFulfillmentResultQueue += Failure(ShopifyError.HttpError(503))
+    }
+    val request = validSyncRequest().copy(
+      shipments = listOf(shipment(tracking = "TRK-1"), shipment(tracking = "TRK-2")),
+    )
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(request)
+      }
+      assert(r.status == HttpStatusCode.BadGateway)
+      val body = r.body<SyncShipmentsWithFulfillmentsFailure>()
+      assert(body.error == "Shopify answered HTTP 503")
+      assert(body.traceId != null)
+      assert(body.retryAfterSeconds == null)
+      val expected = listOf(
+        ShipmentSyncEntry("TRK-1", ShipmentSyncOutcome.CREATED, fulfillmentId = 5001L),
+        ShipmentSyncEntry("TRK-2", ShipmentSyncOutcome.FAILED),
+      )
+      assert(body.shipments == expected)
+      assert(body.cancellations == emptyList<FulfillmentCancellationEntry>())
+      assert(r.headers[HttpHeaders.RetryAfter] == null)
+    }
+  }
+
+  @Test
+  fun `sync-shipments answers 502 with every shipment not attempted when the order load fails`() {
+    val fakeShopify = FakeShopifyGraphqlService().apply { orderForDssResult = Failure(ShopifyError.Network("connection reset")) }
+    val request = validSyncRequest().copy(
+      shipments = listOf(shipment(tracking = "TRK-1"), shipment(tracking = "TRK-2")),
+    )
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(request)
+      }
+      assert(r.status == HttpStatusCode.BadGateway)
+      val body = r.body<SyncShipmentsWithFulfillmentsFailure>()
+      val expected = listOf(
+        ShipmentSyncEntry("TRK-1", ShipmentSyncOutcome.NOT_ATTEMPTED),
+        ShipmentSyncEntry("TRK-2", ShipmentSyncOutcome.NOT_ATTEMPTED),
+      )
+      assert(body.shipments == expected)
+      assert(body.error == ShopifyError.Network("connection reset").message)
+      assert(fakeShopify.createFulfillmentCalls.isEmpty())
+    }
+  }
+
+  /** The monolith drops a `404`; the report still names every shipment, none of them tried. */
+  @Test
+  fun `sync-shipments answers 404 with the report for an order Shopify does not have`() {
+    val fakeShopify = FakeShopifyGraphqlService().apply { orderForDssResult = Failure(ShopifyError.NotFound("order not found")) }
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(validSyncRequest())
+      }
+      assert(r.status == HttpStatusCode.NotFound)
+      val body = r.body<SyncShipmentsWithFulfillmentsFailure>()
+      assert(body.error == "order not found")
+      assert(body.shipments == listOf(ShipmentSyncEntry("1Z999", ShipmentSyncOutcome.NOT_ATTEMPTED)))
+    }
+  }
+
+  /** An uninstall between two creates: the first one landed, and the answer says so beside the `401`. */
+  @Test
+  fun `sync-shipments answers 401 with the report when Shopify rejects the token mid-run`() {
+    val fakeShopify = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Success(minimalOrder())
+      createFulfillmentResultQueue += Success(ShopifyFulfillmentId(5001L))
+      createFulfillmentResultQueue += Failure(ShopifyError.TokenRejected(401))
+    }
+    val request = validSyncRequest().copy(
+      shipments = listOf(shipment(tracking = "TRK-1"), shipment(tracking = "TRK-2")),
+    )
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(request)
+      }
+      assert(r.status == HttpStatusCode.Unauthorized)
+      val body = r.body<SyncShipmentsWithFulfillmentsFailure>()
+      assert(body.error == DssError.ShopifyAdminTokenRejected(401).message)
+      val expected = listOf(
+        ShipmentSyncEntry("TRK-1", ShipmentSyncOutcome.CREATED, fulfillmentId = 5001L),
+        ShipmentSyncEntry("TRK-2", ShipmentSyncOutcome.FAILED),
+      )
+      assert(body.shipments == expected)
+    }
+  }
+
+  /** A throttled run keeps the throttle's wait, in the body and in `Retry-After`, next to its report. */
+  @Test
+  fun `sync-shipments answers 429 with the shop's refill time and the report when Shopify throttles a create`() {
+    val empty = ShopifyRateBudget(maximumAvailable = 1000.0, currentlyAvailable = 0.0, restoreRate = 50.0)
+    val fakeShopify = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Success(minimalOrder())
+      createFulfillmentResult = Failure(ShopifyError.GraphqlError("Throttled", codes = listOf("THROTTLED"), rateBudget = empty))
+    }
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(validSyncRequest())
+      }
+      assert(r.status == HttpStatusCode.TooManyRequests)
+      assert(r.headers[HttpHeaders.RetryAfter] == "10")
+      val body = r.body<SyncShipmentsWithFulfillmentsFailure>()
+      assert(body.retryAfterSeconds == 10)
+      assert(body.error == "Shopify throttled this shop")
+      assert(body.shipments == listOf(ShipmentSyncEntry("1Z999", ShipmentSyncOutcome.FAILED)))
+    }
+  }
+
+  // ---------- retired tracking numbers ----------
+
+  /** The split: F1 carries T1 with the content before it, B keeps T1 with less, C gets T2. */
+  @Test
+  fun `sync-shipments cancels the fulfillment of a split's reused number and reports the cancel and both creates`() {
+    val fakeShopify = splitShop()
+    withDssApp(testDependencies(shopify = fakeShopify), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(splitRequest())
+      }
+      assert(r.status == HttpStatusCode.OK)
+      val body = r.body<SyncShipmentsWithFulfillmentsResponse>()
+      assert(body.cancellations == listOf(FulfillmentCancellationEntry("T1", 8001L, FulfillmentCancellationOutcome.CANCELED)))
+      assert(body.shipments == listOf(
+        ShipmentSyncEntry("T1", ShipmentSyncOutcome.CREATED, fulfillmentId = 6001L),
+        ShipmentSyncEntry("T2", ShipmentSyncOutcome.CREATED, fulfillmentId = 6002L),
+      ))
+      assert(fakeShopify.cancelFulfillmentCalls == listOf("gid://shopify/Fulfillment/8001"))
+    }
+  }
+
+  /** A monolith one deploy behind sends no key; one that has nothing retired may send `null`. Both mean an empty list. */
+  @Test
+  fun `sync-shipments reads an absent or null retired_tracking_numbers as none`() {
+    listOf("", ""","retired_tracking_numbers":null""").forEach { retiredKey ->
+      val fakeShopify = FakeShopifyGraphqlService().apply {
+        orderForDssResult = Success(orderWithFulfillments(fulfillment(8001L, listOf("TRK-OLD"))))
+        createFulfillmentResult = Success(ShopifyFulfillmentId(5005L))
+      }
+      withDssApp(testDependencies(shopify = fakeShopify), authenticateAsMonolith = true) { client ->
+        val r = client.post(Paths.syncShipmentsWithFulfillments) {
+          contentType(ContentType.Application.Json)
+          setBody(
+            """{"shopify_subdomain":"acme","shopify_order_id":1001$retiredKey,""" +
+              """"shipments":[{"tracking_number":"1Z999","line_items":[{"product_variant_id":101,"quantity":1}]}]}""",
+          )
+        }
+        assert(r.status == HttpStatusCode.OK) { "retired key: '$retiredKey'" }
+        assert(r.body<SyncShipmentsWithFulfillmentsResponse>().cancellations == emptyList<FulfillmentCancellationEntry>())
+        assert(fakeShopify.cancelFulfillmentCalls.isEmpty())
+      }
+    }
+  }
+
+  @Test
+  fun `sync-shipments returns 400 for a blank retired tracking number before asking Shopify`() {
+    val fakeShopify = FakeShopifyGraphqlService().apply { orderForDssResult = Success(minimalOrder()) }
+    withDssApp(testDependencies(shopify = fakeShopify), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(validSyncRequest().copy(retiredTrackingNumbers = listOf("T1", "  ")))
+      }
+      assert(r.status == HttpStatusCode.BadRequest)
+      assert(r.errorMessage() == "retired_tracking_numbers[1] must not be blank")
+      assert(fakeShopify.orderForDssCalls.isEmpty())
+    }
+  }
+
+  /** The meaning is clear, and the monolith drops a `400` for good. */
+  @Test
+  fun `sync-shipments merges retired numbers that are equal once trimmed and cancels once`() {
+    val fakeShopify = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Success(orderWithFulfillments(fulfillment(8001L, listOf("T1"))))
+    }
+    withDssApp(testDependencies(shopify = fakeShopify), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(validSyncRequest().copy(shipments = emptyList(), retiredTrackingNumbers = listOf("T1", " T1 ")))
+      }
+      assert(r.status == HttpStatusCode.OK)
+      assert(r.body<SyncShipmentsWithFulfillmentsResponse>().cancellations?.map { it.trackingNumber } == listOf("T1"))
+      assert(fakeShopify.cancelFulfillmentCalls == listOf("gid://shopify/Fulfillment/8001"))
+    }
+  }
+
+  @Test
+  fun `sync-shipments answers 200 for a body of neither shipments nor retired numbers, and changes nothing`() {
+    val fakeShopify = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Success(orderWithFulfillments(fulfillment(8001L, listOf("T1"))))
+    }
+    withDssApp(testDependencies(shopify = fakeShopify), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(validSyncRequest().copy(shipments = emptyList(), retiredTrackingNumbers = emptyList()))
+      }
+      assert(r.status == HttpStatusCode.OK)
+      assert(r.body<SyncShipmentsWithFulfillmentsResponse>() == SyncShipmentsWithFulfillmentsResponse(emptyList(), emptyList()))
+      assert(fakeShopify.cancelFulfillmentCalls.isEmpty())
+      assert(fakeShopify.createFulfillmentCalls.isEmpty())
+    }
+  }
+
+  /**
+   * The budget starts when the request arrives, so the handler is what hands it over. Each Shopify call takes three
+   * seconds here: after the load, the content, the cancel, the reload and one create, the last create cannot start.
+   */
+  @Test
+  fun `sync-shipments answers 502 with the report when the run would outlive its budget`() {
+    val clock = MutableTimeSource()
+    val fakeShopify = splitShop().apply {
+      shipmentSyncTimeSource = clock
+      shipmentSyncCallTakes = 3.seconds
+    }
+    withDssApp(testDependencies(shopify = fakeShopify, shipmentSyncTimeSource = clock), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(splitRequest())
+      }
+      assert(r.status == HttpStatusCode.BadGateway)
+      val body = r.body<SyncShipmentsWithFulfillmentsFailure>()
+      assert(body.error == "syncing the shipments did not finish within 25s")
+      assert(body.shipments == listOf(
+        ShipmentSyncEntry("T1", ShipmentSyncOutcome.CREATED, fulfillmentId = 6001L),
+        ShipmentSyncEntry("T2", ShipmentSyncOutcome.NOT_ATTEMPTED),
+      ))
+      assert(body.cancellations == listOf(FulfillmentCancellationEntry("T1", 8001L, FulfillmentCancellationOutcome.CANCELED)))
+    }
+  }
+
+  /** The stop points the monolith retries: its log line and its dead-letter queue are fed from this body. */
+  @Test
+  fun `sync-shipments answers 502 with the cancels it sent when a cancel fails on the wire`() {
+    val f2 = fulfillment(8002L, listOf("T2"))
+    val fakeShopify = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Success(orderWithFulfillments(f2, fulfillment(8003L, listOf("T3"))))
+      cancelFulfillmentResults[f2.id] = Failure(ShopifyError.HttpError(503))
+    }
+    val request = validSyncRequest().copy(shipments = emptyList(), retiredTrackingNumbers = listOf("T2", "T3"))
+    withDssApp(testDependencies(shopify = fakeShopify), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(request)
+      }
+      assert(r.status == HttpStatusCode.BadGateway)
+      val body = r.body<SyncShipmentsWithFulfillmentsFailure>()
+      assert(body.error == "Shopify answered HTTP 503")
+      assert(body.cancellations == listOf(
+        FulfillmentCancellationEntry("T2", 8002L, FulfillmentCancellationOutcome.FAILED),
+        FulfillmentCancellationEntry("T3", 8003L, FulfillmentCancellationOutcome.NOT_ATTEMPTED),
+      ))
+      assert(body.shipments == emptyList<ShipmentSyncEntry>())
+    }
+  }
+
+  /** The budget runs from the arrival of the request, so the token lookup of a cold instance spends it too. */
+  @Test
+  fun `sync-shipments answers 502 when resolving the shop's token already spent the budget`() {
+    val clock = MutableTimeSource()
+    val fakeShopify = FakeShopifyGraphqlService().apply { orderForDssResult = Success(minimalOrder()) }
+    val slowTokenStore = InMemoryShopTokenStore(fallback = { _ ->
+      clock += 20.seconds
+      ShopLookup.Found(ShopifyAdminToken("shpat_after_a_slow_lookup"))
+    })
+    val deps = testDependencies(
+      shopify = fakeShopify,
+      shopTokens = slowTokenStore,
+      honorTokenStore = true,
+      shipmentSyncTimeSource = clock,
+    )
+    withDssApp(deps, authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(validSyncRequest())
+      }
+      assert(r.status == HttpStatusCode.BadGateway)
+      val body = r.body<SyncShipmentsWithFulfillmentsFailure>()
+      assert(body.error == "syncing the shipments did not finish within 25s")
+      assert(body.shipments == listOf(ShipmentSyncEntry("1Z999", ShipmentSyncOutcome.NOT_ATTEMPTED)))
+      assert(fakeShopify.orderForDssCalls.isEmpty())
     }
   }
 
@@ -463,6 +901,8 @@ class MonolithWebhookHandlersTest {
       }
       assert(r.status == HttpStatusCode.Unauthorized)
       assert(r.errorMessage() == DssError.ShopifyAdminTokenRejected(401).message)
+      val expected = listOf(ShipmentSyncEntry("1Z999", ShipmentSyncOutcome.NOT_ATTEMPTED))
+      assert(r.body<SyncShipmentsWithFulfillmentsFailure>().shipments == expected)
       assert(fakeShopify.createFulfillmentCalls.isEmpty())
     }
   }
@@ -639,6 +1079,33 @@ class MonolithWebhookHandlersTest {
     }
   }
 
+  /**
+   * The contract marks `sku`, `barcode`, `image_url` and `product_published_at` required as well as nullable, and the
+   * monolith decodes them without a default: a key left out arrives there as a missing field, not as a `null`, and
+   * fails the whole batch. A variant Shopify holds no barcode or image for is the ordinary case, so this is the shape
+   * the monolith reads most.
+   */
+  @Test
+  fun `products-fetch spells out the variant keys the contract requires, nulls and all`() {
+    val fakeShopify = FakeShopifyGraphqlService().apply {
+      productByIdResult = Success(
+        ShopProduct(sampleProduct(legacyResourceId = "501", variantId = "9001"), shopCurrencyCode = "EUR", rateBudget = lowBudget)
+      )
+    }
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.productsFetch) {
+        contentType(ContentType.Application.Json)
+        setBody(fetchRequest(501L))
+      }
+      assert(r.status == HttpStatusCode.OK)
+      val variant = r.body<JsonObject>().getValue("product_variants").jsonArray.single().jsonObject
+      assert(variant.getValue("barcode") == JsonNull)
+      assert(variant.getValue("image_url") == JsonNull)
+      assert(variant.getValue("sku") == JsonPrimitive("SKU-9001"))
+      assert(variant.getValue("product_published_at") == JsonPrimitive("2026-04-01T00:00:00Z"))
+    }
+  }
+
   @Test
   fun `products-fetch reports a product Shopify no longer has without failing`() {
     // The fake's default productByIdResult is a successful `null`.
@@ -774,6 +1241,9 @@ class MonolithWebhookHandlersTest {
       assert(body.retryAfterSeconds == 10)
       assert(body.error == "Shopify throttled this shop")
       assert(body.traceId != null)
+      // `code` is required as well as nullable, and this service has no code vocabulary yet: the monolith still wants
+      // the key, or its `ThrottledError` does not decode and it falls back to the `Retry-After` header.
+      assert(r.body<JsonObject>().getValue("code") == JsonNull)
     }
   }
 
@@ -856,7 +1326,7 @@ class MonolithWebhookHandlersTest {
         )
       }
       assert(r.status == HttpStatusCode.OK)
-      assert(r.body<SyncShipmentsWithFulfillmentsResponse>().newFulfillmentIds == listOf(5004L))
+      assert(r.body<SyncShipmentsWithFulfillmentsResponse>().shipments?.single()?.fulfillmentId == 5004L)
     }
   }
 
@@ -926,6 +1396,34 @@ class MonolithWebhookHandlersTest {
    * keep passing if the envelope changed shape, which is exactly the break the monolith would feel.
    */
   private suspend fun HttpResponse.errorMessage(): String = body<ApiError>().error
+
+  /** One report entry as the monolith reads it off the wire: a key the pairs leave out is absent, not `null`. */
+  private fun jsonEntry(vararg fields: Pair<String, Any>): JsonObject = JsonObject(
+    fields.associate { (key, value) ->
+      key to when (value) {
+        is Long -> JsonPrimitive(value)
+        else -> JsonPrimitive(value.toString())
+      }
+    },
+  )
+
+  /** A shop serving the split: F1 live before its cancel and canceled after it, with the units on a new fulfillment order. */
+  private fun splitShop() = FakeShopifyGraphqlService().apply {
+    val f1 = fulfillment(8001L, listOf("T1"))
+    orderForDssResultQueue += Success(orderWithTwoVariantFulfillmentOrders(firstRemaining = 0, secondRemaining = 0).copy(fulfillments = listOf(f1)))
+    orderForDssResultQueue += Success(
+      orderWithTwoVariantFulfillmentOrders(firstRemaining = 2, firstFoId = 303L, secondRemaining = 1, secondFoId = 304L)
+        .copy(fulfillments = listOf(fulfillment(8001L, listOf("T1"), status = FulfillmentStatus.CANCELLED))),
+    )
+    fulfillmentContentResults[f1.id] = Success(PackageContent.Known(mapOf(101L to 2, 202L to 1)))
+    createFulfillmentResultQueue += Success(ShopifyFulfillmentId(6001L))
+    createFulfillmentResultQueue += Success(ShopifyFulfillmentId(6002L))
+  }
+
+  private fun splitRequest() = validSyncRequest().copy(
+    shipments = listOf(shipment(tracking = "T1", variantId = 101L, quantity = 2), shipment(tracking = "T2", variantId = 202L, quantity = 1)),
+    retiredTrackingNumbers = listOf("T1"),
+  )
 
   private fun validSyncRequest(): SyncShipmentsWithFulfillmentsRequest =
     SyncShipmentsWithFulfillmentsRequest(

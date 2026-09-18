@@ -1,12 +1,13 @@
 package dropnext.dss.lib.ktor
 
 import dropnext.dss.contract.ApiError
+import dropnext.dss.contract.SyncShipmentsWithFulfillmentsFailure
+import dropnext.dss.contract.SyncShipmentsWithFulfillmentsResponse
 import dropnext.dss.contract.ThrottledError
 import dropnext.dss.lib.slf4j.currentTraceId
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
-import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
 import kotlin.math.ceil
 import kotlin.time.Duration
@@ -19,8 +20,9 @@ import kotlin.time.DurationUnit
  * status and body — no scattered `respond(BadRequest, …)` calls.
  *
  * JSON endpoints (the OpenAPI DSS contract, served by `MonolithWebhookHandlers`) use [respondError],
- * which emits an [ApiError]. The HTML OAuth flow uses [respondTextError] so error pages stay
- * plain text. The request's trace id travels in the `X-Trace-Id` response header on both.
+ * which emits an [ApiError] (a stopped shipments sync adds its report). The HTML OAuth flow uses
+ * [respondTextError] so error pages stay plain text. The request's trace id travels in the
+ * `X-Trace-Id` response header on both.
  */
 sealed interface DssError {
   val message: String
@@ -99,6 +101,14 @@ sealed interface DssError {
   data object Unsupported : DssError {
     override val message: String = "internal error"
   }
+
+  /**
+   * A shipments sync that [cause] stopped part-way. Answered with [cause]'s status and message, and with [report] beside
+   * them, because the run may have created fulfillments before it stopped and the caller is owed which.
+   */
+  data class ShipmentSyncStopped(val cause: DssError, val report: SyncShipmentsWithFulfillmentsResponse) : DssError {
+    override val message: String get() = cause.message
+  }
 }
 
 fun DssError.toHttpStatus(): HttpStatusCode = when (this) {
@@ -127,26 +137,54 @@ fun DssError.toHttpStatus(): HttpStatusCode = when (this) {
   is DssError.Internal,
   is DssError.Unsupported,
     -> HttpStatusCode.InternalServerError
+
+  is DssError.ShipmentSyncStopped -> cause.toHttpStatus()
 }
 
 /**
  * JSON-error responder for the OpenAPI DSS contract: the monolith's [ApiError] shape, so a client
  * of either service reads one error body. The trace id is ours, from the MDC, so the monolith can
  * quote it back when it logs a refused call; there is no error code vocabulary on this side yet.
+ * A stopped shipments sync answers the same fields plus its report.
+ *
+ * It goes out through [respondContract], like every other contract body: [ThrottledError] marks `code` and `trace_id`
+ * required, and the `ContentNegotiation` config would leave a `null` one out for the monolith to trip over.
  */
 suspend fun ApplicationCall.respondError(e: DssError) {
-  if (e is DssError.Throttled) {
-    // Whole seconds, rounded up: waiting a fraction less than the refill would be throttled again.
-    val seconds = e.retryAfter.inWholeSecondsRoundedUp().coerceAtLeast(1)
-    response.headers.append(HttpHeaders.RetryAfter, seconds.toString())
-    respond(
+  val retryAfterSeconds = e.throttling()?.retryAfterSeconds()
+  retryAfterSeconds?.let { response.headers.append(HttpHeaders.RetryAfter, it.toString()) }
+  when (e) {
+    is DssError.Throttled -> respondContract(
+      ThrottledError.serializer(),
+      ThrottledError(error = e.message, code = null, traceId = currentTraceId(), retryAfterSeconds = e.retryAfterSeconds()),
       e.toHttpStatus(),
-      ThrottledError(error = e.message, code = null, traceId = currentTraceId(), retryAfterSeconds = seconds),
     )
-    return
+
+    is DssError.ShipmentSyncStopped -> respondContract(
+      SyncShipmentsWithFulfillmentsFailure.serializer(),
+      SyncShipmentsWithFulfillmentsFailure(
+        error = e.message,
+        code = null,
+        traceId = currentTraceId(),
+        retryAfterSeconds = retryAfterSeconds,
+        shipments = e.report.shipments,
+        cancellations = e.report.cancellations,
+      ),
+      e.toHttpStatus(),
+    )
+
+    else -> respondContract(ApiError.serializer(), ApiError(error = e.message, traceId = currentTraceId()), e.toHttpStatus())
   }
-  respond(e.toHttpStatus(), ApiError(error = e.message, traceId = currentTraceId()))
 }
+
+private fun DssError.throttling(): DssError.Throttled? = when (this) {
+  is DssError.Throttled -> this
+  is DssError.ShipmentSyncStopped -> cause.throttling()
+  else -> null
+}
+
+/** Whole seconds, rounded up: waiting a fraction less than the refill would be throttled again. */
+private fun DssError.Throttled.retryAfterSeconds(): Int = retryAfter.inWholeSecondsRoundedUp().coerceAtLeast(1)
 
 /** Plain-text error responder, used by OAuth/install routes that render HTML on success. */
 suspend fun ApplicationCall.respondTextError(e: DssError) {

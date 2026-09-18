@@ -29,8 +29,8 @@ the DSS. Between those two deploys the served document and the checked-in copy d
 purpose. A strict check turns that window into a DSS outage, and the window is every monolith deploy.
 
 **It would forbid the additive changes the repos deliberately support.** The shipment-sync spec
-(`../shipment-sync-by-tracking-number/020-cancel-replaced-fulfillments.md`) adds a request field that is
-optional and nullable precisely so either side can deploy first, and it leans on `ignoreUnknownKeys` in the other
+(`../shipment-sync-by-tracking-number/050-reconcile-every-live-shipment.md`) adds a request field that is
+nullable precisely so either side can deploy first, and it leans on `ignoreUnknownKeys` in the other
 direction. A byte comparison rejects exactly the change that was designed to be safe.
 
 **It couples this service's startup to the monolith's availability.** A monolith that is down would stop every

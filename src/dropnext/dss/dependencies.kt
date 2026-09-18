@@ -27,6 +27,7 @@ import dropnext.dss.lib.shopify.oauth.ShopifyOAuthService
 import dropnext.dss.lib.shopify.token.InMemoryShopTokenStore
 import dropnext.dss.lib.shopify.token.ShopTokenStore
 import dropnext.dss.lib.shopify.webhook.ShopifyHmacVerifierService
+import dropnext.dss.workflow.SHIPMENT_SYNC_BUDGET
 import dropnext.dss.workflow.resolveShopTokenFromMonolith
 import io.github.oshai.kotlinlogging.KotlinLogging
 import io.ktor.client.HttpClient
@@ -142,6 +143,9 @@ fun dssDependencies(
   webhookTimeSource: TimeSource = TimeSource.Monotonic,
   /** How the monolith-facing reads wait for a shop's Shopify bucket; a test hands in one that records instead. */
   shopifyReadPause: suspend (Duration) -> Unit = { delay(it) },
+  /** What a shipments sync measures its budget on; a test hands in one it moves on by hand. */
+  shipmentSyncTimeSource: TimeSource = TimeSource.Monotonic,
+  shipmentSyncBudget: Duration = SHIPMENT_SYNC_BUDGET,
   readiness: Readiness = Readiness(),
   /** The requests the warm-up sends the service itself: the shared client, to the port the server binds. */
   warmUpLoopback: WarmUpLoopbackService = HttpWarmUpLoopbackService(
@@ -180,6 +184,8 @@ fun dssDependencies(
     monolithService,
     shopTokens,
     shopifyReadPause,
+    shipmentSyncTimeSource,
+    shipmentSyncBudget,
   ),
   readiness = readiness,
   // The workflow keeps its own deadline and reports the steps it had to cut short or skip; the module's bound, a

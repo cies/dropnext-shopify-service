@@ -17,12 +17,16 @@ import dropnext.dss.domain.ShopifyQueryCost
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.domain.ShopifyVariantId
 import dropnext.dss.domain.WebhookSubscriptionStatus
+import dropnext.dss.domain.fulfillment.PackageContent
+import dropnext.dss.domain.fulfillment.PackageLine
+import dropnext.dss.domain.fulfillment.packageContentOf
 import dropnext.dss.lib.shopify.legacyIdFromGid
 import dropnext.graphql.generated.CurrentAppInstallationAccessScopes
 import dropnext.graphql.generated.DeleteWebhookSubscription
 import dropnext.graphql.generated.FulfillmentCancelMutation
 import dropnext.graphql.generated.FulfillmentCreateWithLineItems
 import dropnext.graphql.generated.FulfillmentEventCreateMutation
+import dropnext.graphql.generated.GetFulfillmentContent
 import dropnext.graphql.generated.GetOrderForDss
 import dropnext.graphql.generated.GetProductById
 import dropnext.graphql.generated.GetProductVariantIdsPage
@@ -74,6 +78,7 @@ private const val PRODUCT_MEDIA_PAGE_SIZE = 20
 private const val ORDER_LINE_ITEMS_PAGE_SIZE = 100
 private const val ORDER_FULFILLMENT_ORDERS_PAGE_SIZE = 50
 private const val ORDER_FULFILLMENTS_PAGE_SIZE = 250
+private const val FULFILLMENT_LINE_ITEMS_PAGE_SIZE = 100
 
 /**
  * Production [ShopifyGraphqlService] — speaks real Graphql to a shop's Admin API endpoint over
@@ -171,15 +176,45 @@ class HttpShopifyGraphqlService(
       Success(order)
     }
 
+  override suspend fun fulfillmentContent(fulfillmentGid: String): ShopifyResult<PackageContent> {
+    val variables = GetFulfillmentContent.Variables(
+      id = fulfillmentGid,
+      fulfillmentLineItemsFirst = FULFILLMENT_LINE_ITEMS_PAGE_SIZE,
+    )
+    return execute(GetFulfillmentContent(variables)).flatMap { data ->
+      val fulfillmentId = legacyIdFromGid(fulfillmentGid) ?: fulfillmentGid
+      val lines = data.fulfillment?.fulfillmentLineItems
+        ?: return@flatMap Failure(ShopifyError.NotFound("fulfillment $fulfillmentId not found"))
+      if (lines.pageInfo.hasNextPage) {
+        val truncated = ShopifyError.Truncated("fulfillment.fulfillmentLineItems", FULFILLMENT_LINE_ITEMS_PAGE_SIZE)
+        return@flatMap Failure(truncated)
+      }
+      val packageLines = lines.nodes.map {
+        PackageLine(it.lineItem.variant?.legacyResourceId?.toLongOrNull(), it.quantity)
+      }
+      val content = packageContentOf(packageLines)
+      // Unknown content matches no shipment, so the fulfillment under a retired number is replaced whenever its
+      // shipment fits: worth a line, since the cause is a deleted variant rather than anything the sync did.
+      if (content == PackageContent.Unknown) {
+        log.warn {
+          "Fulfillment content unknown fulfillmentId=$fulfillmentId reason=line_without_variant_or_quantity"
+        }
+      }
+      Success(content)
+    }
+  }
+
   override suspend fun cancelFulfillment(fulfillmentGid: String): ShopifyResult<Unit> =
     execute(FulfillmentCancelMutation(FulfillmentCancelMutation.Variables(fulfillmentGid))).flatMap { data ->
       val payload = data.fulfillmentCancel
+        ?: return@flatMap Failure(ShopifyError.GraphqlError("fulfillment cancel payload missing in response"))
       // The state decides, not the wording: a refusal that mentions "already" can be about a fulfillment that was
       // already delivered, and reading that as a cancel would report a fulfillment gone that Shopify still shows.
-      if (payload?.fulfillment?.status == FulfillmentStatus.CANCELLED) return@flatMap Success(Unit)
-      val userErrors = payload?.userErrors.orEmpty().map { it.message }
-      if (userErrors.isNotEmpty()) return@flatMap Failure(ShopifyError.UserError(userErrors))
-      Failure(ShopifyError.GraphqlError("fulfillment not cancelled in response"))
+      if (payload.fulfillment?.status == FulfillmentStatus.CANCELLED) return@flatMap Success(Unit)
+      // A payload that does not cancel is a refusal even without its reasons. As an upstream failure it would stop
+      // every run of the order, and end in the monolith's dead-letter queue.
+      val userErrors = payload.userErrors.map { it.message }.ifEmpty { listOf("Shopify did not cancel the fulfillment") }
+      Failure(ShopifyError.UserError(userErrors))
     }
 
   override suspend fun createFulfillment(

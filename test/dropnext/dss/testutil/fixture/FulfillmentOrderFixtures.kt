@@ -35,7 +35,7 @@ internal fun diagramCrossFoOrder(): Order {
         pageInfo = COMPLETE_PAGE,
         edges = listOf(FulfillmentOrderEdge(node = fo1), FulfillmentOrderEdge(node = fo2)),
       ),
-  )
+  ).withLineItemsOfItsFulfillmentOrders()
 }
 
 internal fun diagramCrossFoShipment(): Shipment =
@@ -82,6 +82,7 @@ internal fun foLineItemConnection(
       ),
   )
 
+/** An order whose fulfillment orders are [fos], and whose line items are the variants they carry. */
 internal fun orderWithFulfillmentOrders(vararg fos: FulfillmentOrder): Order =
   minimalOrder().copy(
     fulfillmentOrders =
@@ -89,4 +90,4 @@ internal fun orderWithFulfillmentOrders(vararg fos: FulfillmentOrder): Order =
         pageInfo = COMPLETE_PAGE,
         edges = fos.map { FulfillmentOrderEdge(node = it) },
       ),
-  )
+  ).withLineItemsOfItsFulfillmentOrders()

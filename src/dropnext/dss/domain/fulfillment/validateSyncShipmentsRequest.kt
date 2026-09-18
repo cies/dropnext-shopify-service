@@ -11,13 +11,14 @@ import dropnext.dss.domain.validateShopifyOrderId
 fun validateSyncShipmentsRequest(request: SyncShipmentsWithFulfillmentsRequest): RequestValidation {
   val errors = mutableListOf<String>()
   errors += validateShopifyOrderId(request.shopifyOrderId)
-  if (request.shipments.isEmpty()) {
-    errors += "at least one shipment is required"
-  } else {
-    request.shipments.forEachIndexed { index, shipment ->
-      errors += validateShipment(shipment, index)
-    }
-    errors += validateDuplicateTrackingNumbers(request.shipments)
+  // An empty list is valid: an order whose shipments are all gone is still synced, and answered with an empty report.
+  request.shipments.forEachIndexed { index, shipment ->
+    errors += validateShipment(shipment, index)
+  }
+  errors += validateDuplicateTrackingNumbers(request.shipments)
+  // A retired number is used trimmed, and two that are equal then are one: a request whose meaning is clear is not refused.
+  request.retiredTrackingNumbers.orEmpty().forEachIndexed { index, trackingNumber ->
+    if (trackingNumber.isBlank()) errors += "retired_tracking_numbers[$index] must not be blank"
   }
   return errors.toRequestValidation()
 }

@@ -195,7 +195,30 @@ internal fun orderWithTwoVariantFulfillmentOrders(
         pageInfo = COMPLETE_PAGE,
         edges = listOf(FulfillmentOrderEdge(node = firstFo), FulfillmentOrderEdge(node = secondFo)),
       ),
-  )
+  ).withLineItemsOfItsFulfillmentOrders()
+}
+
+/**
+ * [this] with one line item per variant its fulfillment orders carry, in first-seen order: every fulfillment-order line is
+ * a line of the order, and a shipment line whose variant the order does not have is skipped as not on the order.
+ */
+internal fun Order.withLineItemsOfItsFulfillmentOrders(): Order {
+  val variants = fulfillmentOrders.edges
+    .flatMap { it.node.lineItems.edges }
+    .mapNotNull { it.node.variant }
+    .distinctBy { it.legacyResourceId }
+  val lineItems = variants.mapIndexed { index, variant ->
+    LineItem(
+      id = "gid://shopify/LineItem/${201 + index}",
+      quantity = 1,
+      name = "Item ${variant.legacyResourceId}",
+      title = "Item ${variant.legacyResourceId}",
+      originalUnitPriceSet = MoneyBag2(shopMoney = MoneyV22(amount = "19.99")),
+      variant = variant,
+      product = Product(legacyResourceId = "501"),
+    )
+  }
+  return copy(lineItems = LineItemConnection(pageInfo = COMPLETE_PAGE, edges = lineItems.map { LineItemEdge(node = it) }))
 }
 
 /** [minimalOrder] as `orders/create` can find it: Shopify routes an order into fulfillment orders after creating it. */
@@ -217,9 +240,16 @@ internal fun fulfillment(
   id: Long,
   trackingNumbers: List<String> = emptyList(),
   status: FulfillmentStatus = FulfillmentStatus.SUCCESS,
+): Fulfillment = fulfillmentWithGid("gid://shopify/Fulfillment/$id", trackingNumbers, status)
+
+/** For the one case the numeric id matters: a gid that carries none cannot be named in a mutation. */
+internal fun fulfillmentWithGid(
+  gid: String,
+  trackingNumbers: List<String> = emptyList(),
+  status: FulfillmentStatus = FulfillmentStatus.SUCCESS,
 ): Fulfillment =
   Fulfillment(
-    id = "gid://shopify/Fulfillment/$id",
+    id = gid,
     status = status,
     trackingInfo = trackingNumbers.map { FulfillmentTrackingInfo(number = it) },
   )

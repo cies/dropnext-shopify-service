@@ -16,10 +16,11 @@ class ValidateSyncShipmentsRequestTest {
     assert(result == RequestValidation.Invalid(listOf("invalid shopify_order_id: must be positive")))
   }
 
+  /** An order whose shipments are all gone is still synced; the answer is an empty report, not a refusal. */
   @Test
-  fun `rejects empty shipments list`() {
+  fun `accepts an empty shipments list`() {
     val result = validateSyncShipmentsRequest(request(shipments = emptyList()))
-    assert(result == RequestValidation.Invalid(listOf("at least one shipment is required")))
+    assert(result == RequestValidation.Valid)
   }
 
   /** The index is what tells the monolith which shipment of its payload to fix. */

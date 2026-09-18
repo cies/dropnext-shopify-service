@@ -6,35 +6,33 @@ import dropnext.graphql.generated.getorderfordss.Fulfillment
 import dropnext.graphql.generated.getorderfordss.Order
 import dropnext.graphql.generated.inputs.FulfillmentOrderLineItemInput
 
+
+/** Why a shipment is left out of Shopify. Neither is an error: a supplier may ship more than was ordered. */
 enum class SkipReason {
-  NO_OPEN_FO,
-  ZERO_REMAINING,
+  /** A line's variant is not on the order: the monolith named a variant this order does not have. */
+  NOT_ON_ORDER,
+
+  /** Every variant is on the order, but at least one line asks for more than its open lines have left. */
+  NO_ROOM,
 }
 
-data class SkippedShipmentLine(
+/** A shipment line that could not be filed: what it asked for and what the open lines had left for it. */
+data class ShortLine(
   val productVariantId: Long,
-  val quantity: Int,
-  val reason: SkipReason,
-  val trackingNumber: String,
+  val asked: Int,
+  val available: Int,
 )
 
-/** Result of matching a monolith [Shipment] to open Shopify fulfillment order line items. */
+/** How one shipment of a payload fares against the order: filed whole, already there, or left out whole. */
 sealed interface ShipmentMatchResult {
   /** [groups] is keyed by the fulfillment order's gid, in the order the fulfillment orders were first matched. */
-  data class Ok(
-    val groups: Map<String, List<FulfillmentOrderLineItemInput>>,
-    val skipped: List<SkippedShipmentLine>,
-    /** The live fulfillments already carrying the shipment's tracking number; when there are any, nothing was matched. */
-    val alreadyFulfilledBy: List<Fulfillment> = emptyList(),
-  ) : ShipmentMatchResult
+  data class Matched(val groups: Map<String, List<FulfillmentOrderLineItemInput>>) : ShipmentMatchResult
 
-  data class UserError(val messages: List<String>) : ShipmentMatchResult
-}
+  /** The live fulfillments already carrying the shipment's tracking number. */
+  data class AlreadyFulfilled(val fulfillments: List<Fulfillment>) : ShipmentMatchResult
 
-sealed interface DryRunResult {
-  data class Ok(val perShipment: List<ShipmentMatchResult.Ok>) : DryRunResult
-
-  data class UserError(val messages: List<String>) : DryRunResult
+  /** A fulfillment is a whole package, so one line that does not fit keeps every line of the shipment out. */
+  data class Skipped(val reason: SkipReason, val shortLines: List<ShortLine>) : ShipmentMatchResult
 }
 
 /** Aggregates duplicate [ShipmentLineItem.productVariantId] rows within a shipment (sum quantities). */
@@ -48,83 +46,84 @@ fun normalizeShipmentLineItems(shipment: Shipment): List<ShipmentLineItem> =
       )
     }
 
-/**
- * Matches all shipments against one plan: each shipment is matched against what the earlier ones already
- * claimed, so cross-shipment over-allocation is caught before any Shopify mutation. A shipment whose tracking number
- * is already on a live fulfillment is not matched at all: the monolith re-sends whole payloads, and a re-sent
- * package must neither be created twice nor claim units a later shipment of the payload needs.
- */
-fun dryRunAllShipments(currentShopifyOrder: Order, shipments: List<Shipment>): DryRunResult {
-  val lines = openFulfillmentLines(currentShopifyOrder)
-  val perShipment = mutableListOf<ShipmentMatchResult.Ok>()
+/** The variants of the order's line items, which is what "on the order" means; an unreadable variant id is left out. */
+fun variantIdsOnOrder(order: Order): Set<Long> =
+  order.lineItems.edges
+    .mapNotNull { it.node.variant?.legacyResourceId?.toLongOrNull() }
+    .toSet()
 
-  shipments.forEach { shipment ->
+/**
+ * Matches all shipments against one plan, in the order given: each shipment is matched against what the earlier ones
+ * already claimed, and a skipped shipment claims nothing. A shipment whose tracking number is already on a live
+ * fulfillment is not matched at all: the monolith re-sends whole payloads, and a re-sent package must neither be
+ * created twice nor claim units a later shipment of the payload needs.
+ *
+ * A fulfillment in [canceledFulfillmentIds] was canceled by this run and counts as canceled, even if
+ * [currentShopifyOrder] was loaded too soon to show it.
+ */
+fun dryRunAllShipments(
+  currentShopifyOrder: Order,
+  shipments: List<Shipment>,
+  canceledFulfillmentIds: Set<String> = emptySet(),
+): List<ShipmentMatchResult> {
+  val lines = openFulfillmentLines(currentShopifyOrder)
+  val variantsOnOrder = variantIdsOnOrder(currentShopifyOrder)
+  val planned = mutableListOf<FulfillmentOrderLineItemInput>()
+  return shipments.map { shipment ->
     val alreadyFulfilledBy = liveFulfillmentsWithTrackingNumber(currentShopifyOrder, shipment.trackingNumber)
-    if (alreadyFulfilledBy.isNotEmpty()) {
-      perShipment += ShipmentMatchResult.Ok(groups = emptyMap(), skipped = emptyList(), alreadyFulfilledBy = alreadyFulfilledBy)
-      return@forEach
-    }
-    val planned = perShipment.flatMap { it.groups.values.flatten() }
-    when (val result = matchShipmentToFulfillmentOrders(shipment, lines, planned)) {
-      is ShipmentMatchResult.Ok -> perShipment += result
-      is ShipmentMatchResult.UserError -> return DryRunResult.UserError(result.messages)
-    }
+      .filterNot { it.id in canceledFulfillmentIds }
+    if (alreadyFulfilledBy.isNotEmpty()) return@map ShipmentMatchResult.AlreadyFulfilled(alreadyFulfilledBy)
+
+    val result = matchShipmentToFulfillmentOrders(shipment, lines, variantsOnOrder, planned.toList())
+    if (result is ShipmentMatchResult.Matched) planned += result.groups.values.flatten()
+    result
   }
-  return DryRunResult.Ok(perShipment)
 }
 
 /**
- * Maps shipment line items to open fulfillment orders. Unmatched variants are skipped (partial match).
+ * Files every line of [shipment] on the open fulfillment-order lines, honoring [alreadyPlanned], or none of them.
  *
- * Returns [ShipmentMatchResult.UserError] when the requested quantity exceeds what is available once
- * [alreadyPlanned] is honored.
+ * A non-positive quantity or a shipment without lines never gets here: the request validators refuse both, so either
+ * is a bug and throws.
  */
 fun matchShipmentToFulfillmentOrders(
   shipment: Shipment,
   lines: Map<Long, List<OpenFulfillmentLine>>,
+  variantsOnOrder: Set<Long>,
   alreadyPlanned: List<FulfillmentOrderLineItemInput>,
 ): ShipmentMatchResult {
+  val shipmentLines = normalizeShipmentLineItems(shipment)
+  require(shipmentLines.isNotEmpty()) { "shipment ${shipment.trackingNumber} has no lines" }
+
   val groups = LinkedHashMap<String, MutableList<FulfillmentOrderLineItemInput>>()
-  val skipped = mutableListOf<SkippedShipmentLine>()
-  var planned = alreadyPlanned
+  val shortLines = mutableListOf<ShortLine>()
+  shipmentLines.forEach { shipmentLine ->
+    require(shipmentLine.quantity > 0) { "variant ${shipmentLine.productVariantId} quantity must be positive" }
 
-  normalizeShipmentLineItems(shipment).forEach { shipmentLineItem ->
-    if (shipmentLineItem.quantity <= 0) {
-      return ShipmentMatchResult.UserError(
-        listOf("variant ${shipmentLineItem.productVariantId} quantity must be positive"),
-      )
-    }
-
-    val candidates = lines[shipmentLineItem.productVariantId].orEmpty()
-    when (val lineResult = matchShipmentLineItem(shipmentLineItem, candidates, planned)) {
-      is LineMatchResult.Matched -> lineResult.allocations.forEach { allocation ->
+    val filing =
+      if (shipmentLine.productVariantId !in variantsOnOrder) LineFiling.Short(available = 0)
+      else fileLine(shipmentLine, lines[shipmentLine.productVariantId].orEmpty(), alreadyPlanned)
+    when (filing) {
+      is LineFiling.Filed -> filing.allocations.forEach { allocation ->
         groups.getOrPut(allocation.fulfillmentOrderId) { mutableListOf() } += allocation.input
-        planned = planned + allocation.input
       }
 
-      is LineMatchResult.Skip ->
-        skipped += SkippedShipmentLine(
-          productVariantId = shipmentLineItem.productVariantId,
-          quantity = shipmentLineItem.quantity,
-          reason = lineResult.reason,
-          trackingNumber = shipment.trackingNumber,
-        )
-
-      is LineMatchResult.UserError ->
-        return ShipmentMatchResult.UserError(lineResult.messages)
+      is LineFiling.Short ->
+        shortLines += ShortLine(shipmentLine.productVariantId, shipmentLine.quantity, filing.available)
     }
   }
 
-  return ShipmentMatchResult.Ok(groups, skipped)
+  if (shortLines.isEmpty()) return ShipmentMatchResult.Matched(groups)
+  val anyVariantOffTheOrder = shortLines.any { it.productVariantId !in variantsOnOrder }
+  val reason = if (anyVariantOffTheOrder) SkipReason.NOT_ON_ORDER else SkipReason.NO_ROOM
+  return ShipmentMatchResult.Skipped(reason, shortLines)
 }
 
-private sealed interface LineMatchResult {
+private sealed interface LineFiling {
   /** In the order the lines were taken from: the one with the most available first. */
-  data class Matched(val allocations: List<LineAllocation>) : LineMatchResult
+  data class Filed(val allocations: List<LineAllocation>) : LineFiling
 
-  data class Skip(val reason: SkipReason) : LineMatchResult
-
-  data class UserError(val messages: List<String>) : LineMatchResult
+  data class Short(val available: Int) : LineFiling
 }
 
 /** Part of a shipment line filed under one open fulfillment-order line. */
@@ -137,27 +136,22 @@ private data class LineAllocation(
  * Takes the line from the candidate with the most available quantity, the first in Graphql order on a tie, and from the
  * next only what that one cannot serve. A quantity one candidate can take stays on one line; one that only several
  * can take together (a variant on two line items, or on one line routed to two locations) is spread over them.
+ *
+ * The lines of one shipment are distinct variants, so they never compete for a candidate and [planned] is only what
+ * the earlier shipments of the payload claimed.
  */
-private fun matchShipmentLineItem(
+private fun fileLine(
   shipmentLineItem: ShipmentLineItem,
   candidates: List<OpenFulfillmentLine>,
   planned: List<FulfillmentOrderLineItemInput>,
-): LineMatchResult {
-  if (candidates.isEmpty()) return LineMatchResult.Skip(SkipReason.NO_OPEN_FO)
-
-  // The skip reads Shopify's snapshot and the errors below read the plan: a line Shopify already fulfilled is
-  // a skip, a unit an earlier shipment of this same payload claimed is a payload problem to refuse.
-  if (candidates.all { it.line.remainingQuantity <= 0 }) return LineMatchResult.Skip(SkipReason.ZERO_REMAINING)
-
+): LineFiling {
   // sortedByDescending is stable, which keeps the Graphql-order tie-break.
   val available = candidates
     .map { it to it.availableGiven(planned) }
     .filter { (_, availableOnLine) -> availableOnLine > 0 }
     .sortedByDescending { (_, availableOnLine) -> availableOnLine }
   val totalAvailable = available.sumOf { (_, availableOnLine) -> availableOnLine }
-  if (shipmentLineItem.quantity > totalAvailable) {
-    return LineMatchResult.UserError(listOf(exceedsRemaining(shipmentLineItem, totalAvailable)))
-  }
+  if (shipmentLineItem.quantity > totalAvailable) return LineFiling.Short(totalAvailable)
 
   var left = shipmentLineItem.quantity
   val allocations = buildList {
@@ -168,9 +162,5 @@ private fun matchShipmentLineItem(
       left -= taken
     }
   }
-  return LineMatchResult.Matched(allocations)
+  return LineFiling.Filed(allocations)
 }
-
-private fun exceedsRemaining(shipmentLineItem: ShipmentLineItem, remaining: Int): String =
-  "variant ${shipmentLineItem.productVariantId} requested quantity ${shipmentLineItem.quantity} exceeds " +
-    "remaining $remaining on the order's open fulfillment orders"

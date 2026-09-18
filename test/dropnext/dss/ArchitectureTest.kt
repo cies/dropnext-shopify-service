@@ -107,9 +107,9 @@ class ArchitectureTest {
   }
 
   /**
-   * What `domain` may import: the standard library, the generated Shopify data types (the
-   * fulfillment matcher walks an `Order`), the contract DTOs it validates, and the rest of
-   * `domain`. It is the one layer with no framework underneath it.
+   * What `domain` may import: the standard library, the generated Shopify data types
+   * (the fulfillment matcher walks an `Order`), the contract DTOs it validates, and the rest of `domain`.
+   * It is the one layer with no framework underneath it.
    */
   private val forbiddenImportsInDomain = listOf(
     "io.ktor.",
@@ -329,11 +329,11 @@ class ArchitectureTest {
 
   /**
    * Files allowed to build a `kotlinx.serialization.json.Json` instance or use the default one. Everywhere else must
-   * reuse the shared `AppJson` (inbound Shopify) or `MonolithJson` (outbound monolith) singletons
-   * so serialization config stays consistent.
+   * reuse the shared `AppJson` (inbound Shopify), `MonolithJson` (outbound monolith) or `ContractJson` (what this
+   * service answers the monolith with) singletons so serialization config stays consistent.
    */
   private val jsonConstructionAllowList = listOf(
-    "/dropnext/dss/lib/json/", // Where `AppJson` and `MonolithJson` are built.
+    "/dropnext/dss/lib/json/", // Where `AppJson`, `MonolithJson` and `ContractJson` are built.
   )
 
   /**
@@ -395,6 +395,36 @@ class ArchitectureTest {
           )
         }
         constructs
+      }
+  }
+
+  /**
+   * Files that answer a monolith call, and so must encode with `ContractJson` through `respondContract`.
+   *
+   * `call.respond(body)` reaches for the `ContentNegotiation` config, `AppJson`, which drops a `null`. The contract
+   * marks fields such as `barcode` and `ThrottledError.code` required *and* nullable, and the generated DTOs on the
+   * monolith's side have no default for those, so a dropped key arrives there as a missing field rather than as a
+   * `null` and fails the decode. The rule is what keeps that true of the route added next.
+   */
+  private val contractRespondingFiles = listOf(
+    "/dropnext/dss/handler/MonolithWebhookHandlers.kt", // Every monolith-facing route's success answer.
+    "/dropnext/dss/lib/ktor/DssError.kt", // `respondError`: the contract's error bodies.
+  )
+
+  @Test
+  fun `the monolith's answers are encoded by respondContract`() {
+    srcScope
+      .files
+      .filter { file -> pathContainsAllowListEntry(file.path, contractRespondingFiles) }
+      .assertFalse { file ->
+        val respondsDirectly = file.imports.any { it.name == "io.ktor.server.response.respond" }
+        if (respondsDirectly) {
+          println(
+            "ERROR: File ${file.path} answers the monolith with `respond`, which encodes with AppJson and leaves a " +
+              "`null` out of a field the contract requires. Use `respondContract` from dropnext.dss.lib.ktor instead."
+          )
+        }
+        respondsDirectly
       }
   }
 
@@ -738,6 +768,7 @@ class ArchitectureTest {
     val pathAllowLists = mapOf(
       "reflectionAllowList" to reflectionAllowList,
       "jsonConstructionAllowList" to jsonConstructionAllowList,
+      "contractRespondingFiles" to contractRespondingFiles,
       "graphqlGeneratedAllowList" to graphqlGeneratedAllowList,
       "mdcAccessAllowList" to mdcAccessAllowList,
       "httpClientConstructionAllowList" to httpClientConstructionAllowList,

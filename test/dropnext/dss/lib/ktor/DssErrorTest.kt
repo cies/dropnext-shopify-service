@@ -1,5 +1,6 @@
 package dropnext.dss.lib.ktor
 
+import dropnext.dss.contract.SyncShipmentsWithFulfillmentsResponse
 import io.ktor.http.HttpStatusCode
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
@@ -8,6 +9,8 @@ import org.junit.jupiter.api.Test
 
 
 class DssErrorTest {
+
+  private val emptyReport = SyncShipmentsWithFulfillmentsResponse(shipments = emptyList(), cancellations = emptyList())
 
   @Test
   fun `invalid request maps to 400`() {
@@ -93,5 +96,15 @@ class DssErrorTest {
   fun `internal maps to 500 with a message that says nothing`() {
     assert(DssError.Internal.toHttpStatus() == HttpStatusCode.InternalServerError)
     assert(DssError.Internal.message == "internal error")
+  }
+
+  /** A stopped sync is answered as its cause would be, so the monolith's retry decision does not change. */
+  @Test
+  fun `a stopped shipments sync takes the status and message of what stopped it`() {
+    val stopped = DssError.ShipmentSyncStopped(DssError.UpstreamFailure("Shopify answered HTTP 503"), emptyReport)
+    assert(stopped.toHttpStatus() == HttpStatusCode.BadGateway)
+    assert(stopped.message == "Shopify answered HTTP 503")
+    assert(DssError.ShipmentSyncStopped(DssError.NotFound("order not found"), emptyReport).toHttpStatus() == HttpStatusCode.NotFound)
+    assert(DssError.ShipmentSyncStopped(DssError.Throttled(10.seconds), emptyReport).toHttpStatus() == HttpStatusCode.TooManyRequests)
   }
 }

@@ -9,6 +9,7 @@ import dropnext.dss.domain.ShopifyFulfillmentEventId
 import dropnext.dss.domain.ShopifyFulfillmentId
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.domain.WebhookSubscriptionStatus
+import dropnext.dss.domain.fulfillment.PackageContent
 import dropnext.dss.lib.shopify.graphql.FulfillmentLine
 import dropnext.dss.lib.shopify.graphql.FulfillmentTracking
 import dropnext.dss.lib.shopify.graphql.ShopIdentityInfo
@@ -17,6 +18,7 @@ import dropnext.dss.lib.shopify.graphql.ShopifyCatalogPage
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlService
 import dropnext.dss.lib.shopify.graphql.ShopifyResult
+import dropnext.dss.testutil.helper.MutableTimeSource
 import dropnext.graphql.generated.enums.FulfillmentEventStatus
 import dropnext.graphql.generated.enums.WebhookSubscriptionTopic
 import dropnext.graphql.generated.getorderfordss.Order
@@ -71,6 +73,9 @@ class FakeShopifyGraphqlService(
 
   var orderForDssResult: ShopifyResult<Order> = Failure(ShopifyError.NotFound("order not found"))
 
+  /** Drained one load per call, so a test can serve the order before and after a cancel; the single result is used once it runs out. */
+  val orderForDssResultQueue: MutableList<ShopifyResult<Order>> = mutableListOf()
+
   /** How long `orderForDss` takes to answer: what makes a webhook outlive its time budget. */
   var orderForDssDelay: Duration = Duration.ZERO
 
@@ -78,8 +83,22 @@ class FakeShopifyGraphqlService(
   var orderForDssGate: CompletableDeferred<Unit>? = null
   val orderForDssCalls: MutableList<String> = mutableListOf()
 
+  /** The content of each fulfillment by gid; a fulfillment not in here is not found. */
+  val fulfillmentContentResults: MutableMap<String, ShopifyResult<PackageContent>> = mutableMapOf()
+  val fulfillmentContentCalls: MutableList<String> = mutableListOf()
+
   var cancelFulfillmentResult: ShopifyResult<Unit> = Success(Unit)
+
+  /** The answer for one fulfillment gid; [cancelFulfillmentResult] answers the others. */
+  val cancelFulfillmentResults: MutableMap<String, ShopifyResult<Unit>> = mutableMapOf()
   val cancelFulfillmentCalls: MutableList<String> = mutableListOf()
+
+  /**
+   * The clock a shipments sync measures its budget on, and how long each call it makes takes on it: what makes a sync
+   * outlive its budget without a test waiting for it.
+   */
+  var shipmentSyncTimeSource: MutableTimeSource? = null
+  var shipmentSyncCallTakes: Duration = Duration.ZERO
 
   var createFulfillmentResult: ShopifyResult<ShopifyFulfillmentId> =
     Failure(ShopifyError.UserError(listOf("fulfillment missing in response")))
@@ -136,12 +155,27 @@ class FakeShopifyGraphqlService(
     orderForDssCalls.add(orderGid)
     delay(orderForDssDelay)
     orderForDssGate?.await()
-    return orderForDssResult
+    passShipmentSyncCallTime()
+    return if (orderForDssResultQueue.isNotEmpty()) orderForDssResultQueue.removeAt(0) else orderForDssResult
+  }
+
+  override suspend fun fulfillmentContent(fulfillmentGid: String): ShopifyResult<PackageContent> {
+    fulfillmentContentCalls.add(fulfillmentGid)
+    passShipmentSyncCallTime()
+    // A test that reuses a tracking number has to say what the fulfillment holds; without a stub it would silently
+    // take the "gone" path and may still pass.
+    return fulfillmentContentResults[fulfillmentGid]
+      ?: error("no fulfillmentContent stubbed for $fulfillmentGid")
   }
 
   override suspend fun cancelFulfillment(fulfillmentGid: String): ShopifyResult<Unit> {
     cancelFulfillmentCalls.add(fulfillmentGid)
-    return cancelFulfillmentResult
+    passShipmentSyncCallTime()
+    return cancelFulfillmentResults[fulfillmentGid] ?: cancelFulfillmentResult
+  }
+
+  private fun passShipmentSyncCallTime() {
+    shipmentSyncTimeSource?.plusAssign(shipmentSyncCallTakes)
   }
 
   override suspend fun createFulfillment(
@@ -150,6 +184,7 @@ class FakeShopifyGraphqlService(
     notifyCustomer: Boolean,
   ): ShopifyResult<ShopifyFulfillmentId> {
     createFulfillmentCalls.add(RecordedCreateFulfillmentCall(lines = lines, tracking = tracking, notifyCustomer = notifyCustomer))
+    passShipmentSyncCallTime()
     if (createFulfillmentResultQueue.isNotEmpty()) {
       return createFulfillmentResultQueue.removeAt(0)
     }
@@ -206,9 +241,15 @@ class FakeShopifyGraphqlService(
     productVariantIdsPageCalls.clear()
     productVariantIdsPageResultQueue.clear()
     orderForDssCalls.clear()
+    orderForDssResultQueue.clear()
     orderForDssDelay = Duration.ZERO
     orderForDssGate = null
+    fulfillmentContentResults.clear()
+    fulfillmentContentCalls.clear()
+    cancelFulfillmentResults.clear()
     cancelFulfillmentCalls.clear()
+    shipmentSyncTimeSource = null
+    shipmentSyncCallTakes = Duration.ZERO
     createFulfillmentCalls.clear()
     createFulfillmentResultQueue.clear()
     createFulfillmentEventCalls.clear()
@@ -225,7 +266,7 @@ data class RecordedCatalogPageCall(val first: Int, val after: String?)
 data class RecordedCreateFulfillmentCall(
   val lines: List<FulfillmentLine>,
   val tracking: FulfillmentTracking,
-  /** Recorded because `true` would have Shopify email the retailer's customers on our behalf. */
+  /** Recorded because it decides whether Shopify emails the retailer's customer about this package. */
   val notifyCustomer: Boolean,
 )
 

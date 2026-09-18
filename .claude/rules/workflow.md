@@ -80,7 +80,7 @@ Then verify the following:
   production, no secrets logged (tokens, `Authorization` headers, request or response bodies), failures answered
   through `DssError`.
 - **Architecture-test compliance**: no reflection, no ad-hoc `Json {}` or `HttpClient(...)` construction (use
-  `AppJson`/`MonolithJson` and `createSharedHttpClient()`), no wildcard imports, Graphql-generated types only in
+  `AppJson`/`MonolithJson`/`ContractJson` and `createSharedHttpClient()`), no wildcard imports, Graphql-generated types only in
   `lib/shopify/` and the allow-listed translation boundaries, package-layer rules respected (see `ArchitectureTest`).
 - **Naming conventions**: handler files end with `Handlers.kt`, routing files are `*Routes.kt` (each defining a
   single `Route.*Routes(...)`; `install*` is for plugins), paths in `path/`, Graphql casing (`Graphql`/`Gql`/`gql`, never

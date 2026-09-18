@@ -9,6 +9,7 @@ import dropnext.dss.domain.ShopifyFulfillmentId
 import dropnext.dss.domain.ShopifyRateBudget
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.domain.WebhookSubscriptionStatus
+import dropnext.dss.domain.fulfillment.PackageContent
 import dropnext.dss.lib.json.AppJson
 import dropnext.dss.testutil.fake.FakeFlakyServer
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlServer
@@ -29,6 +30,7 @@ import dropnext.graphql.generated.DeleteWebhookSubscription
 import dropnext.graphql.generated.FulfillmentCancelMutation
 import dropnext.graphql.generated.FulfillmentCreateWithLineItems
 import dropnext.graphql.generated.FulfillmentEventCreateMutation
+import dropnext.graphql.generated.GetFulfillmentContent
 import dropnext.graphql.generated.GetOrderForDss
 import dropnext.graphql.generated.GetProductById
 import dropnext.graphql.generated.GetWebhookSubscriptions
@@ -55,6 +57,12 @@ import dropnext.graphql.generated.fulfillmentcreatewithlineitems.UserError as Cr
 import dropnext.graphql.generated.fulfillmenteventcreatemutation.FulfillmentEvent as CreatedFulfillmentEvent
 import dropnext.graphql.generated.fulfillmenteventcreatemutation.FulfillmentEventCreatePayload
 import dropnext.graphql.generated.fulfillmenteventcreatemutation.UserError as EventUserError
+import dropnext.graphql.generated.getfulfillmentcontent.Fulfillment as ContentFulfillment
+import dropnext.graphql.generated.getfulfillmentcontent.FulfillmentLineItem as ContentLine
+import dropnext.graphql.generated.getfulfillmentcontent.FulfillmentLineItemConnection as ContentLineConnection
+import dropnext.graphql.generated.getfulfillmentcontent.LineItem as ContentLineItem
+import dropnext.graphql.generated.getfulfillmentcontent.PageInfo as ContentPageInfo
+import dropnext.graphql.generated.getfulfillmentcontent.ProductVariant as ContentVariant
 import dropnext.graphql.generated.getproductbyid.MediaImage
 import dropnext.graphql.generated.getproductbyid.Shop as GetProductByIdShop
 import dropnext.graphql.generated.getwebhooksubscriptions.WebhookSubscription as ExistingSubscription
@@ -576,15 +584,101 @@ class HttpShopifyGraphqlServiceTest {
     assert(result.failureReason() == ShopifyError.UserError(listOf("Fulfillment has already been delivered.")))
   }
 
+  /** Shopify answered and did not cancel: a refusal the run reports, not an upstream failure that stops it. */
   @Test
-  fun `cancelFulfillment without a cancelled fulfillment or a user error is a GraphqlError`() = runBlocking {
+  fun `cancelFulfillment without a cancelled fulfillment or a user error is a UserError`() = runBlocking {
     fake.stubData(
       "FulfillmentCancelMutation",
       FulfillmentCancelMutation.Result(fulfillmentCancel = FulfillmentCancelPayload(fulfillment = null, userErrors = emptyList())),
       FulfillmentCancelMutation.Result.serializer(),
     )
-    assert(shopify.cancelFulfillment("gid://shopify/Fulfillment/8000").failureReason() is ShopifyError.GraphqlError)
+    val result = shopify.cancelFulfillment("gid://shopify/Fulfillment/8000")
+    assert(result.failureReason() == ShopifyError.UserError(listOf("Shopify did not cancel the fulfillment")))
   }
+
+  @Test
+  fun `cancelFulfillment answered with the fulfillment still live is a UserError`() = runBlocking {
+    fake.stubData(
+      "FulfillmentCancelMutation",
+      FulfillmentCancelMutation.Result(
+        fulfillmentCancel = FulfillmentCancelPayload(
+          fulfillment = CancelledFulfillment(id = "gid://shopify/Fulfillment/8000", status = FulfillmentStatus.SUCCESS),
+          userErrors = emptyList(),
+        ),
+      ),
+      FulfillmentCancelMutation.Result.serializer(),
+    )
+    val result = shopify.cancelFulfillment("gid://shopify/Fulfillment/8000")
+    assert(result.failureReason() == ShopifyError.UserError(listOf("Shopify did not cancel the fulfillment")))
+  }
+
+  @Test
+  fun `fulfillmentContent sends the gid and its page size and answers the quantity per variant`() = runBlocking {
+    fake.stubData(
+      "GetFulfillmentContent",
+      GetFulfillmentContent.Result(
+        fulfillment = contentFulfillment(
+          ContentLine(quantity = 2, lineItem = ContentLineItem(variant = ContentVariant(legacyResourceId = "101"))),
+          ContentLine(quantity = 1, lineItem = ContentLineItem(variant = ContentVariant(legacyResourceId = "202"))),
+          ContentLine(quantity = 1, lineItem = ContentLineItem(variant = ContentVariant(legacyResourceId = "101"))),
+        ),
+      ),
+      GetFulfillmentContent.Result.serializer(),
+    )
+    val content = shopify.fulfillmentContent("gid://shopify/Fulfillment/8000").successValue()
+
+    assert(content == PackageContent.Known(mapOf(101L to 3, 202L to 1)))
+    val variables = fake.calls.single().variables.jsonObject
+    assert(variables["id"]?.jsonPrimitive?.content == "gid://shopify/Fulfillment/8000")
+    assert(variables["fulfillmentLineItemsFirst"]?.jsonPrimitive?.int == 100)
+  }
+
+  /** A line whose variant was deleted cannot be compared, so the fulfillment matches no shipment. */
+  @Test
+  fun `fulfillmentContent answers unknown content for a line without a variant`() = runBlocking {
+    fake.stubData(
+      "GetFulfillmentContent",
+      GetFulfillmentContent.Result(
+        fulfillment = contentFulfillment(
+          ContentLine(quantity = 2, lineItem = ContentLineItem(variant = ContentVariant(legacyResourceId = "101"))),
+          ContentLine(quantity = 1, lineItem = ContentLineItem(variant = null)),
+        ),
+      ),
+      GetFulfillmentContent.Result.serializer(),
+    )
+    assert(shopify.fulfillmentContent("gid://shopify/Fulfillment/8000") == Success(PackageContent.Unknown))
+  }
+
+  @Test
+  fun `fulfillmentContent refuses a fulfillment with more lines than one page`() = runBlocking {
+    fake.stubData(
+      "GetFulfillmentContent",
+      GetFulfillmentContent.Result(
+        fulfillment = contentFulfillment(
+          ContentLine(quantity = 2, lineItem = ContentLineItem(variant = ContentVariant(legacyResourceId = "101"))),
+          morePages = true,
+        ),
+      ),
+      GetFulfillmentContent.Result.serializer(),
+    )
+    val result = shopify.fulfillmentContent("gid://shopify/Fulfillment/8000")
+    assert(result.failureReason() == ShopifyError.Truncated("fulfillment.fulfillmentLineItems", 100))
+  }
+
+  @Test
+  fun `fulfillmentContent answers NotFound naming the legacy id when Shopify has no such fulfillment`() = runBlocking {
+    fake.stubData("GetFulfillmentContent", GetFulfillmentContent.Result(fulfillment = null), GetFulfillmentContent.Result.serializer())
+    val result = shopify.fulfillmentContent("gid://shopify/Fulfillment/8000")
+    assert(result.failureReason() == ShopifyError.NotFound("fulfillment 8000 not found"))
+  }
+
+  private fun contentFulfillment(vararg lines: ContentLine, morePages: Boolean = false) =
+    ContentFulfillment(
+      fulfillmentLineItems = ContentLineConnection(
+        pageInfo = ContentPageInfo(hasNextPage = morePages),
+        nodes = lines.toList(),
+      ),
+    )
 
   @Test
   fun `cancelFulfillment surfaces any other user error`() = runBlocking {

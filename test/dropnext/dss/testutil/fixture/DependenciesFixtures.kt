@@ -55,6 +55,7 @@ internal fun testDependencies(
   webhookTimeSource: TimeSource = TimeSource.Monotonic,
   // A read that waits for a shop's bucket would wait real seconds in a request test; the workflow tests assert the waits.
   shopifyReadPause: suspend (Duration) -> Unit = {},
+  shipmentSyncTimeSource: TimeSource = TimeSource.Monotonic,
 ): DssDependencies = dssDependencies(
   config = config,
   httpClient = httpClient,
@@ -68,4 +69,5 @@ internal fun testDependencies(
   webhookClock = webhookClock,
   webhookTimeSource = webhookTimeSource,
   shopifyReadPause = shopifyReadPause,
+  shipmentSyncTimeSource = shipmentSyncTimeSource,
 )

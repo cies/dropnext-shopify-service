@@ -2,16 +2,17 @@ package dropnext.dss.domain.fulfillment
 
 import dropnext.dss.contract.Shipment
 import dropnext.dss.contract.ShipmentLineItem
+import dropnext.dss.testutil.fixture.COMPLETE_PAGE
 import dropnext.dss.testutil.fixture.diagramCrossFoOrder
 import dropnext.dss.testutil.fixture.diagramCrossFoShipment
 import dropnext.dss.testutil.fixture.foLineItemConnection
 import dropnext.dss.testutil.fixture.fulfillment
+import dropnext.dss.testutil.fixture.minimalOrder
 import dropnext.dss.testutil.fixture.openFulfillmentOrder
 import dropnext.dss.testutil.fixture.orderWithFulfillmentOrders
 import dropnext.dss.testutil.fixture.shipment
 import dropnext.graphql.generated.enums.FulfillmentOrderStatus
 import dropnext.graphql.generated.enums.FulfillmentStatus
-import dropnext.dss.testutil.fixture.COMPLETE_PAGE
 import dropnext.graphql.generated.getorderfordss.FulfillmentOrder
 import dropnext.graphql.generated.getorderfordss.FulfillmentOrderLineItem
 import dropnext.graphql.generated.getorderfordss.FulfillmentOrderLineItemConnection
@@ -28,15 +29,11 @@ class MatchShipmentToFulfillmentOrdersTest {
   fun `matches open fulfillment order line items`() {
     val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 2))
     val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 1))
-    assert(result is ShipmentMatchResult.Ok)
-    val ok = result as ShipmentMatchResult.Ok
-    assert(ok.groups.size == 1)
-    assert(ok.groups.values.single().single().quantity == 1)
-    assert(ok.skipped.isEmpty())
+    assert(result == matched(301L to lineInput(401L, 1)))
   }
 
   @Test
-  fun `ignores closed fulfillment orders`() {
+  fun `a variant whose only fulfillment order is closed has no room`() {
     val closed = FulfillmentOrder(
       id = "gid://shopify/FulfillmentOrder/302",
       status = FulfillmentOrderStatus.CLOSED,
@@ -44,39 +41,60 @@ class MatchShipmentToFulfillmentOrdersTest {
     )
     val order = orderWithFulfillmentOrders(closed)
     val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 1))
-    assert(result is ShipmentMatchResult.Ok)
-    val ok = result as ShipmentMatchResult.Ok
-    assert(ok.groups.isEmpty())
-    assert(ok.skipped.single().reason == SkipReason.NO_OPEN_FO)
+    assert(result == ShipmentMatchResult.Skipped(SkipReason.NO_ROOM, listOf(ShortLine(101L, asked = 1, available = 0))))
   }
 
+  /** An over-shipment is normal: the shipment stays out of Shopify, whole, and nothing is refused. */
   @Test
-  fun `returns user error when quantity exceeds remainingQuantity`() {
+  fun `a line asking more than is left skips the shipment whole as no room`() {
     val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 1))
     val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 2))
-    assert(result is ShipmentMatchResult.UserError)
+    assert(result == ShipmentMatchResult.Skipped(SkipReason.NO_ROOM, listOf(ShortLine(101L, asked = 2, available = 1))))
   }
 
+  /** A fulfillment is a whole package: the line that would fit is not filed on its own. */
   @Test
-  fun `partial match skips unknown variant`() {
+  fun `a line not on the order skips the whole shipment, the fitting line included`() {
     val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 2))
-    val shipment = shipment(lines = listOf(101L to 1, 999L to 1))
-    val result = matchOneShipment(order, shipment) as ShipmentMatchResult.Ok
-    assert(result.groups.size == 1)
-    assert(result.groups.values.single().single().quantity == 1)
-    assert(result.skipped.size == 1)
-    assert(result.skipped.single().productVariantId == 999L)
-    assert(result.skipped.single().reason == SkipReason.NO_OPEN_FO)
+    val result = matchOneShipment(order, shipment(lines = listOf(101L to 1, 999L to 1)))
+    assert(result == ShipmentMatchResult.Skipped(SkipReason.NOT_ON_ORDER, listOf(ShortLine(999L, asked = 1, available = 0))))
   }
 
   @Test
-  fun `all lines skipped returns empty groups`() {
+  fun `a shipment whose only variant is not on the order is skipped as not on the order`() {
     val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 2))
     val result = matchOneShipment(order, shipment(variantId = 999L, quantity = 1))
-    assert(result is ShipmentMatchResult.Ok)
-    val ok = result as ShipmentMatchResult.Ok
-    assert(ok.groups.isEmpty())
-    assert(ok.skipped.size == 1)
+    assert((result as ShipmentMatchResult.Skipped).reason == SkipReason.NOT_ON_ORDER)
+  }
+
+  /** A variant the order does not have is a data problem; that it also lacks room elsewhere is the lesser news. */
+  @Test
+  fun `not on the order wins over no room, and every short line is named`() {
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 2))
+    val result = matchOneShipment(order, shipment(lines = listOf(101L to 3, 999L to 1)))
+    assert(
+      result == ShipmentMatchResult.Skipped(
+        SkipReason.NOT_ON_ORDER,
+        listOf(ShortLine(101L, asked = 3, available = 2), ShortLine(999L, asked = 1, available = 0)),
+      ),
+    )
+  }
+
+  /** Every fulfillment-order line belongs to a line of the order, closed ones included. */
+  @Test
+  fun `the variants on the order are those of its line items`() {
+    assert(variantIdsOnOrder(minimalOrder()) == setOf(101L))
+  }
+
+  @Test
+  fun `a line item whose variant id cannot be read puts no variant on the order`() {
+    val order = minimalOrder()
+    val unreadable = order.lineItems.edges.single().let { edge ->
+      edge.copy(node = edge.node.copy(variant = ProductVariant(legacyResourceId = "not-a-number")))
+    }
+    val withoutVariant = order.lineItems.edges.single().let { edge -> edge.copy(node = edge.node.copy(variant = null)) }
+    val lineItems = order.lineItems.copy(edges = listOf(unreadable, withoutVariant))
+    assert(variantIdsOnOrder(order.copy(lineItems = lineItems)).isEmpty())
   }
 
   @Test
@@ -88,8 +106,7 @@ class MatchShipmentToFulfillmentOrdersTest {
     )
     val order = orderWithFulfillmentOrders(fo)
     val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 1))
-    // An all-skipped result is `Ok` too, so only the planned line tells an open fulfillment order from a closed one.
-    assert(result == ShipmentMatchResult.Ok(groups = mapOf(fulfillmentOrderGid(301L) to listOf(lineInput(401L, 1))), skipped = emptyList()))
+    assert(result == matched(301L to lineInput(401L, 1)))
   }
 
   @Test
@@ -106,7 +123,7 @@ class MatchShipmentToFulfillmentOrdersTest {
     )
     val order = orderWithFulfillmentOrders(fo1, fo2)
     val shipment = shipment(tracking = "TRK", lines = listOf(101L to 2, 202L to 1))
-    val result = matchOneShipment(order, shipment) as ShipmentMatchResult.Ok
+    val result = matchOneShipment(order, shipment) as ShipmentMatchResult.Matched
     assert(result.groups.size == 2)
     assert(result.groups.entries.single { it.key.endsWith("301") }.value.single().quantity == 2)
     assert(result.groups.entries.single { it.key.endsWith("302") }.value.single().quantity == 1)
@@ -128,36 +145,26 @@ class MatchShipmentToFulfillmentOrdersTest {
     assert(normalized.size == 1)
     assert(normalized.single().quantity == 3)
 
-    val result = matchOneShipment(order, shipment) as ShipmentMatchResult.Ok
-    assert(result.groups.size == 1)
-    assert(result.groups.values.single().single().quantity == 3)
+    val result = matchOneShipment(order, shipment)
+    assert(result == matched(301L to lineInput(401L, 3)))
   }
 
   @Test
-  fun `zero remainingQuantity skips as ZERO_REMAINING`() {
+  fun `a variant with nothing remaining has no room`() {
     val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 0))
     val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 1))
-    val ok = result as ShipmentMatchResult.Ok
-    assert(ok.groups.isEmpty())
-    assert(ok.skipped.single().reason == SkipReason.ZERO_REMAINING)
+    assert(result == ShipmentMatchResult.Skipped(SkipReason.NO_ROOM, listOf(ShortLine(101L, asked = 1, available = 0))))
   }
 
   @Test
-  fun `cross-shipment allocation within limits succeeds dry-run`() {
+  fun `cross-shipment allocation within limits matches every shipment`() {
     val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 3))
     val shipments = listOf(
       shipment(tracking = "TRK-1", variantId = 101L, quantity = 2),
       shipment(tracking = "TRK-2", variantId = 101L, quantity = 1),
     )
     val result = dryRunAllShipments(order, shipments)
-    assert(
-      result == DryRunResult.Ok(
-        listOf(
-          ShipmentMatchResult.Ok(groups = mapOf(fulfillmentOrderGid(301L) to listOf(lineInput(401L, 2))), skipped = emptyList()),
-          ShipmentMatchResult.Ok(groups = mapOf(fulfillmentOrderGid(301L) to listOf(lineInput(401L, 1))), skipped = emptyList()),
-        ),
-      ),
-    )
+    assert(result == listOf(matched(301L to lineInput(401L, 2)), matched(301L to lineInput(401L, 1))))
   }
 
   @Test
@@ -182,11 +189,11 @@ class MatchShipmentToFulfillmentOrdersTest {
     val readableFo = openFulfillmentOrder(variantId = 101L, remaining = 5, foId = 302L, lineItemId = 402L)
     val order = orderWithFulfillmentOrders(unreadableFo, readableFo)
     val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 1))
-    assert(result == ShipmentMatchResult.Ok(groups = mapOf(fulfillmentOrderGid(302L) to listOf(lineInput(402L, 1))), skipped = emptyList()))
+    assert(result == matched(302L to lineInput(402L, 1)))
   }
 
   @Test
-  fun `closed FO with zero remaining skipped`() {
+  fun `a closed fulfillment order and an open one with nothing remaining leave no room`() {
     val closedFo = FulfillmentOrder(
       id = "gid://shopify/FulfillmentOrder/301",
       status = FulfillmentOrderStatus.CLOSED,
@@ -199,10 +206,7 @@ class MatchShipmentToFulfillmentOrdersTest {
     )
     val order = orderWithFulfillmentOrders(closedFo, openFoZero)
     val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 1))
-    assert(result is ShipmentMatchResult.Ok)
-    val ok = result as ShipmentMatchResult.Ok
-    assert(ok.groups.isEmpty())
-    assert(ok.skipped.single().reason == SkipReason.ZERO_REMAINING)
+    assert((result as ShipmentMatchResult.Skipped).reason == SkipReason.NO_ROOM)
   }
 
   @Test
@@ -218,62 +222,45 @@ class MatchShipmentToFulfillmentOrdersTest {
       lineItems = foLineItemConnection(lineItemId = 402L, variantId = 101L, remaining = 5),
     )
     val order = orderWithFulfillmentOrders(foLow, foHigh)
-    val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 2))
-    val ok = result as ShipmentMatchResult.Ok
-    assert(ok.groups.keys.single().endsWith("302"))
+    val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 2)) as ShipmentMatchResult.Matched
+    assert(result.groups.keys.single().endsWith("302"))
+  }
+
+  /** The request validators refuse a non-positive quantity; one that gets past them is a bug, not a skip. */
+  @Test
+  fun `a non-positive quantity is a bug the request validators keep out`() {
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 2))
+    val thrown = runCatching { matchOneShipment(order, shipment(variantId = 101L, quantity = 0)) }.exceptionOrNull()
+    assert(thrown is IllegalArgumentException)
   }
 
   @Test
-  fun `zero quantity (bypassed validation) returns user error`() {
+  fun `a shipment without lines is a bug the request validators keep out`() {
     val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 2))
-    val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 0))
-    assert(result is ShipmentMatchResult.UserError)
+    val thrown = runCatching { matchOneShipment(order, shipment(lines = emptyList())) }.exceptionOrNull()
+    assert(thrown is IllegalArgumentException)
   }
 
   @Test
-  fun `skipped line includes variant id and tracking number`() {
+  fun `each shipment of a payload is skipped on its own, with its own reason`() {
     val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 2))
-    val result = matchOneShipment(order, shipment(variantId = 999L, quantity = 1))
-    val ok = result as ShipmentMatchResult.Ok
-    val skipped = ok.skipped.single()
-    assert(skipped.productVariantId == 999L)
-    assert(skipped.trackingNumber == "1Z999")
-  }
-
-  @Test
-  fun `dry-run reports total skipped lines across shipments`() {
-    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 2))
-    val shipments =
-      listOf(
-        Shipment(
-          trackingNumber = "TRK-1",
-          carrier = "UPS",
-          trackingUrl = null,
-          lineItems = listOf(
-            ShipmentLineItem(productVariantId = 101L, quantity = 1),
-            ShipmentLineItem(productVariantId = 999L, quantity = 1),
-          ),
-        ),
-        shipment(tracking = "TRK-2", variantId = 888L, quantity = 1),
-      )
-    val result = dryRunAllShipments(order, shipments) as DryRunResult.Ok
-    assert(result.perShipment.sumOf { it.skipped.size } == 2)
-    assert(result.perShipment.size == 2)
-    assert(result.perShipment.first().skipped.size == 1)
-    assert(result.perShipment.last().skipped.size == 1)
+    val shipments = listOf(
+      shipment(tracking = "TRK-1", lines = listOf(101L to 3)),
+      shipment(tracking = "TRK-2", variantId = 888L, quantity = 1),
+    )
+    val result = dryRunAllShipments(order, shipments)
+    assert(result.map { (it as ShipmentMatchResult.Skipped).reason } == listOf(SkipReason.NO_ROOM, SkipReason.NOT_ON_ORDER))
   }
 
   @Test
   fun `groups are keyed by the fulfillment order gid in first-seen order`() {
-    val result =
-      matchOneShipment(diagramCrossFoOrder(), diagramCrossFoShipment()) as ShipmentMatchResult.Ok
+    val result = matchOneShipment(diagramCrossFoOrder(), diagramCrossFoShipment()) as ShipmentMatchResult.Matched
     assert(
       result.groups.keys.toList() == listOf(
         "gid://shopify/FulfillmentOrder/301",
         "gid://shopify/FulfillmentOrder/302"
       )
     )
-    assert(result.skipped.isEmpty())
   }
 
   @Test
@@ -288,32 +275,65 @@ class MatchShipmentToFulfillmentOrdersTest {
     val result = matchShipmentToFulfillmentOrders(
       shipment(variantId = 101L, quantity = 2),
       openFulfillmentLines(order),
-      planned
+      variantIdsOnOrder(order),
+      planned,
     )
-    assert(result is ShipmentMatchResult.UserError)
-    assert("variant 101 requested quantity 2 exceeds remaining 1" in (result as ShipmentMatchResult.UserError).messages.single())
+    assert(result == ShipmentMatchResult.Skipped(SkipReason.NO_ROOM, listOf(ShortLine(101L, asked = 2, available = 1))))
   }
 
-  /**
-   * The skip reads Shopify's snapshot and the error reads the plan: a unit an earlier shipment of this payload
-   * claimed is a payload problem to refuse, not a line Shopify already fulfilled.
-   */
+  /** A re-ship entered before the job ran: the original takes the units, the re-ship stays out of Shopify. */
   @Test
-  fun `a unit an earlier shipment of the payload claimed is an error, not a zero_remaining skip`() {
+  fun `a re-ship in the same payload as the original is skipped as no room`() {
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 2))
+    val shipments = listOf(
+      shipment(tracking = "TRK-A", variantId = 101L, quantity = 2),
+      shipment(tracking = "TRK-B", variantId = 101L, quantity = 2),
+    )
+    val result = dryRunAllShipments(order, shipments)
+    assert(result.first() == matched(301L to lineInput(401L, 2)))
+    assert(result.last() == ShipmentMatchResult.Skipped(SkipReason.NO_ROOM, listOf(ShortLine(101L, asked = 2, available = 0))))
+  }
+
+  @Test
+  fun `a unit an earlier shipment of the payload claimed leaves a later one without room`() {
     val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 1))
     val shipments = listOf(
       shipment(tracking = "TRK-1", variantId = 101L, quantity = 1),
       shipment(tracking = "TRK-2", variantId = 101L, quantity = 1),
     )
-    val result = dryRunAllShipments(order, shipments) as DryRunResult.UserError
-    assert("variant 101 requested quantity 1 exceeds remaining 0" in result.messages.single())
+    val result = dryRunAllShipments(order, shipments)
+    assert((result.last() as ShipmentMatchResult.Skipped).reason == SkipReason.NO_ROOM)
+  }
+
+  @Test
+  fun `a small shipment after a skipped big one still gets the room that is left`() {
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 1))
+    val shipments = listOf(
+      shipment(tracking = "TRK-B", variantId = 101L, quantity = 2),
+      shipment(tracking = "TRK-C", variantId = 101L, quantity = 1),
+    )
+    val result = dryRunAllShipments(order, shipments)
+    assert(result.first() is ShipmentMatchResult.Skipped)
+    assert(result.last() == matched(301L to lineInput(401L, 1)))
+  }
+
+  /** The line that would have fit is not claimed by a shipment that is skipped for another line. */
+  @Test
+  fun `a skipped shipment claims nothing, not even the lines that fit`() {
+    val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 1))
+    val shipments = listOf(
+      shipment(tracking = "TRK-B", lines = listOf(101L to 1, 999L to 1)),
+      shipment(tracking = "TRK-C", variantId = 101L, quantity = 1),
+    )
+    val result = dryRunAllShipments(order, shipments)
+    assert(result.last() == matched(301L to lineInput(401L, 1)))
   }
 
   // ---------- one variant, several places it could be filed ----------
 
   /**
    * One variant can sit on several open lines: two line items of the order, or one line routed to two locations. A
-   * shipment line that no single one can serve is spread over them rather than refused.
+   * shipment line that no single one can serve is spread over them rather than skipped.
    */
   @Test
   fun `a quantity larger than any single open line is spread over the lines that cover it together`() {
@@ -321,13 +341,8 @@ class MatchShipmentToFulfillmentOrdersTest {
       openFulfillmentOrder(variantId = 101L, remaining = 1, foId = 301L, lineItemId = 401L),
       openFulfillmentOrder(variantId = 101L, remaining = 1, foId = 302L, lineItemId = 402L),
     )
-    val ok = matchOneShipment(order, shipment(variantId = 101L, quantity = 2)) as ShipmentMatchResult.Ok
-    assert(
-      ok.groups.mapValues { (_, inputs) -> inputs.map { it.id to it.quantity } } == mapOf(
-        "gid://shopify/FulfillmentOrder/301" to listOf("gid://shopify/FulfillmentOrderLineItem/401" to 1),
-        "gid://shopify/FulfillmentOrder/302" to listOf("gid://shopify/FulfillmentOrderLineItem/402" to 1),
-      ),
-    )
+    val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 2))
+    assert(result == matched(301L to lineInput(401L, 1), 302L to lineInput(402L, 1)))
   }
 
   /** Taking the line with the most left first keeps a spread on as few lines as it can be. */
@@ -338,7 +353,7 @@ class MatchShipmentToFulfillmentOrdersTest {
       openFulfillmentOrder(variantId = 101L, remaining = 3, foId = 302L, lineItemId = 402L),
       openFulfillmentOrder(variantId = 101L, remaining = 2, foId = 303L, lineItemId = 403L),
     )
-    val ok = matchOneShipment(order, shipment(variantId = 101L, quantity = 4)) as ShipmentMatchResult.Ok
+    val ok = matchOneShipment(order, shipment(variantId = 101L, quantity = 4)) as ShipmentMatchResult.Matched
     assert(
       ok.groups.values.flatten().map { it.id to it.quantity } == listOf(
         "gid://shopify/FulfillmentOrderLineItem/402" to 3,
@@ -348,13 +363,13 @@ class MatchShipmentToFulfillmentOrdersTest {
   }
 
   @Test
-  fun `a quantity above what the variant's open lines have left together is refused, naming that total`() {
+  fun `a quantity above what the variant's open lines have left together is short by that total`() {
     val order = orderWithFulfillmentOrders(
       openFulfillmentOrder(variantId = 101L, remaining = 1, foId = 301L, lineItemId = 401L),
       openFulfillmentOrder(variantId = 101L, remaining = 1, foId = 302L, lineItemId = 402L),
     )
     val result = matchOneShipment(order, shipment(variantId = 101L, quantity = 3))
-    assert("variant 101 requested quantity 3 exceeds remaining 2" in (result as ShipmentMatchResult.UserError).messages.single())
+    assert(result == ShipmentMatchResult.Skipped(SkipReason.NO_ROOM, listOf(ShortLine(101L, asked = 3, available = 2))))
   }
 
   @Test
@@ -367,8 +382,8 @@ class MatchShipmentToFulfillmentOrdersTest {
       shipment(tracking = "TRK-1", variantId = 101L, quantity = 2),
       shipment(tracking = "TRK-2", variantId = 101L, quantity = 1),
     )
-    val result = dryRunAllShipments(order, shipments) as DryRunResult.UserError
-    assert("variant 101 requested quantity 1 exceeds remaining 0" in result.messages.single())
+    val result = dryRunAllShipments(order, shipments)
+    assert(result.last() == ShipmentMatchResult.Skipped(SkipReason.NO_ROOM, listOf(ShortLine(101L, asked = 1, available = 0))))
   }
 
   @Test
@@ -397,14 +412,8 @@ class MatchShipmentToFulfillmentOrdersTest {
         ),
       ),
     )
-    val result = matchOneShipment(
-      orderWithFulfillmentOrders(fulfillmentOrder),
-      shipment(variantId = 101L, quantity = 3)
-    )
-    val ok = result as ShipmentMatchResult.Ok
-    val input = ok.groups.values.single().single()
-    assert(input.id == "gid://shopify/FulfillmentOrderLineItem/402")
-    assert(input.quantity == 3)
+    val result = matchOneShipment(orderWithFulfillmentOrders(fulfillmentOrder), shipment(variantId = 101L, quantity = 3))
+    assert(result == matched(301L to lineInput(402L, 3)))
   }
 
   /** A line whose variant id cannot be read must not change what is said about another variant. */
@@ -429,26 +438,19 @@ class MatchShipmentToFulfillmentOrdersTest {
         )
       ),
     )
-    val result = matchOneShipment(
-      orderWithFulfillmentOrders(fulfillmentOrder),
-      shipment(variantId = 999L, quantity = 1)
-    )
-    val ok = result as ShipmentMatchResult.Ok
-    assert(ok.groups.isEmpty())
-    assert(ok.skipped.single().reason == SkipReason.NO_OPEN_FO)
+    val result = matchOneShipment(orderWithFulfillmentOrders(fulfillmentOrder), shipment(variantId = 999L, quantity = 1))
+    assert((result as ShipmentMatchResult.Skipped).reason == SkipReason.NOT_ON_ORDER)
   }
 
   // ---------- a tracking number already on a live fulfillment ----------
 
   @Test
-  fun `a shipment whose tracking number is on a live fulfillment is skipped whole and plans nothing`() {
+  fun `a shipment whose tracking number is on a live fulfillment is already fulfilled and plans nothing`() {
     val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 1))
       .copy(fulfillments = listOf(fulfillment(8000L, listOf("TRK-A"))))
-    val result = dryRunAllShipments(order, listOf(shipment(tracking = "TRK-A", variantId = 101L, quantity = 1))) as DryRunResult.Ok
-    val skipped = result.perShipment.single()
-    assert(skipped.alreadyFulfilledBy.map { it.id } == listOf("gid://shopify/Fulfillment/8000"))
-    assert(skipped.groups.isEmpty())
-    assert(skipped.skipped.isEmpty())
+    val result = dryRunAllShipments(order, listOf(shipment(tracking = "TRK-A", variantId = 101L, quantity = 1)))
+    val alreadyFulfilled = result.single() as ShipmentMatchResult.AlreadyFulfilled
+    assert(alreadyFulfilled.fulfillments.map { it.id } == listOf("gid://shopify/Fulfillment/8000"))
   }
 
   /** The re-send the monolith makes after a partial failure: the shipment already synced must not take the unit the next one needs. */
@@ -460,34 +462,34 @@ class MatchShipmentToFulfillmentOrdersTest {
       shipment(tracking = "TRK-A", variantId = 101L, quantity = 1),
       shipment(tracking = "TRK-B", variantId = 101L, quantity = 1),
     )
-    val result = dryRunAllShipments(order, shipments) as DryRunResult.Ok
-    assert(result.perShipment.last().groups.values.flatten().single().quantity == 1)
+    val result = dryRunAllShipments(order, shipments)
+    assert(result.last() == matched(301L to lineInput(401L, 1)))
   }
 
   @Test
-  fun `a shipment on a live fulfillment is skipped rather than refused for a quantity no longer left`() {
+  fun `a shipment on a live fulfillment is already fulfilled rather than short of room`() {
     val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 1))
       .copy(fulfillments = listOf(fulfillment(8000L, listOf("TRK-A"))))
     val result = dryRunAllShipments(order, listOf(shipment(tracking = "TRK-A", variantId = 101L, quantity = 2)))
-    assert(result is DryRunResult.Ok)
+    assert(result.single() is ShipmentMatchResult.AlreadyFulfilled)
   }
 
   @Test
-  fun `a shipment whose tracking number is only on a cancelled fulfillment is matched like a new one`() {
+  fun `a shipment whose tracking number is only on a canceled fulfillment is matched like a new one`() {
     val order = orderWithFulfillmentOrders(openFulfillmentOrder(variantId = 101L, remaining = 1))
       .copy(fulfillments = listOf(fulfillment(8000L, listOf("TRK-A"), status = FulfillmentStatus.CANCELLED)))
-    val result = dryRunAllShipments(order, listOf(shipment(tracking = "TRK-A", variantId = 101L, quantity = 1))) as DryRunResult.Ok
-    val matched = result.perShipment.single()
-    assert(matched.alreadyFulfilledBy.isEmpty())
-    assert(matched.groups.values.flatten().single().quantity == 1)
+    val result = dryRunAllShipments(order, listOf(shipment(tracking = "TRK-A", variantId = 101L, quantity = 1)))
+    assert(result.single() == matched(301L to lineInput(401L, 1)))
   }
-
-  private fun fulfillmentOrderGid(id: Long): String = "gid://shopify/FulfillmentOrder/$id"
 
   private fun lineInput(lineItemId: Long, quantity: Int): FulfillmentOrderLineItemInput =
     FulfillmentOrderLineItemInput(id = "gid://shopify/FulfillmentOrderLineItem/$lineItemId", quantity = quantity)
 
+  /** A match whose groups are the given fulfillment order ids with one planned line each, in the order given. */
+  private fun matched(vararg groups: Pair<Long, FulfillmentOrderLineItemInput>): ShipmentMatchResult.Matched =
+    ShipmentMatchResult.Matched(groups.associate { (foId, input) -> "gid://shopify/FulfillmentOrder/$foId" to listOf(input) })
+
   /** One shipment against an order with nothing planned before it; production goes through `dryRunAllShipments`. */
   private fun matchOneShipment(order: Order, shipment: Shipment): ShipmentMatchResult =
-    matchShipmentToFulfillmentOrders(shipment, openFulfillmentLines(order), emptyList())
+    matchShipmentToFulfillmentOrders(shipment, openFulfillmentLines(order), variantIdsOnOrder(order), emptyList())
 }
