@@ -267,7 +267,7 @@ number on that canceled fulfillment.
 
 ```json
 {
-  "shopify_subdomain": "acme-downtown",
+  "shopify_subdomain": "acme-apparel",
   "shopify_order_id": 1001,
   "shipments": [{
     "tracking_number": "1Z999AA10123456784",
@@ -289,7 +289,7 @@ number on that canceled fulfillment.
 
 ```json
 {
-  "shopify_subdomain": "acme-downtown",
+  "shopify_subdomain": "acme-apparel",
   "shopify_order_id": 1001,
   "tracking_number": "1Z999AA10123456784",
   "status": "in_transit",
