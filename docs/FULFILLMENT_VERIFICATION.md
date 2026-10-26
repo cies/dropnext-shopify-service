@@ -59,7 +59,7 @@ flowchart LR
 | Monolith intent | DSS URL | Request body |
 |-----------------|---------|--------------|
 | The shipments of an order changed (created, split, retired, tracking number corrected) | `POST /sync-shipments-with-fulfillments` | `SyncShipmentsWithFulfillmentsRequest` |
-| Carrier tracking status (e.g. AfterShip) | `POST /tracking-update` | `TrackingUpdateRequest` |
+| Carrier tracking status (from Ship24) | `POST /tracking-update` | `TrackingUpdateRequest` |
 
 ## How a sync runs
 
@@ -283,7 +283,7 @@ number on that canceled fulfillment.
 4. In Shopify Admin: the order shows the fulfillment with its tracking; the shipment's line items are fulfilled. With
    the store's shipping notifications on, the customer receives the "Shipping confirmation" email.
 
-## Step C — Tracking event (AfterShip-style)
+## Step C — Tracking event (as a Ship24 webhook causes one)
 
 1. The monolith POSTs to `{DSS_URL}/tracking-update` with the **same** `tracking_number` as step B:
 

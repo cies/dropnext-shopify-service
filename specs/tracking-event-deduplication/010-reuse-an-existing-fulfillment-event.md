@@ -4,13 +4,13 @@ Status: draft
 Author: cies (with Claude)
 Date: 2026-09-30
 Depends on: nothing.
-Repos: DSS only. No contract change: `POST /tracking-updates` keeps its request and its response, so the monolith's
+Repos: DSS only. No contract change: `POST /tracking-update` keeps its request and its response, so the monolith's
 `ForwardTrackingUpdateToDss` and the checked-in `monolith-dss-openapi.json` stay as they are.
 
 
 ## Problem
 
-The monolith forwards every AfterShip checkpoint to the DSS through its `ForwardTrackingUpdateToDss` job, and
+The monolith forwards every Ship24 tracking event to the DSS through its `ForwardTrackingUpdateToDss` job, and
 `syncShopifyTrackingEvent` turns it into a Shopify `fulfillmentEventCreate`. That mutation creates a new event
 every time it is called: nothing on either side checks whether the fulfillment already has it.
 
@@ -22,7 +22,7 @@ The monolith's queue delivers a job at least once, so the same checkpoint reache
 3. **The monolith's process died after the call** (a deploy waits only seconds for running jobs, or it ran out
    of memory), so the message reappears when its lease runs out.
 
-The monolith deduplicates AfterShip's webhook deliveries on their `event_id` (`processTrackingUpdate`), but that
+The monolith deduplicates Ship24's tracking events on their `eventId` (`processTrackingUpdate`), but that
 only stops a second *enqueue*. It does nothing for a job that runs twice. The monolith cannot close the gap on its
 own either: a record of "forwarded" written after the call is lost in exactly the crash of case 3.
 
@@ -61,10 +61,10 @@ inbox as well.
 ## Behavioral contract
 
 - **The match is on status and `happenedAt`**, compared as instants truncated to whole seconds. Shopify stores
-  `happenedAt` at its own precision, and AfterShip's checkpoint time may carry a zone offset or fractions; the
-  request's `happened_at` is parsed, not compared as text.
-- **The message is not part of the match.** It is free text, and AfterShip may redeliver a checkpoint with its
-  message reworded. Two checkpoints with the same status at the same second are, for the customer, one event.
+  `happenedAt` at its own precision, and the request's `happened_at` (Ship24's event time, in UTC) may carry
+  fractions of a second; it is parsed, not compared as text.
+- **The message is not part of the match.** It is free text, and the carrier may reword its status text for the
+  same event. Two checkpoints with the same status at the same second are, for the customer, one event.
 - **The answer does not change.** A reused event is answered exactly like a created one: `200` with its
   `fulfillment_event_id`. The monolith cannot, and does not need to, tell the two apart.
 - **A failure to read the events fails the call**, as a failure of `orderForDss` does today, so the monolith
