@@ -38,6 +38,13 @@ fun main() {
     // of at most five seconds, and the process is gone before the kill.
     shutdownGracePeriod = 15_000
     shutdownTimeout = 20_000
+    // Kept longer than the ALB's `idle_timeout` (180 s, in `dropnext-infra/modules/app-env-shell/main.tf`):
+    // change that one, change this one.
+    // An idle keep-alive connection must not close on this side before the ALB drops it,
+    // or the ALB sends a request down a closed connection and answers it with a 502.
+    // Equal values would still race, so this side waits a margin longer.
+    // CIO's default is 45 seconds.
+    connectionIdleTimeoutSeconds = 190
   }) {
     val deps = dssDependencies(config)
     dssModule(deps, warmUp = deps.warmUp)

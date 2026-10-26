@@ -346,6 +346,10 @@ private val openApiSpecFile: File =
       """.trimIndent(),
     )
 
+// The root the monolith mounts its DSS API under. Every path key of its spec starts with it, and the deployed
+// `MONOLITH_BASE_URL` ends in it, so `OutBoundMonolithPaths` is relative to it.
+private val monolithDssApiRoot = "/api/shopify-service/v1"
+
 // Generates `OutBoundMonolithPaths` from the same monolith OpenAPI spec as DTO codegen
 // (`apis=false` skips path constants in openApiGenerate).
 val generateOutBoundMonolithPaths by tasks.registering {
@@ -354,6 +358,7 @@ val generateOutBoundMonolithPaths by tasks.registering {
 
   val source = openApiSpecFile
   val outputFile = monolithPathsGeneratedFile
+  val apiRoot = monolithDssApiRoot
 
   inputs.file(source)
   outputs.file(outputFile)
@@ -365,16 +370,6 @@ val generateOutBoundMonolithPaths by tasks.registering {
     @Suppress("UNCHECKED_CAST")
     val paths = spec["paths"] as? Map<String, Map<String, Any?>>
       ?: throw GradleException("OpenAPI spec missing non-empty 'paths' object")
-
-    @Suppress("UNCHECKED_CAST")
-    val servers = spec["servers"] as? List<Map<String, Any?>>
-    val apiPathPrefix = servers
-      ?.firstOrNull()
-      ?.get("url")
-      ?.toString()
-      ?.trim()
-      ?.trimEnd('/')
-      ?.takeIf { it.isNotEmpty() }
 
     fun segmentToConstPart(segment: String, isFirstSegment: Boolean): String =
       segment.split('-')
@@ -395,15 +390,18 @@ val generateOutBoundMonolithPaths by tasks.registering {
 
     val httpMethodOrder = listOf("delete", "get", "patch", "post", "put")
 
-    // The monolith mounts its contract under `servers[0].url` and http4k bakes that mount prefix
-    // into every path key as well, so the served document names `/api/shopify-service/v1/orders`
-    // under a server of `/api/shopify-service/v1` (a to-do on the monolith side). The constants are
-    // appended to `MONOLITH_API_PREFIX`, which is that same prefix, so it is stripped here once.
-    fun withoutServerPrefix(path: String): String =
-      if (apiPathPrefix != null && path.startsWith("$apiPathPrefix/")) path.removePrefix(apiPathPrefix) else path
+    // The served document keys every path by its full path (`/api/shopify-service/v1/orders`), and the
+    // constants are appended to a base url that already ends in the root, so it is stripped here once.
+    // A key outside the root fails the build: appended to that base url, it would be a 404 on every call.
+    fun withoutApiRoot(path: String): String {
+      if (!path.startsWith("$apiRoot/")) {
+        throw GradleException("OpenAPI path '$path' is not under the monolith's DSS API root '$apiRoot'.")
+      }
+      return path.removePrefix(apiRoot)
+    }
 
     val pathEntries = paths.keys.sorted().map { fullPath ->
-      val path = withoutServerPrefix(fullPath)
+      val path = withoutApiRoot(fullPath)
       val operations = paths[fullPath].orEmpty()
       val kdocLines = operations.keys
         .filter { it in httpMethodOrder }
@@ -437,12 +435,6 @@ val generateOutBoundMonolithPaths by tasks.registering {
       appendLine(" */")
       appendLine("@Suppress(\"ConstPropertyName\") // Less shouty field names.")
       appendLine("object OutBoundMonolithPaths {")
-
-      if (apiPathPrefix != null) {
-        appendLine("  /** OpenAPI `servers[0].url` — typical value for `MONOLITH_API_PREFIX`. */")
-        appendLine("  const val apiPathPrefix = \"$apiPathPrefix\"")
-        appendLine()
-      }
 
       pathEntries.forEach { (constName, path, kdocLines) ->
         appendLine("  /**")

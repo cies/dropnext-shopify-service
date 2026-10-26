@@ -52,8 +52,11 @@ cause that matters, a human who changed the monolith and forgot the copy, at the
 diff in front of them.
 
 **A startup comparison that warns and serves, which is the part this spec is really about.** After the checks of
-`010` have proved the key, one `GET` to `OutBoundMonolithPaths.apiPathPrefix` + `/openapi.json`, compared against
-the checked-in copy. Three outcomes, and **none of them can stop the task**:
+`010` have proved the key, one `GET` to `/openapi.json` relative to `prefixedBase`, built exactly like every other
+monolith call, compared against the checked-in copy. The document is served under the same root as the endpoints,
+which `MONOLITH_BASE_URL` already ends in on the deployed environments, so nothing is put in front of `/openapi.json`.
+It is not a path key of the document, so it is a constant of its own beside the generated `OutBoundMonolithPaths`,
+not one of them. Three outcomes, and **none of them can stop the task**:
 
 - identical: one `info` line, nothing else;
 - different: one `warn` line per difference, then one `warn` summary line. The task takes traffic;
@@ -78,22 +81,28 @@ Contract drift kind=schema location=CreateShopifyOrderRequest side=monolith_only
 Contract drift kind=property location=CreateShopifyOrderRequest.email side=monolith_only
 Contract drift kind=required location=Shipment.carrier monolith=true copy=false
 Contract drift kind=type location=OrderLineItem.quantity monolith=string copy=integer
-Contract drift kind=server_url monolith=/api/shopify-service/v2 copy=/api/shopify-service/v1
+Contract drift kind=api_root monolith=/api/shopify-service/v2 copy=/api/shopify-service/v1
 ```
 
 Then one summary, which is the line to alert on if anything ever alerts on this:
 
 ```
-Contract drift summary differences=7 shown=7 paths=1 operations=1 schemas=1 properties=2 required=1 types=1 urls=1
+Contract drift summary differences=7 shown=7 paths=1 operations=1 schemas=1 properties=2 required=1 types=1 roots=1
 ```
 
-`kind=server_url` earns its place: `servers[0].url` is what `generateOutBoundMonolithPaths` turns into
-`OutBoundMonolithPaths.apiPathPrefix`, so a change there moves every outbound call at once.
+`kind=api_root` earns its place: it is the root every path key of a document starts with (`/api/shopify-service/v1`).
+The monolith moving the API to another root changes every path key at once, which the path lines alone would report
+as a wall of `monolith_only` and `copy_only` lines without saying why; this one line says why. It is also the one
+difference that breaks every outbound call: the DSS's constants are relative to the root its `MONOLITH_BASE_URL` ends
+in, and its build only accepts a copy whose keys sit under the root `build.gradle.kts` declares (`monolithDssApiRoot`).
+
+The document's `servers` entry is not compared. It is http4k's default, `/`, in both documents: the monolith bakes the
+root into the path keys instead, and the DSS's codegen no longer reads `servers`.
 
 ### What is compared, and what is not
 
 The comparison is over the parsed JSON, not the bytes, so key order and whitespace do not matter. It compares the
-server URL, the paths and their operations, the schema names, and per schema the property names, their types,
+API root the path keys share, the paths and their operations, the schema names, and per schema the property names, their types,
 their nullability and whether they are required. It never compares descriptions, summaries, examples or the
 `info` block: those are prose the monolith edits freely, and a check that fires on a reworded sentence is a check
 nobody reads.
@@ -135,14 +144,17 @@ monolith costs nothing but the step.
   reports drift that resolves itself minutes later. It is a log line, not a page, which is why it warns rather
   than blocking.
 - **The prefix is already inside `MONOLITH_BASE_URL`**, as in staging. The URL is built the same way every other
-  monolith call is built, through `prefixedBase`, so it inherits whatever that resolves to.
+  monolith call is built, `/openapi.json` relative to `prefixedBase`, so it inherits whatever that resolves to.
+  Putting the root in front of it as well would ask for `/api/shopify-service/v1/api/shopify-service/v1/openapi.json`
+  on staging, a `404` the check would report as "not fetchable" on every start.
 - **The document is large.** It is fetched once per task start and compared in memory; nothing keeps it.
 
 
 ## Reuse inventory
 
 - `HttpMonolithService.prefixedBase` and its client, which already carries the bearer and the trace id.
-- `OutBoundMonolithPaths.apiPathPrefix`, generated from the same document.
+- `monolithDssApiRoot` in `build.gradle.kts`, the root `generateOutBoundMonolithPaths` strips off every path key and
+  the expected value for `kind=api_root`.
 - `MonolithJson` for parsing, and `MonolithError` for reporting a fetch that failed.
 - `preflightBeforeTakingTraffic` and `PreflightReport` in `boot/preflight/`, renamed by
   [010](010-prove-both-shared-secrets-before-taking-traffic.md), which already run outbound steps at startup and
@@ -157,7 +169,8 @@ monolith costs nothing but the step.
 
 - **Pure**: the comparison itself, which is the only part worth real coverage. Identical documents; a document
   with an added path; one with a removed path; one with a changed required field; one with a changed property
-  type; one with a different `servers[0].url`; one whose descriptions differ only, which is not a difference; one
+  type; one whose path keys sit under another root, reported once as `kind=api_root` beside its path lines;
+  one whose `servers` entry differs only, which is not a difference; one whose descriptions differ only, which is not a difference; one
   whose keys are in another order, which is not a difference either. Each case asserts the `kind` and the
   `location` of the line it produces, since those are what a reader acts on.
 - **Fake-backed** (the renamed preflight test): a monolith serving the checked-in document reports

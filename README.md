@@ -141,11 +141,12 @@ If codegen fails, fix the schema in the monolith that serves it, refresh the cop
 The checked-in copy is byte-for-byte what a running monolith serves; refresh it from a local instance with
 
 ```sh
-curl -sS "http://127.0.0.1:8080/api/shopify-service/v1/openapi.json?api_key=$DSS_TO_MONOLITH_API_KEY" > src/resources/monolith-dss-openapi.json
+curl -sS -H "Authorization: Bearer $DSS_TO_MONOLITH_API_KEY" "http://127.0.0.1:8080/api/shopify-service/v1/openapi.json" > src/resources/monolith-dss-openapi.json
 ```
 
 and never hand-edit it. The generator reads the served document as is (`generateOutBoundMonolithPaths` only strips
-the mount prefix the path keys repeat), so what the monolith serves and what this repo checks in cannot drift apart.
+the monolith's mount root, `/api/shopify-service/v1`, off the path keys, and fails the build on a key outside it),
+so what the monolith serves and what this repo checks in cannot drift apart.
 
 
 ### The JetBrains [Graphql IDE plugin](https://plugins.jetbrains.com/plugin/8097-graphql)

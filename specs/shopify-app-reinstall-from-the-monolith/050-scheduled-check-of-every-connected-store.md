@@ -38,8 +38,9 @@ Repos: monolith only. Optional: `000`'s open question 7.
 
 ## Reuse inventory
 
-- `SyncShipmentsWithFulfillments` as the job pattern; `pgmqEnqueue`; the cron migrations
-  (`20260530140000_daily_psp_wrap_up_cron.sql`) for the schedule and the fan-out message.
+- `SyncShipmentsWithFulfillments` as the job pattern; `pgmqEnqueue`; the cron jobs of the monolith's
+  initial schema (`pgmq-send-post-daily-psp-wrap-up-airwallex` in `20261001120600_initial_schema_finance.sql`)
+  for the schedule and the fan-out message.
 
 
 ## Test plan
