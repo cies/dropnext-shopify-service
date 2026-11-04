@@ -20,7 +20,7 @@ data class Config(
   val serverPort: Int,
   val monolithBaseUrl: String,
   val monolithApiPrefix: String?,
-  val dssToMonolithApiKey: DssToMonolithApiKey?,
+  val dssToMonolithApiKey: DssToMonolithApiKey,
   val allowInsecureMonolithUrl: Boolean,
   val monolithToDssApiKey: MonolithToDssApiKey,
   val logflareSourceName: String?,
@@ -30,6 +30,10 @@ data class Config(
   /** What `/health` and the startup log report: the image tag in a container, a marker outside one. */
   val versionTag: String,
 ) {
+  /** The origin of [monolithBaseUrl]: the monolith serves its portals on the host of its DSS API. */
+  val portalBaseUrl: String
+    get() = originOf(URI(monolithBaseUrl))
+
   /** Log shipping needs both halves; with either missing the service logs to stdout only. */
   val logflareEnabled: Boolean
     get() = !logflareSourceName.isNullOrBlank() && logflareApiKey != null
@@ -54,6 +58,9 @@ data class Config(
       val dssBaseUrl = required("DSS_BASE_URL")
       val monolithBaseUrl = required("MONOLITH_BASE_URL")
       val monolithToDssApiKey = required("MONOLITH_TO_DSS_API_KEY")
+      // Required because the monolith requires it: without it every monolith call is a `401`, and an order webhook
+      // answered `200` after one is an order lost without a word.
+      val dssToMonolithApiKey = required("DSS_TO_MONOLITH_API_KEY")
 
       if (isPlaceholder(appClientId)) {
         error("SHOPIFY_APP_CLIENT_ID is placeholder.")
@@ -72,9 +79,8 @@ data class Config(
       if (monolithToDssApiKey.length < 32) {
         error("MONOLITH_TO_DSS_API_KEY must be at least 32 characters.")
       }
-      val dssToMonolithApiKey = value("DSS_TO_MONOLITH_API_KEY")
-      // Optional, but once set it is sent on every monolith call: a value the monolith cannot parse fails all of them.
-      if (dssToMonolithApiKey != null) requireUsableBearerSecret("DSS_TO_MONOLITH_API_KEY", dssToMonolithApiKey)
+      // Sent on every monolith call: a value the monolith cannot parse fails all of them.
+      requireUsableBearerSecret("DSS_TO_MONOLITH_API_KEY", dssToMonolithApiKey)
 
       val mode = DssMode.parse(env["DSS_MODE"])
       val allowInsecureMonolithUrl = parseBool(env["DSS_ALLOW_INSECURE_MONOLITH"])
@@ -111,7 +117,7 @@ data class Config(
         serverPort = resolveServerPort(env["PORT"]),
         monolithBaseUrl = monolithBaseUrl,
         monolithApiPrefix = value("MONOLITH_API_PREFIX")?.trim { it == '/' }?.takeIf { it.isNotEmpty() },
-        dssToMonolithApiKey = dssToMonolithApiKey?.let(::DssToMonolithApiKey),
+        dssToMonolithApiKey = DssToMonolithApiKey(dssToMonolithApiKey),
         allowInsecureMonolithUrl = allowInsecureMonolithUrl,
         monolithToDssApiKey = MonolithToDssApiKey(monolithToDssApiKey),
         logflareSourceName = value("LOGFLARE_SOURCE_NAME"),
@@ -158,6 +164,10 @@ private fun absoluteHttpUrlOrNull(raw: String): URI? {
   if (!scheme.equals("http", ignoreCase = true) && !scheme.equals("https", ignoreCase = true)) return null
   return uri.takeUnless { it.host.isNullOrBlank() }
 }
+
+/** Scheme, host and port: no user info, which a browser sent to the page should not see, and no path. */
+private fun originOf(uri: URI): String =
+  URI(uri.scheme, null, uri.host, uri.port, null, null, null).toString()
 
 /**
  * The two bearer secrets are read under the same rules on both sides (see `domain/Secrets.kt`): not a value the

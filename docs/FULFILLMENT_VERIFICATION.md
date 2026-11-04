@@ -299,7 +299,16 @@ number on that canceled fulfillment.
 
 2. Expect **HTTP 200** and `fulfillment_event_id`.
 3. The Shopify fulfillment timeline shows the event (e.g. in transit).
-4. A tracking number on none of the order's live fulfillments → **404** (the monolith logs it at `warn` and drops it);
+4. Send the same request again → **HTTP 200** with the same `fulfillment_event_id`, the timeline still shows the event
+   once, and the DSS log has `Tracking event already on fulfillment`. A tracking event is matched on its status and its
+   `happened_at` to the second, never on its message.
+   Then the same with a fraction of a second, as the monolith sends when Ship24 gives an event no time of its own:
+   send a new checkpoint with `"happened_at": "2026-04-02T09:45:00.734Z"`, twice.
+   The first call creates the event, and the timeline shows it at `09:45:00` UTC: the DSS sends Shopify the time cut to
+   the second, so Shopify never sees the fraction. The second call answers the same `fulfillment_event_id` and creates
+   nothing, and the timeline still shows the event once. A timeline at any other second means the time changed on
+   the way, and redeliveries would bring the duplicates back.
+5. A tracking number on none of the order's live fulfillments → **404** (the monolith logs it at `warn` and drops it);
    an unsupported `status` → **400**. The monolith forwards events of live shipments only.
 
 ## Manual checklist
@@ -374,7 +383,7 @@ monolith did not answer, throttled, or answered a `5xx`. Every verified delivery
 failure, `error` for a permanent one. Shopify redelivers a failed delivery up to eight times in four hours and removes
 the subscription after repeated failures within 24 hours
 ([Shopify: troubleshoot webhooks](https://shopify.dev/docs/apps/build/webhooks/troubleshooting-webhooks));
-`GET /api/check?shop=…` (bearer auth) shows whether each handled topic is still subscribed.
+`GET /stores/shopify-status?shopify_subdomain=…` (bearer auth) shows whether each handled topic is still subscribed.
 
 ## Known limitations
 
@@ -388,6 +397,9 @@ the subscription after repeated failures within 24 hours
 - Matching is by variant only; the location of a fulfillment order is not looked at.
 - `/tracking-update` trims the tracking number, compares it case-sensitively, ignores canceled fulfillments, and takes
   the first live fulfillment that carries it.
+- `/tracking-update` looks for a duplicate among the fulfillment's newest 50 events only, so an older duplicate past
+  them is created again. Two deliveries of one event within the same few hundred milliseconds can both find nothing and
+  both create it: nothing locks across the reads.
 
 ## Automated tests in this repo
 

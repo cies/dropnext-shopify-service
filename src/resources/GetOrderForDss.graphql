@@ -41,6 +41,8 @@ query GetOrderForDss(
           quantity
           name
           title
+          # The variant's own title; `name` is the product's title and this one combined, and only the fallback.
+          variantTitle
           originalUnitPriceSet {
             shopMoney {
               amount

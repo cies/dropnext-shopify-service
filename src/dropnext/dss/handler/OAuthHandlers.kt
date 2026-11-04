@@ -11,6 +11,7 @@ import dropnext.dss.lib.shopify.token.ShopLookup
 import dropnext.dss.lib.shopify.token.ShopTokenStore
 import dropnext.dss.lib.shopify.webhook.ShopifyHmacVerifierService
 import dropnext.dss.lib.slf4j.SHOP_MDC_KEY
+import dropnext.dss.lib.slf4j.currentTraceId
 import dropnext.dss.lib.slf4j.withMdcEntries
 import dropnext.dss.path.Paths
 import dropnext.dss.presentation.renderOAuthInstallPage
@@ -28,6 +29,9 @@ import io.ktor.server.util.getOrFail
 
 private val log = KotlinLogging.logger {}
 
+/** Ktor names no constant for it. */
+private const val REFERRER_POLICY_HEADER = "Referrer-Policy"
+
 /**
  * Handlers for the Shopify install / OAuth-callback flow. The callback verifies what Shopify sent
  * (HMAC, signed state), exchanges the code, and leaves the rest of the installation to
@@ -36,6 +40,8 @@ private val log = KotlinLogging.logger {}
  */
 class OAuthHandlers(
   private val dssBaseUrl: String,
+  /** Where the install page sends the merchant on: the retailer portal's root. */
+  private val portalUrl: String,
   private val shopifyOAuthService: ShopifyOAuthService,
   private val shopifyGraphqlServiceFactory: ShopifyGraphqlServiceFactory,
   private val monolithService: MonolithService,
@@ -91,7 +97,10 @@ class OAuthHandlers(
         webhookCallbackUrl = "$dssBaseUrl${Paths.webhooksShopify}",
       )
       call.response.header(HttpHeaders.CacheControl, "no-store, no-cache, must-revalidate")
-      call.respondText(renderOAuthInstallPage(report), ContentType.Text.Html, HttpStatusCode.OK)
+      // The page's URL carries the OAuth code, HMAC and state, and the page loads fonts and links to the portal.
+      call.response.header(REFERRER_POLICY_HEADER, "no-referrer")
+      val page = renderOAuthInstallPage(report, portalUrl, currentTraceId())
+      call.respondText(page, ContentType.Text.Html, HttpStatusCode.OK)
     }
   }
 }

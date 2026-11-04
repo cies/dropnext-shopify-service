@@ -1,6 +1,7 @@
 package dropnext.dss.lib.ktor
 
 import dropnext.dss.contract.ApiError
+import dropnext.dss.contract.ShopifyConnectionError
 import dropnext.dss.contract.SyncShipmentsWithFulfillmentsFailure
 import dropnext.dss.contract.SyncShipmentsWithFulfillmentsResponse
 import dropnext.dss.contract.ThrottledError
@@ -64,9 +65,24 @@ sealed interface DssError {
     override val message: String = "could not look up the shop's Shopify Admin token at the monolith"
   }
 
-  /** 403 — HMAC or signed-state verification failed. */
+  /** 403 — HMAC or signed-state verification failed. Never answered on a monolith-facing route, where no signature is checked. */
   data class InvalidSignature(override val message: String) : DssError
 
+  /**
+   * 403 — the token is valid, but the app's grant on the shop lacks a scope the operation needs. Apart from the `401`s
+   * because the remedy differs: the merchant re-authorizes the app, which keeps the token, rather than reinstalling it.
+   * The monolith reads a `403` as refused and does not retry it. Once the store is re-authorized, it re-enqueues the
+   * shipment syncs and replays the newest tracking checkpoint per shipment.
+   */
+  data class ShopifyAccessScopeMissing(val requiredScopeHandles: List<String>) : DssError {
+    override val message: String =
+      if (requiredScopeHandles.isEmpty()) {
+        "Shopify refused: the app's grant on this shop lacks an access scope; re-authorize the app"
+      } else {
+        "Shopify refused: the app's grant on this shop lacks the access scope(s) " +
+          "${requiredScopeHandles.joinToString(", ")}; re-authorize the app"
+      }
+  }
 
   /** 404 — a referenced resource (order, fulfillment, …) does not exist. */
   data class NotFound(override val message: String) : DssError
@@ -122,7 +138,9 @@ fun DssError.toHttpStatus(): HttpStatusCode = when (this) {
     -> HttpStatusCode.Unauthorized
 
 
-  is DssError.InvalidSignature -> HttpStatusCode.Forbidden
+  is DssError.InvalidSignature,
+  is DssError.ShopifyAccessScopeMissing,
+    -> HttpStatusCode.Forbidden
 
   is DssError.NotFound -> HttpStatusCode.NotFound
 
@@ -142,10 +160,29 @@ fun DssError.toHttpStatus(): HttpStatusCode = when (this) {
 }
 
 /**
+ * The `code` of a refusal that needs the merchant, as the contract's [ShopifyConnectionError] names it: which of the two
+ * `401`s it is, and the `403`. Null for every other error, which has no code vocabulary on this side yet.
+ */
+fun DssError.shopifyConnectionCode(): String? = when (this) {
+  is DssError.MissingShopifyAdminToken -> SHOPIFY_TOKEN_MISSING_CODE
+  is DssError.ShopifyAdminTokenRejected -> SHOPIFY_TOKEN_REJECTED_CODE
+  is DssError.ShopifyAccessScopeMissing -> SHOPIFY_ACCESS_SCOPE_MISSING_CODE
+  is DssError.ShipmentSyncStopped -> cause.shopifyConnectionCode()
+  else -> null
+}
+
+// The monolith reads these values; its `ShopifyConnectionError` declares the same three.
+const val SHOPIFY_TOKEN_MISSING_CODE = "shopify_token_missing"
+const val SHOPIFY_TOKEN_REJECTED_CODE = "shopify_token_rejected"
+const val SHOPIFY_ACCESS_SCOPE_MISSING_CODE = "shopify_access_scope_missing"
+
+/**
  * JSON-error responder for the OpenAPI DSS contract: the monolith's [ApiError] shape, so a client
  * of either service reads one error body. The trace id is ours, from the MDC, so the monolith can
- * quote it back when it logs a refused call; there is no error code vocabulary on this side yet.
- * A stopped shipments sync answers the same fields plus its report.
+ * quote it back when it logs a refused call.
+ * A refusal that needs the merchant answers the same fields as a [ShopifyConnectionError], plus its `code` and, for a
+ * missing scope, the scopes as a list, so the monolith reads neither off the message.
+ * A stopped shipments sync answers the same fields plus its report, and the code of what stopped it.
  *
  * It goes out through [respondContract], like every other contract body: [ThrottledError] marks `code` and `trace_id`
  * required, and the `ContentNegotiation` config would leave a `null` one out for the monolith to trip over.
@@ -164,11 +201,25 @@ suspend fun ApplicationCall.respondError(e: DssError) {
       SyncShipmentsWithFulfillmentsFailure.serializer(),
       SyncShipmentsWithFulfillmentsFailure(
         error = e.message,
-        code = null,
+        code = e.shopifyConnectionCode(),
         traceId = currentTraceId(),
         retryAfterSeconds = retryAfterSeconds,
         shipments = e.report.shipments,
         cancellations = e.report.cancellations,
+      ),
+      e.toHttpStatus(),
+    )
+
+    is DssError.MissingShopifyAdminToken,
+    is DssError.ShopifyAdminTokenRejected,
+    is DssError.ShopifyAccessScopeMissing,
+      -> respondContract(
+      ShopifyConnectionError.serializer(),
+      ShopifyConnectionError(
+        error = e.message,
+        code = e.shopifyConnectionCode(),
+        traceId = currentTraceId(),
+        requiredAccessScopes = (e as? DssError.ShopifyAccessScopeMissing)?.requiredScopeHandles,
       ),
       e.toHttpStatus(),
     )

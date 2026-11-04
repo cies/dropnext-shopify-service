@@ -50,6 +50,7 @@ internal fun minimalOrder(
       quantity = 2,
       name = "T-Shirt - Blue",
       title = "T-Shirt",
+      variantTitle = "Blue",
       originalUnitPriceSet = MoneyBag2(shopMoney = MoneyV22(amount = "19.99")),
       variant = variant,
       product = Product(legacyResourceId = "501"),

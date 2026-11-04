@@ -18,7 +18,7 @@ fun testConfig(
   appClientSecret: String = TEST_APP_SECRET,
   monolithToDssApiKey: String = TEST_MONOLITH_TO_DSS_API_KEY,
   monolithBaseUrl: String = "https://monolith.test",
-  dssToMonolithApiKey: String? = null,
+  dssToMonolithApiKey: String = TEST_DSS_TO_MONOLITH_API_KEY,
   mode: DssMode = DssMode.PROD,
 ): Config =
   Config(
@@ -29,7 +29,7 @@ fun testConfig(
     serverPort = 8080,
     monolithBaseUrl = monolithBaseUrl,
     monolithApiPrefix = null,
-    dssToMonolithApiKey = dssToMonolithApiKey?.let(::DssToMonolithApiKey),
+    dssToMonolithApiKey = DssToMonolithApiKey(dssToMonolithApiKey),
     allowInsecureMonolithUrl = true,
     monolithToDssApiKey = MonolithToDssApiKey(monolithToDssApiKey),
     // Log shipping stays off in tests: an appender would try to reach Logflare from the flush thread.

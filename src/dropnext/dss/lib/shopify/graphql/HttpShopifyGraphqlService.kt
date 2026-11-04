@@ -20,6 +20,7 @@ import dropnext.dss.domain.WebhookSubscriptionStatus
 import dropnext.dss.domain.fulfillment.PackageContent
 import dropnext.dss.domain.fulfillment.PackageLine
 import dropnext.dss.domain.fulfillment.packageContentOf
+import dropnext.dss.lib.crypto.shopifyTokenFingerprint
 import dropnext.dss.lib.shopify.legacyIdFromGid
 import dropnext.graphql.generated.CurrentAppInstallationAccessScopes
 import dropnext.graphql.generated.DeleteWebhookSubscription
@@ -27,6 +28,7 @@ import dropnext.graphql.generated.FulfillmentCancelMutation
 import dropnext.graphql.generated.FulfillmentCreateWithLineItems
 import dropnext.graphql.generated.FulfillmentEventCreateMutation
 import dropnext.graphql.generated.GetFulfillmentContent
+import dropnext.graphql.generated.GetFulfillmentEvents
 import dropnext.graphql.generated.GetOrderForDss
 import dropnext.graphql.generated.GetProductById
 import dropnext.graphql.generated.GetProductVariantIdsPage
@@ -49,6 +51,7 @@ import io.ktor.client.plugins.ResponseException
 import io.ktor.client.request.header
 import io.ktor.http.HttpStatusCode
 import java.io.IOException
+import java.time.OffsetDateTime
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -81,6 +84,15 @@ private const val ORDER_FULFILLMENTS_PAGE_SIZE = 250
 private const val FULFILLMENT_LINE_ITEMS_PAGE_SIZE = 100
 
 /**
+ * The newest events of a fulfillment, read to tell whether a tracking event is already on it.
+ * Never paged, and not refused as truncated either.
+ * A redelivered checkpoint is recent, so it is on the newest page.
+ * An older duplicate past it is merely created again.
+ * Fifty is far more checkpoints than one parcel collects between a first delivery and its redelivery.
+ */
+private const val FULFILLMENT_EVENTS_PAGE_SIZE = 50
+
+/**
  * Production [ShopifyGraphqlService] — speaks real Graphql to a shop's Admin API endpoint over
  * the shared [GraphQLKtorClient], injecting the per-shop [accessToken] on every request.
  *
@@ -96,6 +108,9 @@ class HttpShopifyGraphqlService(
   private val onTokenRejected: () -> Unit = {},
   private val costReporter: ShopifyQueryCostReporter = ShopifyQueryCostReporter(),
 ) : ShopifyGraphqlService {
+
+  // Computed once: every refusal this service answers is about this one token.
+  private val tokenFingerprint = shopifyTokenFingerprint(accessToken.value)
 
   override suspend fun shopIdentity(): ShopifyResult<ShopIdentityInfo> =
     execute(ShopIdentity()).map { data ->
@@ -204,6 +219,27 @@ class HttpShopifyGraphqlService(
     }
   }
 
+  override suspend fun fulfillmentEvents(fulfillmentGid: String): ShopifyResult<List<ShopifyFulfillmentEvent>> {
+    val variables = GetFulfillmentEvents.Variables(id = fulfillmentGid, eventsFirst = FULFILLMENT_EVENTS_PAGE_SIZE)
+    return execute(GetFulfillmentEvents(variables)).flatMap { data ->
+      val fulfillmentId = legacyIdFromGid(fulfillmentGid) ?: fulfillmentGid
+      val nodes = data.fulfillment?.events?.nodes
+        ?: return@flatMap Failure(ShopifyError.NotFound("fulfillment $fulfillmentId not found"))
+      // An event that does not read is refused rather than skipped: skipping it could recreate the very event it is.
+      val events = nodes.map { node ->
+        val id = legacyIdFromGid(node.id)
+          ?: return@flatMap Failure(ShopifyError.Undecodable("fulfillment event id ${node.id} carries no number"))
+        val happenedAt = runCatching { OffsetDateTime.parse(node.happenedAt).toInstant() }.getOrNull()
+        if (happenedAt == null) {
+          val detail = "fulfillment event ${node.id} happenedAt is not a date and time: ${node.happenedAt}"
+          return@flatMap Failure(ShopifyError.Undecodable(detail))
+        }
+        ShopifyFulfillmentEvent(ShopifyFulfillmentEventId(id), node.status, happenedAt)
+      }
+      Success(events)
+    }
+  }
+
   override suspend fun cancelFulfillment(fulfillmentGid: String): ShopifyResult<Unit> =
     execute(FulfillmentCancelMutation(FulfillmentCancelMutation.Variables(fulfillmentGid))).flatMap { data ->
       val payload = data.fulfillmentCancel
@@ -266,8 +302,11 @@ class HttpShopifyGraphqlService(
       // Shopify accepted the mutation, reported no user error, and still returned no event:
       // Shopify's answer is broken. We make it a `GraphqlError`, which becomes a 502 for the monolith,
       // which triggers retries (5xx are retried, 4xx are dropped).
-      val id = payload?.fulfillmentEvent?.id?.let(::legacyIdFromGid)
+      val eventGid = payload?.fulfillmentEvent?.id
         ?: return@flatMap Failure(ShopifyError.GraphqlError("fulfillment event missing in response"))
+      // An id without a number is an answer that does not read, as `fulfillmentEvents` classes the same id.
+      val id = legacyIdFromGid(eventGid)
+        ?: return@flatMap Failure(ShopifyError.Undecodable("fulfillment event id $eventGid carries no number"))
 
       Success(ShopifyFulfillmentEventId(id))
     }
@@ -330,7 +369,8 @@ class HttpShopifyGraphqlService(
    * The single point that runs an operation: injects the per-shop `X-Shopify-Access-Token` header
    * and does the triage every caller used to repeat — a non-2xx status is [ShopifyError.TokenRejected]
    * or [ShopifyError.HttpError], a thrown transport failure is [ShopifyError.Network], a body the
-   * generated types cannot read is [ShopifyError.Undecodable], top-level `errors` are a
+   * generated types cannot read is [ShopifyError.Undecodable], top-level `errors` that are all
+   * `ACCESS_DENIED` are [ShopifyError.AccessDenied], any other top-level `errors` are a
    * [ShopifyError.GraphqlError] with their codes, and so is a response without `data`. The
    * named methods above only look at their payload.
    *
@@ -352,7 +392,7 @@ class HttpShopifyGraphqlService(
       val status = e.response.status.value
       if (e.response.status != HttpStatusCode.Unauthorized) return Failure(ShopifyError.HttpError(status))
       onTokenRejected()
-      return Failure(ShopifyError.TokenRejected(status))
+      return Failure(ShopifyError.TokenRejected(status, tokenFingerprint))
     } catch (e: SerializationException) {
       return Failure(ShopifyError.Undecodable(e.message ?: "not the expected JSON"))
     } catch (e: IOException) {
@@ -363,6 +403,12 @@ class HttpShopifyGraphqlService(
     cost?.let { costReporter.report(shop, request.operationName ?: "unnamed", it) }
     val errors = response.errors
     if (!errors.isNullOrEmpty()) {
+      // Only when every error is one: a throttle or an internal error beside it must still read as what it is.
+      if (errors.all { it.code() == ACCESS_DENIED_CODE }) {
+        val messages = errors.map { it.message }
+        val denied = ShopifyError.AccessDenied(messages.joinToString("; "), requiredScopeHandles(messages), tokenFingerprint)
+        return Failure(denied)
+      }
       return Failure(
         ShopifyError.GraphqlError(
           message = errors.joinToString("; ") { it.message },
@@ -395,6 +441,18 @@ private fun Order.truncatedConnectionOrNull(): ShopifyError.Truncated? = when {
     ShopifyError.Truncated("fulfillmentOrders.lineItems", ORDER_LINE_ITEMS_PAGE_SIZE)
   else -> null
 }
+
+private const val ACCESS_DENIED_CODE = "ACCESS_DENIED"
+
+/**
+ * Shopify's documented wording, `Required access: `<scope>` access scope.`, names each handle in backticks before
+ * "access scope", also when it lists alternatives (`` `a` access scope, `b` access scope or `c` access scope``).
+ */
+private val REQUIRED_SCOPE_HANDLE = Regex("`([a-z0-9_]+)` access scope")
+
+/** The scopes the messages name, each once and in order; a message in other words contributes nothing. */
+private fun requiredScopeHandles(messages: List<String>): List<String> =
+  messages.flatMap { message -> REQUIRED_SCOPE_HANDLE.findAll(message).map { it.groupValues[1] } }.distinct()
 
 /** A payload and what Shopify said it cost, if it said. */
 private data class Costed<T : Any>(val data: T, val cost: ShopifyQueryCost?)

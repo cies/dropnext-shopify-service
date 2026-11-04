@@ -1,6 +1,7 @@
 package dropnext.dss
 
 import dropnext.dss.boot.warmup.WarmUp
+import dropnext.dss.boot.warmup.WarmUpVerdict
 import dropnext.dss.contract.UpdateStoreApiKeyRequest
 import dropnext.dss.contract.UpdateStoreApiKeyResponse
 import dropnext.dss.domain.ShopifyAdminToken
@@ -109,7 +110,7 @@ class DssModuleTest {
           contentType(ContentType.Application.Json)
           setBody("""{"shopify_subdomain":"acme","api_key":"${ADMIN_TOKEN.value}","shopify_shop_id":99}""")
         }
-        client.get("${Paths.apiCheck}?shop=acme.myshopify.com")
+        client.get("${Paths.storesShopifyStatus}?shopify_subdomain=acme")
       }
     }
 
@@ -187,7 +188,7 @@ class DssModuleTest {
   fun `health answers 503 while the warm-up runs and 200 once it is done`() {
     val gate = CompletableDeferred<Unit>()
     val deps = testDependencies(shopify = FakeShopifyGraphqlService())
-    withDssApp(deps, warmUp = WarmUp(5.seconds) { gate.await() }) { client ->
+    withDssApp(deps, warmUp = WarmUp(5.seconds) { _, _ -> gate.await(); WarmUpVerdict.TakeTraffic }) { client ->
       val warming = client.get(Paths.health)
       assert(warming.status == HttpStatusCode.ServiceUnavailable)
       val warmingBody = warming.body<JsonObject>()
@@ -206,7 +207,7 @@ class DssModuleTest {
   fun `every other route is served while the warm-up runs`() {
     val gate = CompletableDeferred<Unit>()
     val deps = testDependencies(shopify = FakeShopifyGraphqlService())
-    withDssApp(deps, warmUp = WarmUp(5.seconds) { gate.await() }) { client ->
+    withDssApp(deps, warmUp = WarmUp(5.seconds) { _, _ -> gate.await(); WarmUpVerdict.TakeTraffic }) { client ->
       assert(client.get(Paths.api).status == HttpStatusCode.OK)
       // The gate is still shut, so the `200` above was answered by a task that is not ready yet.
       assert(!deps.readiness.isReady)

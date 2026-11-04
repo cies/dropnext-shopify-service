@@ -108,13 +108,58 @@ class WebhookDeliveryReportTest {
 
   @Test
   fun `a Graphql failure's codes are on the log line, and a permanent one is an error`() {
-    val denied = report(WebhookMirrorOutcome.ShopifyFailed(ShopifyError.GraphqlError("Access denied", codes = listOf("ACCESS_DENIED"))))
-    assert(denied.logLevel == WebhookDeliveryReport.LogLevel.ERROR)
+    val tooCostly = report(WebhookMirrorOutcome.ShopifyFailed(ShopifyError.GraphqlError("Too costly", codes = listOf("MAX_COST_EXCEEDED"))))
+    assert(tooCostly.logLevel == WebhookDeliveryReport.LogLevel.ERROR)
     assert(
-      denied.logLine(200) ==
-        "$LINE_START outcome=failed transient=false error=shopify_graphql codes=ACCESS_DENIED lag_ms=840 took_ms=612 answered=200",
+      tooCostly.logLine(200) ==
+        "$LINE_START outcome=failed transient=false error=shopify_graphql codes=MAX_COST_EXCEEDED lag_ms=840 took_ms=612 answered=200",
     )
-    assert(denied.toResponse(null) == WebhookDeliveryResponse(outcome = "failed", error = "shopify_graphql"))
+    assert(tooCostly.toResponse(null) == WebhookDeliveryResponse(outcome = "failed", error = "shopify_graphql"))
+  }
+
+  /** Shopify redelivers it, but only the merchant's approval makes a redelivery go differently: someone has to act. */
+  @Test
+  fun `a missing access scope is transient, an error, and names the scopes it needs`() {
+    val denied = ShopifyError.AccessDenied("Access denied", listOf("read_orders", "write_merchant_managed_fulfillment_orders"))
+    val report = report(WebhookMirrorOutcome.ShopifyFailed(denied))
+    assert(report.logLevel == WebhookDeliveryReport.LogLevel.ERROR)
+    assert(
+      report.logLine(502) ==
+        "$LINE_START outcome=failed transient=true error=shopify_access_denied " +
+        "required_scopes=read_orders,write_merchant_managed_fulfillment_orders lag_ms=840 took_ms=612 answered=502",
+    )
+    assert(report.toResponse(null) == WebhookDeliveryResponse(outcome = "failed", error = "shopify_access_denied"))
+  }
+
+  /** A `200`, because no redelivery goes differently before a deploy; an error, because someone has to make that deploy. */
+  @Test
+  fun `a denied scope the install does not ask for is permanent and an error`() {
+    val denied = ShopifyError.AccessDenied("Access denied", listOf("read_customers"))
+    val report = report(WebhookMirrorOutcome.ShopifyFailed(denied))
+    assert(report.logLevel == WebhookDeliveryReport.LogLevel.ERROR)
+    assert(
+      report.logLine(200) ==
+        "$LINE_START outcome=failed transient=false error=shopify_access_denied " +
+        "required_scopes=read_customers lag_ms=840 took_ms=612 answered=200",
+    )
+  }
+
+  /** Transient, so Shopify redelivers once the keys agree again; an error, because a key rotation went wrong. */
+  @Test
+  fun `a monolith that refuses our key is transient and an error`() {
+    val refused = MonolithError.Rejected(401, "no", MonolithErrorBody(message = null, code = null, monolithTraceId = null))
+    val report = report(WebhookMirrorOutcome.MonolithFailed(refused))
+    assert(report.logLevel == WebhookDeliveryReport.LogLevel.ERROR)
+    assert(report.logLine(502) == "$LINE_START outcome=failed transient=true error=monolith_401 lag_ms=840 took_ms=612 answered=502")
+  }
+
+  @Test
+  fun `a missing access scope Shopify named no handle for leaves the scopes off the line`() {
+    val report = report(WebhookMirrorOutcome.ShopifyFailed(ShopifyError.AccessDenied("Access denied", emptyList())))
+    assert(
+      report.logLine(502) ==
+        "$LINE_START outcome=failed transient=true error=shopify_access_denied lag_ms=840 took_ms=612 answered=502",
+    )
   }
 
   @Test

@@ -51,7 +51,7 @@ internal fun testDependencies(
   webhookMirrorBudget: Duration = WEBHOOK_MIRROR_BUDGET,
   webhookWriteGrace: Duration = WEBHOOK_WRITE_GRACE,
   webhookMirrorSlots: Semaphore = Semaphore(MAX_CONCURRENT_MIRRORS),
-  webhookClock: Clock = Clock.systemUTC(),
+  clock: Clock = Clock.systemUTC(),
   webhookTimeSource: TimeSource = TimeSource.Monotonic,
   // A read that waits for a shop's bucket would wait real seconds in a request test; the workflow tests assert the waits.
   shopifyReadPause: suspend (Duration) -> Unit = {},
@@ -66,7 +66,7 @@ internal fun testDependencies(
   webhookMirrorBudget = webhookMirrorBudget,
   webhookWriteGrace = webhookWriteGrace,
   webhookMirrorSlots = webhookMirrorSlots,
-  webhookClock = webhookClock,
+  clock = clock,
   webhookTimeSource = webhookTimeSource,
   shopifyReadPause = shopifyReadPause,
   shipmentSyncTimeSource = shipmentSyncTimeSource,

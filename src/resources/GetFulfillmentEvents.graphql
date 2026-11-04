@@ -1,0 +1,12 @@
+# Newest first, so a redelivered tracking event, which is recent, is on the one page asked for.
+query GetFulfillmentEvents($id: ID!, $eventsFirst: Int!) {
+  fulfillment(id: $id) {
+    events(first: $eventsFirst, sortKey: HAPPENED_AT, reverse: true) {
+      nodes {
+        id
+        status
+        happenedAt
+      }
+    }
+  }
+}

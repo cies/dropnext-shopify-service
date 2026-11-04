@@ -17,10 +17,12 @@ import dropnext.dss.lib.shopify.webhook.shopDomainFromWebhook
 import dropnext.dss.lib.slf4j.SHOP_MDC_KEY
 import dropnext.dss.lib.slf4j.currentTraceId
 import dropnext.dss.lib.slf4j.withMdcEntries
+import dropnext.dss.workflow.UnknownProductStatusWarning
 import dropnext.dss.workflow.WebhookMirrorOutcome
 import dropnext.dss.workflow.WebhookSkipReason
 import dropnext.dss.workflow.deleteShopifyProductFromMonolith
 import dropnext.dss.workflow.isTransient
+import dropnext.dss.workflow.reportShopifyAccessProblem
 import dropnext.dss.workflow.syncShopifyOrderToMonolith
 import dropnext.dss.workflow.syncShopifyProductToMonolith
 import io.github.oshai.kotlinlogging.KotlinLogging
@@ -76,11 +78,14 @@ const val WEBHOOK_MONOLITH_MAX_RETRIES: Int = 1
 /**
  * The one inbound Shopify webhook endpoint: verifies the body signature, resolves the shop and its
  * service, and dispatches on the topic to the workflow that mirrors the change into the monolith.
- * The answer is chosen from the outcome: `200` for whatever a redelivery could not improve (done,
- * nothing to do, a token or a request that is refused), a `502` when Shopify or the monolith did not
- * answer or answered a `5xx`, so Shopify's own redelivery, up to eight times in four hours, is the retry.
- * Every verified delivery ends in one [WebhookDeliveryReport]: the one summary line it leaves in the log, at the
- * level the outcome asks for, and the response body. Nothing here logs an outcome a second time.
+ * The answer is chosen from the outcome.
+ * A `200` is for whatever a redelivery could not improve: done, nothing to do, a token or a request that is refused.
+ * A `502` is for Shopify or the monolith not answering or answering a `5xx`, and for a scope the grant lacks.
+ * Shopify's own redelivery, up to eight times in four hours, is then the retry.
+ * Every verified delivery ends in one [WebhookDeliveryReport]:
+ * its summary line in the log, at the level the outcome asks for, and the response body.
+ * Nothing here logs an outcome a second time.
+ * An access problem reported to the monolith adds the report's own line.
  *
  * [mirrorSlots] bounds how many deliveries are being mirrored at once ([MAX_CONCURRENT_MIRRORS]); a delivery that finds
  * none free is answered `502` without work.
@@ -89,6 +94,7 @@ class ShopifyWebhookHandlers(
   private val shopifyGraphqlServiceFactory: ShopifyGraphqlServiceFactory,
   private val monolithService: MonolithService,
   private val shopifyHmacVerifierService: ShopifyHmacVerifierService,
+  private val unknownProductStatusWarning: UnknownProductStatusWarning,
   private val mirrorBudget: Duration = WEBHOOK_MIRROR_BUDGET,
   private val writeGrace: Duration = WEBHOOK_WRITE_GRACE,
   private val mirrorSlots: Semaphore = Semaphore(MAX_CONCURRENT_MIRRORS),
@@ -126,7 +132,17 @@ class ShopifyWebhookHandlers(
         shop == null -> WebhookMirrorOutcome.Skipped(WebhookSkipReason.NO_SHOP_DOMAIN)
         !mirrorSlots.tryAcquire() -> WebhookMirrorOutcome.Overloaded
         else -> try {
-          mirrorWithinBudget(monolithService, mirrorBudget, writeGrace) { monolith -> mirror(topic, shop, bodyString, monolith) }
+          val mirrorStarted = timeSource.markNow()
+          val mirrored = mirrorWithinBudget(monolithService, mirrorBudget, writeGrace) { monolith ->
+            mirror(topic, shop, bodyString, monolith)
+          }
+          if (mirrored is WebhookMirrorOutcome.ShopifyFailed) {
+            // After the mirror's own work, in what is left of its budget: the report competes with nothing, and the
+            // answer to Shopify stays what the outcome says, whatever the monolith made of the report.
+            val left = mirrorBudget - mirrorStarted.elapsedNow()
+            reportShopifyAccessProblem(monolithService, shop, mirrored.error, "${topic.raw} webhook", clock.instant(), left)
+          }
+          mirrored
         } finally {
           mirrorSlots.release()
         }
@@ -162,7 +178,7 @@ class ShopifyWebhookHandlers(
     when (topic) {
       ShopifyWebhookTopic.ProductsCreate, ShopifyWebhookTopic.ProductsUpdate -> withShopifyService(shop) { shopify ->
         val gid = graphqlResourceIdFromShopifyWebhook(topic.raw, bodyString) ?: return skipped(WebhookSkipReason.NO_RESOURCE_ID)
-        syncShopifyProductToMonolith(shopify, monolith, gid)
+        syncShopifyProductToMonolith(shopify, monolith, gid, unknownProductStatusWarning)
       }
 
       ShopifyWebhookTopic.ProductsDelete -> {

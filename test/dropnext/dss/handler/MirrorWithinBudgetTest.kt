@@ -1,6 +1,7 @@
 package dropnext.dss.handler
 
 import dev.forkhandles.result4k.Success
+import dropnext.dss.boot.config.Config
 import dropnext.dss.domain.ShopifyProductId
 import dropnext.dss.lib.shopify.graphql.PRODUCT_VARIANTS_PAGE_SIZE
 import dropnext.dss.testutil.fake.FakeMonolithService
@@ -8,6 +9,7 @@ import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
 import dropnext.dss.testutil.fixture.minimalOrder
 import dropnext.dss.testutil.fixture.sampleProductPage
 import dropnext.dss.testutil.helper.orderToCreateShopifyOrderRequest
+import dropnext.dss.workflow.UnknownProductStatusWarning
 import dropnext.dss.workflow.WEBHOOK_MAX_VARIANT_PAGES
 import dropnext.dss.workflow.WebhookMirrorOutcome
 import dropnext.dss.workflow.syncShopifyProductToMonolith
@@ -148,7 +150,8 @@ class MirrorWithinBudgetTest {
 
   private suspend fun mirrorProductAtThePageCap(shopify: FakeShopifyGraphqlService, monolith: FakeMonolithService) =
     mirrorWithinBudget(monolith, WEBHOOK_MIRROR_BUDGET, WEBHOOK_WRITE_GRACE) { tracked ->
-      syncShopifyProductToMonolith(shopify, tracked, "gid://shopify/Product/501")
+      val statusWarning = UnknownProductStatusWarning(Config.SHOPIFY_API_VERSION)
+      syncShopifyProductToMonolith(shopify, tracked, "gid://shopify/Product/501", statusWarning)
     }
 
   @Test

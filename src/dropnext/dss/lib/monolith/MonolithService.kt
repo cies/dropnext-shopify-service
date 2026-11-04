@@ -2,12 +2,15 @@ package dropnext.dss.lib.monolith
 
 import dev.forkhandles.result4k.Result
 import dropnext.dss.contract.CreateShopifyOrderRequest
+import dropnext.dss.contract.ShopifyAccessProblemRequest
+import dropnext.dss.contract.ShopifyAccessProblemResponse
 import dropnext.dss.contract.UpdateStoreApiKeyRequest
 import dropnext.dss.contract.UpsertProductVariantsRequest
 import dropnext.dss.domain.ShopifyAdminToken
 import dropnext.dss.domain.ShopifyProductId
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.domain.StoreId
+import kotlinx.serialization.json.JsonObject
 
 
 /** Outbound calls to the main backend (monolith). Path constants in [OutBoundMonolithPaths]. */
@@ -36,6 +39,18 @@ interface MonolithService {
    * variants of a product that no longer exists in Shopify. Answers the deleted count.
    */
   suspend fun deleteProductVariants(shopifySubdomain: String, productId: ShopifyProductId): MonolithResult<Int>
+
+  /**
+   * `POST` to [OutBoundMonolithPaths.storesShopifyAccessProblems] — Shopify refused the token or a scope for a store, so
+   * the monolith can flag it and tell the retailer. A store the monolith does not know is a `404` [MonolithError.Rejected].
+   */
+  suspend fun postShopifyAccessProblem(request: ShopifyAccessProblemRequest): MonolithResult<ShopifyAccessProblemResponse>
+
+  /**
+   * `GET` to [OutBoundMonolithDocumentPaths.openApiJson] — the document the checked-in contract copy was taken from,
+   * for the startup comparison. A body that is not a JSON object is [MonolithError.Undecodable].
+   */
+  suspend fun getOpenApiDocument(): MonolithResult<JsonObject>
 }
 
 /** What every [MonolithService] call returns. */

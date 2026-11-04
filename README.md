@@ -148,6 +148,17 @@ and never hand-edit it. The generator reads the served document as is (`generate
 the monolith's mount root, `/api/shopify-service/v1`, off the path keys, and fails the build on a key outside it),
 so what the monolith serves and what this repo checks in cannot drift apart.
 
+Nothing refreshes the copy for you, so two checks notice when it has fallen behind:
+
+* **At build time**, `./gradlew checkMonolithContractCopy` (part of `check`, so of `build`) compares the copy with the
+  document the sibling `../dropnext-monolith` checkout last rendered (`./gradlew renderDssOpenApi` there writes
+  `build/dss-openapi/openapi.json`). It prints which checkout, branch and revision it read and every difference, and
+  fails only on a breaking one: a removed path, operation, schema or property, an added or removed enum value, a field
+  or parameter whose `required` changed either way, a changed type, or another API root. Without the sibling, or before it has rendered the document, it
+  skips with a reason. It never runs the monolith's build, never reaches the network and never rewrites the copy.
+* **At startup**, the warm-up compares the copy with what the monolith serves and logs the drift (see "Warm-up and
+  readiness" below).
+
 
 ### The JetBrains [Graphql IDE plugin](https://plugins.jetbrains.com/plugin/8097-graphql)
 
@@ -184,7 +195,7 @@ Webhooks and internal REST routes resolve the per-shop Admin token through the i
 * **Warm-up and readiness**: a freshly started task pays the JVM's one-time costs before it says it can take traffic,
   because at a quarter vCPU the first outbound HTTPS call alone takes longer than a webhook's whole budget. It makes one
   store lookup on the monolith (for a placeholder shop it answers `404` for) and, once its socket is bound, two requests
-  to itself over `127.0.0.1`: `GET /api/check` and a
+  to itself over `127.0.0.1`: `GET /stores/shopify-status` and a
   self-signed delivery for `orders/updated` (a topic the service does not subscribe to) with webhook id `warm-up`, so the
   inbound pipeline has run once end to end.
   `/health` answers `503 {"status":"warming_up"}` meanwhile and `200 {"status":"ok"}` after, at the latest about
@@ -192,6 +203,20 @@ Webhooks and internal REST routes resolve the per-shop Admin token through the i
   rotation until then while the task it replaces keeps serving. Two log lines, `Warm-up outbound done …` and
   `Warm-up inbound done …`, say what each step came to (info, or warn when a step failed). The warm-up changes
   nothing: no token is cached or dropped, the scan behind the check is read-only, the delivery is acknowledged without work.
+* **Shared-secret checks**: two of those steps check the bearer secrets. The store lookup proves the monolith accepts
+  `DSS_TO_MONOLITH_API_KEY` (any answer does, the `404` included). `GET /stores/shopify-status` proves only that our
+  own bearer provider accepts the `MONOLITH_TO_DSS_API_KEY` it was configured with, which is a wiring check: the DSS
+  cannot see the value the monolith holds, so a monolith with another key is not caught at startup. Only a `401` proves
+  a key wrong, and then the task never reports ready: it logs
+  `Warm-up refuses traffic: …` at error, writes the reason to stderr and exits with status `1`, so ECS replaces it and a
+  rolling deployment keeps the old task serving. A `403`, a `5xx` or no answer fails the step without stopping the task,
+  because a monolith that is down must not stop the service from serving the shops whose tokens it holds.
+* **Contract drift**: once the task has reported ready, it fetches the monolith's `/openapi.json` and compares it with
+  the checked-in copy, on the warm-up's trace id and bounded by the monolith client's timeout, so it never holds the
+  gate. Each difference is one `warn` line (`Contract drift kind=… location=…`, at most twenty),
+  followed by a `Contract drift summary differences=…` line with the true total; an identical document is one `info`
+  summary, and one that cannot be fetched is one `warn` line (`Contract drift not checked reason=…`). It never stops the
+  task: right after a monolith deployment the two differ by design.
 
 
 ### Webhooks registered on install
@@ -203,7 +228,7 @@ Subscriptions all use the same HTTPS callback: `{DSS_BASE_URL}/webhooks/shopify`
 
 On `products/create` and `products/update`, the app parses the webhook body for the resource id and runs `GetProductById`. On `orders/create`, it runs `GetOrderForDss` and POSTs to the monolith. All three are subscribed id-only (`id`, `admin_graphql_api_id`), because the resource is loaded right after; `products/delete` carries only the id anyway.
 
-The install leaves nothing else subscribed at the callback URL: a subscription there for a topic the service does not handle (such as `orders/updated`, which earlier versions registered) is deleted. A shop installed before a change to these topics or their fields gets it through `POST /api/webhooks/register?shop=` (bearer `MONOLITH_TO_DSS_API_KEY`), which runs the same registration without the merchant; `GET /api/check?shop=` shows what would change, and under `access_scopes` which of the scopes the install asks for the shop's grant lacks: a shop installed before that list changed keeps its old grant until it opens the install link again.
+The install leaves nothing else subscribed at the callback URL: a subscription there for a topic the service does not handle (such as `orders/updated`, which earlier versions registered) is deleted. A shop installed before a change to these topics or their fields gets it through `POST /stores/shopify-webhooks/register` (see "DSS internal REST"), which runs the same registration without the merchant; `GET /stores/shopify-status?shopify_subdomain=` shows what would change, and under `access_scopes` which of the scopes the install asks for the shop's grant lacks: a shop installed before that list changed keeps its old grant until it opens the install link again.
 
 **Compliance webhooks:** the app is custom-distributed, not public, so Shopify's mandatory compliance topics (`customers/data_request`, `customers/redact`, `shop/redact`) are not required: they are neither subscribed nor handled, and no customer data is redacted automatically. Shopify's API Terms still require deleting a merchant's data within 30 days of an uninstall or an enforceable deletion request. Going public is a new Shopify app, and these topics come first then.
 
@@ -218,9 +243,13 @@ The install leaves nothing else subscribed at the callback URL: a subscription t
 * `POST /tracking-update` — accepts `TrackingUpdateRequest` (tracking status → Shopify FulfillmentEvent).
 * `GET /products/catalog?shop=` — the shop's whole catalog as its variant ids grouped by product (`ShopCatalogResponse`), with how long to wait before the next call (`next_request_after_seconds`). The DSS pages Shopify and waits for the shop's rate budget as it goes, so this can take up to about two minutes; it answers the complete catalog or fails, never a part of it.
 * `POST /products/fetch` — accepts `FetchProductsRequest` (at most ten product ids); answers the products, with every page of their variants, as the `ProductVariantItem`s a product webhook would upsert, the ids Shopify no longer has, the ids it did not get to, and how long to wait before the next call. It paces itself against the shop's rate budget and, when a product keeps failing or 25 seconds have passed, answers what it loaded and lists the rest as not fetched; only a call that loaded nothing fails.
-* `PUT /stores/api-key` — accepts `UpdateStoreApiKeyRequest`; caches the Shopify Admin token in memory and forwards it to the monolith. A `502` (or a `404` for a store the monolith does not know) means the monolith did not persist it; the token stays cached either way. A blank `api_key` is a `400` before the cache is touched; `shopify_shop_id` may be `null` when unknown.
+* `PUT /stores/api-key` — accepts `UpdateStoreApiKeyRequest`; caches the Shopify Admin token in memory and forwards it to the monolith, with `granted_access_scopes` and `missing_access_scopes` as they came (the monolith sends neither; the OAuth install sends both). A `502` (or a `404` when the monolith answers, in its own JSON error, that it does not know the store; a router's `404` is a `502`) means the monolith did not persist it; the token stays cached either way. A blank `api_key` is a `400` before the cache is touched; `shopify_shop_id` may be `null` when unknown.
+* `GET /stores/shopify-status?shopify_subdomain=` — answers `ShopifyStoreStatusResponse`: whether the shop's token resolves, which of the scopes the install asks for its grant lacks (`access_scopes`: `complete`, `missing`, or `unknown`), one row per handled webhook topic (`active`, `mismatched` or `missing`, with stale subscriptions pointing elsewhere) and the `obsolete` subscriptions at our URL. Read-only: one monolith lookup and two Shopify queries. A token Shopify refuses is a `401` (and is reported to the monolith, below), a scan refused for a missing scope a `403`.
+* `POST /stores/shopify-webhooks/register` — accepts `RegisterShopifyWebhooksRequest`; runs the install's webhook registration for one shop without the merchant and answers `RegisterShopifyWebhooksResponse`: the same rows with what the run changed (`added`, `updated`, `repointed`, `not_applied`, `failed`; obsolete ones `deleted` or `delete_failed`) and a `summary` of the counts. A scan that fails is a `502` and changes nothing. It never touches the token.
 
 The per-shop Admin token is resolved server-side via the in-memory cache (filled by OAuth or `PUT /stores/api-key`) with a fallback to monolith `GET /stores`. These routes require `Authorization: Bearer <MONOLITH_TO_DSS_API_KEY>`.
+
+**A broken installation is reported to the monolith** (`POST /stores/shopify-access-problems`) the moment the DSS sees one: a token Shopify refuses (`token_rejected`) or a scope the grant lacks (`access_scope_missing`, with the handles Shopify named), seen by an `orders/create` or product webhook, by `sync-shipments-with-fulfillments`, `tracking-update`, `products/catalog` or `products/fetch`, by the store status or by the webhook registration. A scope the install does not ask for is not reported, because no reconnect grants it: it is answered `502` (and `200` to a Shopify webhook) and logged at error until a deploy adds it. The report never changes the DSS's own answer; a failed one is logged, and one the time budget leaves no room for is logged as `reason=budget_exhausted`.
 
 
 ### Security notes (production)
@@ -244,9 +273,9 @@ Unhandled server errors return a generic message; details stay in server logs on
 | `DSS_BASE_URL` | yes | Public https origin of this server (tunnel URL in dev); anything but an absolute `https://` URL is refused at startup |
 | `OAUTH_REDIRECT_PATH` | no | Default `/oauth/callback` (must match Partner redirect URL); anything but an absolute path is refused at startup |
 | `PORT` | no | Default `8080` |
-| `MONOLITH_BASE_URL` | yes | **REST root URL** DSS appends segments to (`/orders`, `/stores`, `/stores/api-key`, `/product-variants`). May include a path prefix, e.g. `https://staging.dropnext.com/api/shopify-service/v1` (no trailing slash). Leave `MONOLITH_API_PREFIX` empty when the full prefix is already in this value. Anything but an absolute `https://` URL (or `http://` with `DSS_ALLOW_INSECURE_MONOLITH`) is refused at startup. |
+| `MONOLITH_BASE_URL` | yes | **REST root URL** DSS appends segments to (`/orders`, `/stores`, `/stores/api-key`, `/product-variants`). May include a path prefix, e.g. `https://staging.dropnext.com/api/shopify-service/v1` (no trailing slash). Leave `MONOLITH_API_PREFIX` empty when the full prefix is already in this value. Anything but an absolute `https://` URL (or `http://` with `DSS_ALLOW_INSECURE_MONOLITH`) is refused at startup. Its origin (scheme, host and port, without the path) is also where the install page sends the merchant on, to `/retailer-portal`, as the monolith serves its portals on the host of its DSS API. So this must be the host the portals are on: an API-only host sends every merchant to a host without the portal, and nothing reports it. |
 | `MONOLITH_API_PREFIX` | no | Inserted **after** base: `{BASE}/{PREFIX}/stores/api-key`. Example env `MONOLITH_API_PREFIX=api/v1`. Omit slashes at edges; empty (default) uses paths directly under base. |
-| `DSS_TO_MONOLITH_API_KEY` | no | Bearer token sent on every monolith request (`Authorization`). The monolith checks incoming DSS calls against the variable of the same name. Letters, digits and `-._~+/` only; a placeholder value is refused at startup. |
+| `DSS_TO_MONOLITH_API_KEY` | yes | Bearer token sent on every monolith request (`Authorization`). The monolith checks incoming DSS calls against the variable of the same name and answers every call without it `401`. Letters, digits and `-._~+/` only; a placeholder value is refused at startup, and a value the monolith answers `401` for makes the task exit before it takes traffic. |
 | `MONOLITH_TO_DSS_API_KEY` | yes | Bearer token every monolith -> DSS call must carry (`Authorization: Bearer ...`). The monolith sends the variable of the same name. Letters, digits and `-._~+/` only, at least 32 characters. |
 | `DSS_ALLOW_INSECURE_MONOLITH` | no | Set `true` only for local dev, together with `DSS_MODE=DEV`, so `MONOLITH_BASE_URL` may use `http://`. In `PROD` mode (the default) the flag itself is refused at startup, and an insecure URL without it always is. |
 | `LOGFLARE_SOURCE_NAME` | no | Logflare source to ship logs to, e.g. `dropnext.dss` (the monolith ships to `dropnext.app`). Created through the API when it does not exist yet; when that API cannot hand out a token (the Logflare inside a local `supabase start` answers its source list with a 500) the service creates the source under a token derived from the name and ships under that. Shipping needs this **and** `LOGFLARE_API_KEY`; with either missing the service logs to stdout only. |
@@ -262,7 +291,7 @@ Unhandled server errors return a generic message; details stay in server logs on
 * **OAuth callback mismatch in Shopify**: ensure `{DSS_BASE_URL}{OAUTH_REDIRECT_PATH}` exactly matches the Partner Dashboard redirect URL.
 * **DSS auth failures (`401`)**: a bare `401` with a `WWW-Authenticate: Bearer` header means the `Authorization: Bearer <MONOLITH_TO_DSS_API_KEY>` header was missing or wrong; a `401` with a JSON body means no Shopify Admin token is resolvable for the shop, neither in memory nor at the monolith — complete OAuth or `PUT /stores/api-key`.
 * **`[monolith] MONOLITH_BASE_URL is unset` despite being configured**: duplicate `MONOLITH_BASE_URL` / `DSS_TO_MONOLITH_API_KEY` lines (often empty trailing blocks pasted from templates) cause **last value wins**. Remove the trailing empties so only one assignment remains; redeploy/restart.
-* **`Monolith store api-key … status=404` with HTML `<h1>Not Found`**: DSS hit `{MONOLITH_BASE_URL}/stores/api-key` (before optional prefix). Use the REST API domain (often `api.…`), or set `MONOLITH_API_PREFIX` if routes live under a path (`api/v1`). Confirm with `curl -i -X PUT https://your-api…/stores/api-key` (+ Bearer header) outside DSS.
+* **`Monolith store api-key … status=404` with HTML `<h1>Not Found`**: DSS hit `{MONOLITH_BASE_URL}/stores/api-key` (before optional prefix) on a host or path where the monolith's DSS API is not mounted. Point `MONOLITH_BASE_URL` at the portal host with the DSS API's path (e.g. `https://staging.dropnext.com/api/shopify-service/v1`), or set `MONOLITH_API_PREFIX` if the routes live under a further path; a separate API-only host would break the install page's *Continue to DropNext* button (see the `MONOLITH_BASE_URL` row). The install page reads such a `404` as not saved, never as an unknown store, since only the monolith's own JSON error says it has no such store. Confirm with `curl -i -X PUT https://your-monolith…/stores/api-key` (+ Bearer header) outside DSS.
 * **502 Bad Gateway on `DSS_BASE_URL`**: the reverse proxy forwards to the wrong container port. The JVM binds `PORT` (see `[http] Listening …` startup line). Dockerfile sets `ENV PORT=9999`, but dashboards that add an empty `PORT=` override that with blank. Set `PORT=9999` explicitly or remove the `PORT` key so the image default wins; Traefik/nginx must target the **same** port.
 * **Insecure monolith URL rejected**: set `DSS_ALLOW_INSECURE_MONOLITH=true` and `DSS_MODE=DEV` only for local development; production stays HTTPS and refuses the flag.
 

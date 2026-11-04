@@ -5,7 +5,7 @@ import org.junit.jupiter.api.Test
 
 
 /**
- * The counts the install page and `/api/check` print. The arithmetic is not the risk: which status
+ * The counts the install page and `/stores/shopify-status` print. The arithmetic is not the risk: which status
  * lands in which bucket is. A topic reported as active when the run failed to register it sends
  * nobody to look at it, and a subscription counted as gone when Shopify refused the deletion keeps
  * delivering.

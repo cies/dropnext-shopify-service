@@ -32,6 +32,24 @@ class MonolithErrorBodyTest {
     assert(parsed.monolithTraceId == null)
   }
 
+  /** Only the contract's envelope carries the monolith's own words, which a caller may show. */
+  @Test
+  fun `the monolith's ApiError is the contract's envelope`() {
+    val flat = """{"error":"Store not found.","code":"NotFound","trace_id":"1a2b3c4d"}"""
+    assert(parseMonolithErrorBody(flat).isContractEnvelope)
+    assert(parseMonolithErrorBody("""{"error":"Order already exists."}""").isContractEnvelope)
+  }
+
+  /** A router's or a proxy's answer comes from something in front of the monolith, whatever its status says. */
+  @Test
+  fun `a body that is not the monolith's ApiError is not the contract's envelope`() {
+    assert(!parseMonolithErrorBody("<html><h1>Not Found</h1></html>").isContractEnvelope)
+    assert(!parseMonolithErrorBody("""{"error":{"code":"InternalError","message":"nested"}}""").isContractEnvelope)
+    assert(!parseMonolithErrorBody("""{"detail":"Not Found"}""").isContractEnvelope)
+    assert(!parseMonolithErrorBody("[1,2,3]").isContractEnvelope)
+    assert(!parseMonolithErrorBody("").isContractEnvelope)
+  }
+
   @Test
   fun `formatForLog includes monolith_trace_id`() {
     val parsed = parseMonolithErrorBody("""{"error":"boom","code":"InternalError","trace_id":"abc"}""")

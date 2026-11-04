@@ -64,6 +64,13 @@ class DssErrorTest {
     assert(DssError.InvalidSignature("Invalid HMAC").toHttpStatus() == HttpStatusCode.Forbidden)
   }
 
+  /** On a monolith-facing route, where no signature is checked, a `403` means one thing: re-authorize the app. */
+  @Test
+  fun `a missing access scope maps to 403`() {
+    val missing = DssError.ShopifyAccessScopeMissing(listOf("read_orders"))
+    assert(missing.toHttpStatus() == HttpStatusCode.Forbidden)
+  }
+
   @Test
   fun `not found maps to 404`() {
     assert(DssError.NotFound("order 1 not found").toHttpStatus() == HttpStatusCode.NotFound)

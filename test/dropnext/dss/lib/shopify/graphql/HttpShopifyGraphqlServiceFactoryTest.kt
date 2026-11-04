@@ -2,6 +2,7 @@ package dropnext.dss.lib.shopify.graphql
 
 import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopifyAdminToken
+import dropnext.dss.lib.crypto.shopifyTokenFingerprint
 import dropnext.dss.lib.shopify.token.InMemoryShopTokenStore
 import dropnext.dss.lib.shopify.token.ShopLookup
 import dropnext.dss.testutil.fake.FakeMonolithService
@@ -73,7 +74,8 @@ class HttpShopifyGraphqlServiceFactoryTest {
     shopify.stubRaw("ShopIdentity", """{"errors":"[API] Invalid API key or access token"}""", HttpStatusCode.Unauthorized)
 
     val rejected = (factory.forShop(ACME_SHOP) as ShopLookup.Found).value.shopIdentity()
-    assert(rejected.failureReason() == ShopifyError.TokenRejected(401))
+    // Named after the token Shopify refused, not the one the monolith answers next.
+    assert(rejected.failureReason() == ShopifyError.TokenRejected(401, shopifyTokenFingerprint("shpat_revoked")))
 
     factory.forShop(ACME_SHOP)
     assert(monolith.getStoreCalls.single() == "acme")

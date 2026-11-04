@@ -4,6 +4,8 @@ import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
 import dropnext.dss.contract.CreateShopifyOrderRequest
 import dropnext.dss.contract.DeleteProductVariantsResponse
+import dropnext.dss.contract.ShopifyAccessProblemRequest
+import dropnext.dss.contract.ShopifyAccessProblemResponse
 import dropnext.dss.contract.StoreResponse
 import dropnext.dss.contract.UpdateStoreApiKeyRequest
 import dropnext.dss.contract.UpdateStoreApiKeyResponse
@@ -33,6 +35,7 @@ import io.ktor.http.contentType
 import java.io.IOException
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerializationException
+import kotlinx.serialization.json.JsonObject
 
 
 /**
@@ -49,7 +52,7 @@ class HttpMonolithService(
   private val httpClient: HttpClient,
   private val baseUrl: String,
   private val apiPathPrefix: String?,
-  private val apiKey: DssToMonolithApiKey?,
+  private val apiKey: DssToMonolithApiKey,
 ) : MonolithService {
 
   private val prefixedBase: String = run {
@@ -62,7 +65,7 @@ class HttpMonolithService(
 
   private fun HttpRequestBuilder.applyDefaults() {
     accept(ContentType.Application.Json)
-    apiKey?.takeIf { it.value.isNotBlank() }?.let { header("Authorization", "Bearer ${it.value}") }
+    header("Authorization", "Bearer ${apiKey.value}")
   }
 
   override suspend fun postCreateOrder(request: CreateShopifyOrderRequest): MonolithResult<CreateOrderOutcome> =
@@ -132,6 +135,26 @@ class HttpMonolithService(
       }
     }) { response, body ->
       response.decodeOk(body, DeleteProductVariantsResponse.serializer()) { it.deleted }
+    }
+
+  override suspend fun postShopifyAccessProblem(
+    request: ShopifyAccessProblemRequest,
+  ): MonolithResult<ShopifyAccessProblemResponse> =
+    monolithCall({
+      httpClient.post(url(OutBoundMonolithPaths.storesShopifyAccessProblems)) {
+        contentType(ContentType.Application.Json)
+        applyDefaults()
+        setBody(MonolithJson.encodeToString(ShopifyAccessProblemRequest.serializer(), request))
+      }
+    }) { response, body ->
+      response.decodeOk(body, ShopifyAccessProblemResponse.serializer()) { it }
+    }
+
+  override suspend fun getOpenApiDocument(): MonolithResult<JsonObject> =
+    monolithCall({
+      httpClient.get(url(OutBoundMonolithDocumentPaths.openApiJson)) { applyDefaults() }
+    }) { response, body ->
+      response.decodeOk(body, JsonObject.serializer()) { it }
     }
 }
 

@@ -46,6 +46,12 @@ class ParsedFulfillmentStatusTest {
     assert((result as ParsedFulfillmentStatus.Unknown).raw == "yeeted")
   }
 
+  /** Shopify's unknown statuses decode to that constant, so accepting it would match any of them. */
+  @Test
+  fun `the generated unknown value is not a status`() {
+    assert(ParsedFulfillmentStatus.parseFulfillmentEventStatus("__unknown_value") is ParsedFulfillmentStatus.Unknown)
+  }
+
   @Test
   fun `accepts canonical enum names directly`() {
     val result = ParsedFulfillmentStatus.parseFulfillmentEventStatus("READY_FOR_PICKUP")

@@ -52,7 +52,8 @@ class DeleteShopifyProductFromMonolithTest {
     }
 
     assert(monolith.deleteProductVariantsCalls.size == 1)
-    val rejection = MonolithError.Rejected(404, "forced fail", MonolithErrorBody("forced fail", "VariantError", "fake-delete"))
+    val body = MonolithErrorBody("forced fail", "VariantError", "fake-delete", isContractEnvelope = true)
+    val rejection = MonolithError.Rejected(404, "forced fail", body)
     assert(lines.value == WebhookMirrorOutcome.MonolithFailed(rejection))
     // The monolith refused what we sent; a redelivery would be refused the same way.
     assert(!lines.value.isTransient)

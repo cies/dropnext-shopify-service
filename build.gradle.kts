@@ -493,3 +493,25 @@ sourceSets["main"].kotlin.srcDir(monolithPathsGeneratedDir)
 tasks.named("compileKotlin") {
   dependsOn(tasks.named("openApiGenerate"), tasks.named("generateOutBoundMonolithPaths"))
 }
+
+// Compares the checked-in copy with the document the sibling monolith checkout last rendered
+// (`./gradlew renderDssOpenApi` there writes `build/dss-openapi/openapi.json`), printing every difference and
+// failing only on a breaking one, so the additive change the monolith deploys first keeps this build green.
+// The comparison is the one the service runs at startup, so the task runs it from the main classpath rather than
+// reimplementing it here. It reads two files: it never builds the monolith, never reaches the network and never
+// rewrites the copy. Without the sibling (CI for this repo alone, the Docker build) it skips with a reason.
+val checkMonolithContractCopy by tasks.registering(JavaExec::class) {
+  group = "verification"
+  description = "Compares monolith-dss-openapi.json with the sibling monolith's rendered document."
+
+  classpath = sourceSets["main"].runtimeClasspath
+  mainClass.set("dropnext.dss.lib.monolith.drift.CheckContractCopyKt")
+  args(
+    openApiSpecFile.absolutePath,
+    layout.projectDirectory.asFile.resolve("../dropnext-monolith").normalize().absolutePath,
+  )
+}
+
+tasks.named("check") {
+  dependsOn(checkMonolithContractCopy)
+}

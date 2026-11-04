@@ -50,7 +50,8 @@ deprecated API use").
   `workflow/` function composing primitives.
 - The triage happens once, in `HttpShopifyGraphqlService.execute` and the method that owns the payload: a thrown
   transport failure is `ShopifyError.Network`, a body the generated types cannot read is `ShopifyError.Undecodable`,
-  top-level `errors` (or a missing `data`) are a `ShopifyError.GraphqlError` carrying their `extensions.code`s, a
+  top-level `errors` (or a missing `data`) are a `ShopifyError.GraphqlError` carrying their `extensions.code`s, unless
+  every one of them is `ACCESS_DENIED`, which is a `ShopifyError.AccessDenied` naming the scopes Shopify asked for, a
   mutation payload's `userErrors` are `ShopifyError.UserError`, an absent resource is `ShopifyError.NotFound`. Each knows
   whether a retry can help (`isRetryable`). A caller pattern-matches on `Success` / `Failure` and never reads
   `response.errors`.

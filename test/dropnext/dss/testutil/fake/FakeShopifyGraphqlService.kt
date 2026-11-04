@@ -16,6 +16,7 @@ import dropnext.dss.lib.shopify.graphql.ShopIdentityInfo
 import dropnext.dss.lib.shopify.graphql.ShopProduct
 import dropnext.dss.lib.shopify.graphql.ShopifyCatalogPage
 import dropnext.dss.lib.shopify.graphql.ShopifyError
+import dropnext.dss.lib.shopify.graphql.ShopifyFulfillmentEvent
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlService
 import dropnext.dss.lib.shopify.graphql.ShopifyResult
 import dropnext.dss.testutil.helper.MutableTimeSource
@@ -86,6 +87,10 @@ class FakeShopifyGraphqlService(
   /** The content of each fulfillment by gid; a fulfillment not in here is not found. */
   val fulfillmentContentResults: MutableMap<String, ShopifyResult<PackageContent>> = mutableMapOf()
   val fulfillmentContentCalls: MutableList<String> = mutableListOf()
+
+  /** No events by default: a tracking update that is not about a redelivery finds none and creates its own. */
+  var fulfillmentEventsResult: ShopifyResult<List<ShopifyFulfillmentEvent>> = Success(emptyList())
+  val fulfillmentEventsCalls: MutableList<String> = mutableListOf()
 
   var cancelFulfillmentResult: ShopifyResult<Unit> = Success(Unit)
 
@@ -168,6 +173,11 @@ class FakeShopifyGraphqlService(
       ?: error("no fulfillmentContent stubbed for $fulfillmentGid")
   }
 
+  override suspend fun fulfillmentEvents(fulfillmentGid: String): ShopifyResult<List<ShopifyFulfillmentEvent>> {
+    fulfillmentEventsCalls.add(fulfillmentGid)
+    return fulfillmentEventsResult
+  }
+
   override suspend fun cancelFulfillment(fulfillmentGid: String): ShopifyResult<Unit> {
     cancelFulfillmentCalls.add(fulfillmentGid)
     passShipmentSyncCallTime()
@@ -246,6 +256,7 @@ class FakeShopifyGraphqlService(
     orderForDssGate = null
     fulfillmentContentResults.clear()
     fulfillmentContentCalls.clear()
+    fulfillmentEventsCalls.clear()
     cancelFulfillmentResults.clear()
     cancelFulfillmentCalls.clear()
     shipmentSyncTimeSource = null

@@ -18,10 +18,6 @@ object Paths {
   const val api = "/api"
   const val apiRedirectUrl = "/api/redirect-url"
 
-  // --- Webhook subscriptions (called by the monolith) ---
-  const val apiCheck = "/api/check"
-  const val apiWebhooksRegister = "/api/webhooks/register"
-
   // --- Shopify OAuth ---
   const val install = "/install"
 
@@ -37,4 +33,6 @@ object Paths {
   const val trackingUpdate = "/tracking-update"
   const val productsCatalog = "/products/catalog"
   const val productsFetch = "/products/fetch"
+  const val storesShopifyStatus = "/stores/shopify-status"
+  const val storesShopifyWebhooksRegister = "/stores/shopify-webhooks/register"
 }

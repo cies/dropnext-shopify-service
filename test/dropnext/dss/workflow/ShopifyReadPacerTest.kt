@@ -98,13 +98,26 @@ class ShopifyReadPacerTest {
     assert(pauses.isEmpty())
   }
 
+  /** Retryable in the long run, but only once the merchant approved the scope: seconds later Shopify refuses it again. */
+  @Test
+  fun `a missing access scope is answered at once`() = runBlocking {
+    val denied = ShopifyError.AccessDenied("Access denied for products field.", listOf("read_products"))
+    val answers = Answers(Failure(denied))
+
+    val answered = pacer.readFrom(answers)
+
+    assert(answered.failureReason() == denied)
+    assert(answers.calls == 1)
+    assert(pauses.isEmpty())
+  }
+
   /** A refusal reports the bucket as it is now, which is newer than what the last success said. */
   @Test
   fun `the budget a refusal reports replaces the one the last success reported`() = runBlocking {
     pacer.readFrom(Answers(Success(bucket(900.0))))
-    val denied = ShopifyError.GraphqlError("Access denied", codes = listOf("ACCESS_DENIED"), rateBudget = bucket(100.0))
+    val tooCostly = ShopifyError.GraphqlError("Too costly", codes = listOf("MAX_COST_EXCEEDED"), rateBudget = bucket(100.0))
 
-    pacer.readFrom(Answers(Failure(denied)))
+    pacer.readFrom(Answers(Failure(tooCostly)))
 
     assert(pacer.budget == bucket(100.0))
   }

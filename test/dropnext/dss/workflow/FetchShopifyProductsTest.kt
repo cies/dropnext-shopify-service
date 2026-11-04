@@ -2,6 +2,7 @@ package dropnext.dss.workflow
 
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
+import dropnext.dss.boot.config.Config
 import dropnext.dss.domain.ShopifyProductId
 import dropnext.dss.domain.ShopifyRateBudget
 import dropnext.dss.lib.shopify.graphql.ShopProduct
@@ -12,17 +13,23 @@ import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
 import dropnext.dss.testutil.fixture.sampleProduct
 import dropnext.dss.testutil.fixture.sampleProductPage
 import dropnext.dss.testutil.fixture.sampleProductVariant
+import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
+import dropnext.dss.testutil.helper.capturingLogs
 import dropnext.dss.testutil.helper.failureReason
 import dropnext.dss.testutil.helper.successValue
+import dropnext.graphql.generated.enums.ProductStatus as GraphqlProductStatus
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.parallel.ResourceLock
 
 
 class FetchShopifyProductsTest {
+
+  private val statusWarning = UnknownProductStatusWarning(Config.SHOPIFY_API_VERSION)
 
   private val budget = ShopifyRateBudget(maximumAvailable = 1000.0, currentlyAvailable = 940.0, restoreRate = 50.0)
 
@@ -72,7 +79,7 @@ class FetchShopifyProductsTest {
     val fake = FakeShopifyGraphqlService()
     val shopify = perProduct(fake, 501L to Success(product(501, 11, 12)), 502L to Success(product(502, 21)))
 
-    val fetched = fetchShopifyProducts(shopify, ids(501, 502), pause = recordPause).successValue()
+    val fetched = fetchShopifyProducts(shopify, ids(501, 502), statusWarning, pause = recordPause).successValue()
 
     assert(fake.productByIdCalls == listOf("gid://shopify/Product/501", "gid://shopify/Product/502"))
     assert(fetched.productVariants.map { it.productVariantId } == listOf(11L, 12L, 21L))
@@ -89,7 +96,7 @@ class FetchShopifyProductsTest {
   fun `a product Shopify no longer has is reported missing and the others still answer`() = runBlocking {
     val shopify = perProduct(FakeShopifyGraphqlService(), 501L to Success(null), 502L to Success(product(502, 21)))
 
-    val fetched = fetchShopifyProducts(shopify, ids(501, 502), pause = recordPause).successValue()
+    val fetched = fetchShopifyProducts(shopify, ids(501, 502), statusWarning, pause = recordPause).successValue()
 
     assert(fetched.missingProductIds == listOf(ShopifyProductId(501)))
     assert(fetched.productVariants.map { it.productVariantId } == listOf(21L))
@@ -110,7 +117,7 @@ class FetchShopifyProductsTest {
       503L to Success(product(503, 31)),
     )
 
-    val fetched = fetchShopifyProducts(shopify, ids(501, 502, 503), pause = recordPause).successValue()
+    val fetched = fetchShopifyProducts(shopify, ids(501, 502, 503), statusWarning, pause = recordPause).successValue()
 
     assert(fetched.productVariants.map { it.productVariantId } == listOf(11L))
     assert(fetched.missingProductIds.isEmpty())
@@ -137,7 +144,7 @@ class FetchShopifyProductsTest {
       503L to Success(product(503, 31)),
     )
 
-    val fetched = fetchShopifyProducts(shopify, ids(501, 502, 503), pause = recordPause).successValue()
+    val fetched = fetchShopifyProducts(shopify, ids(501, 502, 503), statusWarning, pause = recordPause).successValue()
 
     assert(fetched.productVariants.map { it.productVariantId } == listOf(11L, 12L))
     assert(fetched.unfetchedProductIds == ids(502, 503))
@@ -156,7 +163,7 @@ class FetchShopifyProductsTest {
       502L to Success(product(502, 21)),
     )
 
-    val fetched = fetchShopifyProducts(shopify, ids(501, 502), pause = recordPause).successValue()
+    val fetched = fetchShopifyProducts(shopify, ids(501, 502), statusWarning, pause = recordPause).successValue()
 
     assert(fetched.productVariants.map { it.productVariantId } == listOf(11L, 21L))
     assert(fetched.unfetchedProductIds.isEmpty())
@@ -173,7 +180,7 @@ class FetchShopifyProductsTest {
       502L to Success(product(502, 21).copy(rateBudget = drained)),
     )
 
-    val fetched = fetchShopifyProducts(shopify, ids(501, 502), pause = recordPause).successValue()
+    val fetched = fetchShopifyProducts(shopify, ids(501, 502), statusWarning, pause = recordPause).successValue()
 
     // 200 points short of half, at 50 a second, before the second product; the last one leaves the wait to the caller.
     assert(pauses == listOf(4.seconds))
@@ -185,7 +192,7 @@ class FetchShopifyProductsTest {
   fun `a throttle on the first product fails the fetch`() = runBlocking {
     val shopify = perProduct(FakeShopifyGraphqlService(), 501L to Failure(throttledOnAHalfFullBucket))
 
-    val result = fetchShopifyProducts(shopify, ids(501, 502), pause = recordPause)
+    val result = fetchShopifyProducts(shopify, ids(501, 502), statusWarning, pause = recordPause)
 
     assert(result.failureReason() == throttledOnAHalfFullBucket)
   }
@@ -201,7 +208,13 @@ class FetchShopifyProductsTest {
       }
     }
 
-    val fetched = fetchShopifyProducts(stallingOnTheSecond, ids(501, 502, 503), deadline = 50.milliseconds, pause = recordPause)
+    val fetched = fetchShopifyProducts(
+      stallingOnTheSecond,
+      ids(501, 502, 503),
+      statusWarning,
+      deadline = 50.milliseconds,
+      pause = recordPause,
+    )
       .successValue()
 
     assert(fetched.productVariants.map { it.productVariantId } == listOf(11L))
@@ -218,7 +231,7 @@ class FetchShopifyProductsTest {
       502L to Failure(ShopifyError.Truncated("product.variants", 2500)),
     )
 
-    val fetched = fetchShopifyProducts(shopify, ids(501, 502), pause = recordPause).successValue()
+    val fetched = fetchShopifyProducts(shopify, ids(501, 502), statusWarning, pause = recordPause).successValue()
 
     assert(fetched.productVariants.map { it.productVariantId } == listOf(11L))
     assert(fetched.unfetchedProductIds == ids(502))
@@ -230,7 +243,7 @@ class FetchShopifyProductsTest {
   fun `a product named twice is loaded once and answered once`() = runBlocking {
     val fake = FakeShopifyGraphqlService().apply { productByIdResult = Success(product(501, 11)) }
 
-    val fetched = fetchShopifyProducts(fake, ids(501, 501), pause = recordPause).successValue()
+    val fetched = fetchShopifyProducts(fake, ids(501, 501), statusWarning, pause = recordPause).successValue()
 
     assert(fake.productByIdCalls.size == 1)
     assert(fetched.productVariants.size == 1)
@@ -246,7 +259,7 @@ class FetchShopifyProductsTest {
       productByIdResult = Failure(ShopifyError.Truncated("product.variants", 100))
     }
 
-    val result = fetchShopifyProducts(fake, ids(501), pause = recordPause)
+    val result = fetchShopifyProducts(fake, ids(501), statusWarning, pause = recordPause)
 
     assert(result.failureReason() == ShopifyError.Truncated("product.variants", 100))
   }
@@ -258,7 +271,7 @@ class FetchShopifyProductsTest {
       productByIdResultQueue += Success(sampleProductPage((101L..150L).toList()))
     }
 
-    val fetched = fetchShopifyProducts(fake, ids(501), pause = recordPause).successValue()
+    val fetched = fetchShopifyProducts(fake, ids(501), statusWarning, pause = recordPause).successValue()
 
     assert(fetched.productVariants.map { it.productVariantId } == (1L..150L).toList())
     assert(fake.productByIdCursors == listOf(null, "c1"))
@@ -271,7 +284,7 @@ class FetchShopifyProductsTest {
       productByIdResultQueue += Success(null)
     }
 
-    val fetched = fetchShopifyProducts(fake, ids(501), pause = recordPause).successValue()
+    val fetched = fetchShopifyProducts(fake, ids(501), statusWarning, pause = recordPause).successValue()
 
     assert(fetched.productVariants.isEmpty())
     assert(fetched.missingProductIds == listOf(ShopifyProductId(501)))
@@ -285,7 +298,7 @@ class FetchShopifyProductsTest {
         awaitCancellation()
     }
 
-    val reason = fetchShopifyProducts(stalled, ids(501), deadline = 50.milliseconds, pause = recordPause).failureReason()
+    val reason = fetchShopifyProducts(stalled, ids(501), statusWarning, deadline = 50.milliseconds, pause = recordPause).failureReason()
 
     assert(reason == ShopifyError.TimedOut("fetching 1 products", 50.milliseconds))
     assert(reason.isRetryable)
@@ -297,11 +310,31 @@ class FetchShopifyProductsTest {
   }
 
   /** Impossible in Shopify, and answered as an empty item list rather than as missing if it ever happens. */
+  /** A new status reaches many products at once, and the line that matters is that the schema moved. */
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `products whose status this build does not know are warned about once across fetches`() {
+    val unknown = { id: Long ->
+      val product = sampleProduct(legacyResourceId = "$id", variantId = "${id}1", status = GraphqlProductStatus.__UNKNOWN_VALUE)
+      Success(ShopProduct(product, "EUR"))
+    }
+    val shopify = perProduct(FakeShopifyGraphqlService(), 501L to unknown(501), 502L to unknown(502))
+
+    val lines = capturingLogs {
+      runBlocking {
+        fetchShopifyProducts(shopify, ids(501, 502), statusWarning, pause = recordPause)
+        fetchShopifyProducts(shopify, ids(501, 502), statusWarning, pause = recordPause)
+      }
+    }
+
+    assert(lines.count { "Shopify product status unknown to this build" in it } == 1)
+  }
+
   @Test
   fun `a product without variants answers no items and is not missing`() = runBlocking {
     val fake = FakeShopifyGraphqlService().apply { productByIdResult = Success(product(501)) }
 
-    val fetched = fetchShopifyProducts(fake, ids(501), pause = recordPause).successValue()
+    val fetched = fetchShopifyProducts(fake, ids(501), statusWarning, pause = recordPause).successValue()
 
     assert(fetched.productVariants.isEmpty())
     assert(fetched.missingProductIds.isEmpty())

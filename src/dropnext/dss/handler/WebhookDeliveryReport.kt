@@ -1,11 +1,14 @@
 package dropnext.dss.handler
 
+import dropnext.dss.lib.monolith.MonolithError
 import dropnext.dss.lib.monolith.errorLabel
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.lib.shopify.graphql.errorLabel
+import dropnext.dss.lib.shopify.graphql.needsHumanAction
 import dropnext.dss.workflow.WebhookMirrorOutcome
 import dropnext.dss.workflow.WebhookSkipReason
 import dropnext.dss.workflow.isTransient
+import dropnext.dss.workflow.refusesOurKey
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -48,7 +51,14 @@ data class WebhookDeliveryReport(
 
   /** Shopify's `extensions.code` values (`THROTTLED`, `ACCESS_DENIED`): as countable as the label, and they say which Graphql error it was. */
   val graphqlErrorCodes: List<String>
-    get() = ((outcome as? WebhookMirrorOutcome.ShopifyFailed)?.error as? ShopifyError.GraphqlError)?.codes.orEmpty()
+    get() = (shopifyError as? ShopifyError.GraphqlError)?.codes.orEmpty()
+
+  /** The scopes a missing grant needs, for whoever re-authorizes the app: the one thing they have to know. */
+  val requiredScopeHandles: List<String>
+    get() = (shopifyError as? ShopifyError.AccessDenied)?.requiredScopeHandles.orEmpty()
+
+  private val shopifyError: ShopifyError?
+    get() = (outcome as? WebhookMirrorOutcome.ShopifyFailed)?.error
 
   val skipReasonLabel: String?
     get() = (outcome as? WebhookMirrorOutcome.Skipped)?.reason?.name?.lowercase()
@@ -57,20 +67,28 @@ data class WebhookDeliveryReport(
    * Chosen by what the reader has to do: nothing for a mirrored delivery or a skip that is the normal shape of things,
    * act on a skip that repeats for every delivery of the shop until someone does (no token, no shop), wait for a
    * transient failure (Shopify redelivers it), act for a permanent one (only a human can fix a refused token or a
-   * refused order). This is the one line a delivery leaves in the log, so its level is what an alert reads.
+   * refused order) and for a missing scope, which Shopify redelivers but only the merchant's approval lets through, and
+   * for a monolith that refuses our key, which Shopify redelivers but only a fixed key rotation lets through.
+   * This is the delivery's summary line, so its level is what an alert reads.
+   * Only an access problem reported to the monolith adds a line of its own.
    */
   val logLevel: LogLevel
     get() = when (val outcome = outcome) {
       is WebhookMirrorOutcome.Mirrored -> LogLevel.INFO
       is WebhookMirrorOutcome.Skipped -> outcome.reason.logLevel
-      is WebhookMirrorOutcome.ShopifyFailed, is WebhookMirrorOutcome.MonolithFailed,
-      is WebhookMirrorOutcome.TokenUnavailable, is WebhookMirrorOutcome.TimedOut, is WebhookMirrorOutcome.Overloaded,
+      is WebhookMirrorOutcome.ShopifyFailed -> if (outcome.error.needsHumanAction) LogLevel.ERROR else LogLevel.WARN
+      is WebhookMirrorOutcome.MonolithFailed -> {
+        val refusesOurKey = (outcome.error as? MonolithError.Rejected)?.refusesOurKey == true
+        if (outcome.isTransient && !refusesOurKey) LogLevel.WARN else LogLevel.ERROR
+      }
+      is WebhookMirrorOutcome.TokenUnavailable,
+      is WebhookMirrorOutcome.TimedOut, is WebhookMirrorOutcome.Overloaded,
         -> if (outcome.isTransient) LogLevel.WARN else LogLevel.ERROR
     }
 
   enum class LogLevel { INFO, WARN, ERROR }
 
-  /** The one summary line per delivery, in the `key=value` style Logflare queries are written against. */
+  /** The summary line of a delivery, in the `key=value` style Logflare queries are written against. */
   fun logLine(answeredStatus: Int): String = buildString {
     append("Webhook done topic=").append(topic)
     append(" webhook_id=").append(webhookId ?: "-")
@@ -78,6 +96,7 @@ data class WebhookDeliveryReport(
     skipReasonLabel?.let { append(" reason=").append(it) }
     errorLabel?.let { append(" transient=").append(outcome.isTransient).append(" error=").append(it) }
     if (graphqlErrorCodes.isNotEmpty()) append(" codes=").append(graphqlErrorCodes.joinToString(","))
+    if (requiredScopeHandles.isNotEmpty()) append(" required_scopes=").append(requiredScopeHandles.joinToString(","))
     lagMillis?.let { append(" lag_ms=").append(it) }
     append(" took_ms=").append(tookMillis)
     append(" answered=").append(answeredStatus)

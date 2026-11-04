@@ -8,9 +8,10 @@ import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlService
 import dropnext.dss.lib.shopify.graphql.ShopifyResult
 import dropnext.dss.lib.shopify.graphql.errorLabel
+import dropnext.dss.lib.shopify.graphql.needsHumanAction
 import dropnext.dss.lib.shopify.graphql.throttledRetryAfter
 import dropnext.dss.lib.shopify.productGid
-import dropnext.dss.mapper.toProductVariantItems
+import dropnext.dss.mapper.mapProductForMonolith
 import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
@@ -36,13 +37,15 @@ const val FETCH_PAGE_RETRIES: Int = 2
 /**
  * The products the monolith named, as the variant items its upsert already takes, the ids Shopify no longer has, and
  * the ids this fetch did not get to. Every product named is in exactly one of those.
- * [nextRequestAfter] is how long the caller should wait before its next call for this shop.
+ * [nextRequestAfter] is how long the caller should wait before its next call for this shop. [stoppedBy] is why a fetch
+ * that answered some products did not get to the rest, so the caller can pass on a refused token or a missing scope.
  */
 data class FetchedShopifyProducts(
   val productVariants: List<ProductVariantItem>,
   val missingProductIds: List<ShopifyProductId>,
   val unfetchedProductIds: List<ShopifyProductId>,
   val nextRequestAfter: Duration,
+  val stoppedBy: ShopifyError? = null,
 )
 
 /**
@@ -65,6 +68,7 @@ data class FetchedShopifyProducts(
 suspend fun fetchShopifyProducts(
   shopify: ShopifyGraphqlService,
   productIds: List<ShopifyProductId>,
+  statusWarning: UnknownProductStatusWarning,
   deadline: Duration = FETCH_PRODUCTS_BUDGET,
   budgetFloor: Double = CATALOG_BUDGET_FLOOR,
   pageRetries: Int = FETCH_PAGE_RETRIES,
@@ -74,7 +78,7 @@ suspend fun fetchShopifyProducts(
   // them twice for no gain.
   val distinctIds = productIds.distinct()
   val pacer = ShopifyReadPacer(budgetFloor, pageRetries, pause)
-  val fetch = ProductFetch(shopify, pacer)
+  val fetch = ProductFetch(shopify, pacer, statusWarning)
   val finished = withTimeoutOrNull(deadline) { fetch.run(distinctIds) } != null
   val timedOut = if (finished) null else ShopifyError.TimedOut("fetching ${distinctIds.size} products", deadline)
   val stop = fetch.failure ?: timedOut
@@ -88,8 +92,8 @@ suspend fun fetchShopifyProducts(
     val outcome = if (fetch.answered.isEmpty()) "failed" else "stopped early"
     val line = "Fetch products $outcome: $summary stopped_at=${unfetched.firstOrNull()} " +
       "error=${stop.errorLabel}: ${stop.message}"
-    // A failure a retry cannot fix needs a human: a revoked token, a product with more variants than we load.
-    if (stop.isRetryable) log.warn { line } else log.error { line }
+    // A revoked token, a missing scope, a product with more variants than we load: someone has to act.
+    if (stop.needsHumanAction) log.error { line } else log.warn { line }
     if (fetch.answered.isEmpty()) return Failure(stop)
   }
 
@@ -102,6 +106,7 @@ suspend fun fetchShopifyProducts(
       missingProductIds = fetch.missing.toList(),
       unfetchedProductIds = unfetched,
       nextRequestAfter = nextRequestAfter,
+      stoppedBy = stop,
     )
   )
 }
@@ -113,6 +118,7 @@ suspend fun fetchShopifyProducts(
 private class ProductFetch(
   private val shopify: ShopifyGraphqlService,
   private val pacer: ShopifyReadPacer,
+  private val statusWarning: UnknownProductStatusWarning,
 ) {
   val variantItems = mutableListOf<ProductVariantItem>()
   val missing = mutableListOf<ShopifyProductId>()
@@ -134,7 +140,9 @@ private class ProductFetch(
           if (shopProduct == null) {
             missing.add(productId)
           } else {
-            variantItems.addAll(shopProduct.product.toProductVariantItems(shopProduct.shopCurrencyCode))
+            val mapping = mapProductForMonolith(shopProduct.product, shopProduct.shopCurrencyCode)
+            statusWarning.warnIfUnknown(shopProduct.product.legacyResourceId, mapping)
+            variantItems.addAll(mapping.productVariants)
           }
           answered.add(productId)
         }

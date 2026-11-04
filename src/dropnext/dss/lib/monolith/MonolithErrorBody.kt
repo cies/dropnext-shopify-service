@@ -8,11 +8,14 @@ import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * Parsed monolith error payload. [monolithTraceId] is the backend's `trace_id` (not DSS request trace).
+ * [isContractEnvelope] says the body was the contract's `ApiError`, so [message] is the monolith's own words.
+ * Anything else came from something in front of it, such as a router's `404` page or a proxy's error page.
  */
 data class MonolithErrorBody(
   val message: String?,
   val code: String?,
   val monolithTraceId: String?,
+  val isContractEnvelope: Boolean = false,
 ) {
   fun formatForLog(): String {
     val parts = mutableListOf<String>()
@@ -58,10 +61,11 @@ fun parseMonolithErrorBody(rawBody: String): MonolithErrorBody {
 private fun parseApiError(root: JsonObject): MonolithErrorBody {
   val errorElement = root["error"]
     ?: return MonolithErrorBody(message = null, code = null, monolithTraceId = null)
-  val message = (errorElement as? JsonPrimitive)?.content ?: errorElement.toString().take(200)
+  val errorText = (errorElement as? JsonPrimitive)?.takeIf { it.isString }?.content
   return MonolithErrorBody(
-    message = message,
+    message = errorText ?: errorElement.toString().take(200),
     code = root["code"]?.jsonPrimitive?.content,
     monolithTraceId = root["trace_id"]?.jsonPrimitive?.content,
+    isContractEnvelope = errorText != null,
   )
 }

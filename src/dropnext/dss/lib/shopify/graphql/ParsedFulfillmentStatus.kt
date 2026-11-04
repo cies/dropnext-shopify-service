@@ -22,7 +22,11 @@ sealed interface ParsedFulfillmentStatus {
     fun parseFulfillmentEventStatus(raw: String): ParsedFulfillmentStatus {
       // Normalise to Shopify's `UPPER_SNAKE_CASE` enum form before the lookup, so a spelling variant still matches.
       val normalized = raw.trim().uppercase().replace('-', '_').replace(' ', '_')
-      val mapped = FulfillmentEventStatus.entries.find { it.name == normalized }
+      // The generated `__UNKNOWN_VALUE` is what Shopify's answer decodes to for a status this build does not know.
+      // Accepting it from the monolith would match any such event.
+      val mapped = FulfillmentEventStatus.entries
+        .filterNot { it == FulfillmentEventStatus.__UNKNOWN_VALUE }
+        .find { it.name == normalized }
         ?: when (normalized) {
           "IN_TRANSIT", "TRANSIT" -> FulfillmentEventStatus.IN_TRANSIT
           "DELIVERED", "DELIVERY" -> FulfillmentEventStatus.DELIVERED

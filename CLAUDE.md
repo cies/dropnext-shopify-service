@@ -38,6 +38,12 @@ contract, deploying, the sibling layout — is described in the workspace-level 
 # Re-generate the monolith DTOs and `OutBoundMonolithPaths` from `src/resources/monolith-dss-openapi.json`
 # (both also run automatically as a dependency of `compileKotlin`)
 ./gradlew openApiGenerate generateOutBoundMonolithPaths
+
+# Compare that copy with the document the sibling `../dropnext-monolith` last rendered (`./gradlew renderDssOpenApi`
+# there); prints every difference and the checkout's branch and revision, fails only on a breaking difference, skips
+# with a reason when the sibling or its rendered document is absent. Part of `check`, so it runs on every `build`.
+# Reads two files: never builds the monolith, never reaches the network, never rewrites the copy.
+./gradlew checkMonolithContractCopy
 ```
 
 
@@ -101,18 +107,18 @@ credentials, so the human developer starts it — see "Operational boundary".
 ├── dependencies.kt              # `DssDependencies` + `dssDependencies(config, …)`: the whole object graph, built once; tests override collaborators (see "Dependency wiring")
 ├── boot/                        # What the process is started with and what it does before taking traffic; not the application itself, so it wires nothing of the handlers
 │   ├── config/                  # `Config.from(env)` (one flat data class holding every env var, secrets wrapped) and the `.env` reader
-│   └── warmup/                  # The warm-up before taking traffic: the workflow, its report, the `Readiness` flag `/health` reads, `WarmUp` + `startWarmUp` (the Ktor trigger), and the loopback client it sends itself requests with
+│   └── warmup/                  # The warm-up before taking traffic and the two shared-secret checks in it: the workflow, its report and verdict, the `Readiness` flag `/health` reads, `WarmUp` + `startWarmUp` (the Ktor trigger), `exitRefusingTraffic`, and the loopback client it sends itself requests with
 ├── domain/                      # The vocabulary every layer shares, depending on nothing of ours: `ShopDomain`, the ids and secrets (value classes), the access scopes the install requests, the reports the install page renders
 │   └── fulfillment/             # Pure logic over an order snapshot: the open-line index, the fulfillment-order matcher, a package's content and the cancel plan, request validation
 ├── handler/                     # Ktor handlers, one `*Handlers` class per route family: receive the (already decoded and validated) request, resolve the shop, call a workflow, map its answer (`toDssError`) onto the response
 ├── routing/                     # One `Route.*Routes(handlers)` per handler family; nothing but path ↔ handler bindings
 ├── path/                        # `Paths`: every inbound path constant (routes, log lines and the webhook callback URL all read it)
-├── mapper/                      # Shopify snapshot → monolith contract DTO: the order and product mappers and the money helpers
+├── mapper/                      # Shopify snapshot or domain report → monolith contract DTO: the order and product mappers, the money helpers, the store status rows
 ├── presentation/                # Pure view layer: a report in, HTML string out; no Ktor or Shopify-schema types (`ArchitectureTest` checks)
-├── workflow/                    # Orchestrations composing service primitives: shop install, order and product sync, shipment ↔ fulfillment sync (`calculate` → `determine` → `effect` mutations), tracking events, webhook registration, the token-store fallback; no Ktor server types
+├── workflow/                    # Orchestrations composing service primitives: shop install, order and product sync, shipment ↔ fulfillment sync (`calculate` → `determine` → `effect` mutations), tracking events, webhook registration, the token-store fallback, the access problem report; no Ktor server types
 └── lib/                         # Stand-alone building blocks; may depend on `domain` and `contract`, never on an application package nor on each other (`ArchitectureTest` checks)
     ├── shopify/                 # Shopify protocol primitives: GIDs, `oauth/` (client + outbound OAuth paths), `webhook/` (HMAC verifier, topics, shop and id parsers), `graphql/` (`ShopifyGraphqlService` with typed results + `Http…` impl, the service factory), `token/` (`ShopTokenStore` + the in-memory store)
-    ├── monolith/                # The other direction: `MonolithService` + `HttpMonolithService` answering `MonolithResult`, error-body parsing, structured failure logging
+    ├── monolith/                # The other direction: `MonolithService` + `HttpMonolithService` answering `MonolithResult`, error-body parsing, structured failure logging; `drift/` compares the monolith's OpenAPI document with the checked-in copy (the startup check and the build's `checkMonolithContractCopy`)
     ├── json/                    # `AppJson`, `MonolithJson` and `ContractJson`
     ├── crypto/                  # The one HMAC-SHA256 and constant-time compare
     ├── slf4j/                   # The MDC keys shared with the monolith (`trace_id`, `shop`, `route`, …), `currentTraceId()`, and `withMdcEntries` for a value a handler or the warm-up adds
@@ -139,7 +145,7 @@ credentials, so the human developer starts it — see "Operational boundary".
 4. Dispatch on `ShopifyWebhookTopic`, each case one workflow function:
    - `products/create`, `products/update`: `syncShopifyProductToMonolith` — `loadShopifyProduct` (`productById`
      page by page, at most `WEBHOOK_MAX_VARIANT_PAGES`, so a larger product is refused as truncated rather than
-     outliving the webhook's budget), map with `toProductVariantItems`, upsert the variants on the monolith
+     outliving the webhook's budget), map with `mapProductForMonolith`, upsert the variants on the monolith
      (`upsertProductVariants`). The request is marked `product_variants_complete` unless the mapper dropped a
      variant, and then the monolith soft-deletes the product's variants it leaves out. Subscribed id-only
      (`id`, `admin_graphql_api_id`), like `orders/create`: the product is loaded anyway.
@@ -154,8 +160,11 @@ credentials, so the human developer starts it — see "Operational boundary".
      compliance topics, which are not subscribed (see "Shopify app distribution").
 5. Every workflow answers a `WebhookMirrorOutcome`, and the handler chooses the status from it (`isTransient`): `200`
    when a redelivery could not go better (mirrored, nothing to mirror, no token, a token, a request or a query that is
-   refused, an answer that no longer decodes), `502` when Shopify or the monolith did not answer, throttled, answered a
-   `5xx`, or the work outlived `WEBHOOK_MIRROR_BUDGET` (four seconds, inside Shopify's five; a monolith write already
+   refused, a scope the install does not ask for (`AccessDenied.needsDeploy`), an answer that no longer decodes), `502`
+   when Shopify or the monolith did not answer, throttled, answered a `5xx`, refused an access scope the grant lacks
+   (`ShopifyError.AccessDenied`: the redelivery window covers the merchant re-authorizing the app), the monolith refused
+   our key with a `401` or `403` (a key rotation that has not reached both sides; the redelivery window covers the
+   redeploy), or the work outlived `WEBHOOK_MIRROR_BUDGET` (four seconds, inside Shopify's five; a monolith write already
    sent gets `WEBHOOK_WRITE_GRACE`, 0.7 s more, before it is cancelled, so a commit that lands late is still a `200`),
    or every mirror slot was taken when the delivery arrived (`MAX_CONCURRENT_MIRRORS`: answered before any work, so
    a burst cannot queue up behind itself). Whether a Shopify failure
@@ -163,13 +172,20 @@ credentials, so the human developer starts it — see "Operational boundary".
    `extensions.code`, since those arrive with HTTP `200`). Shopify redelivers a non-2xx, or
    no answer within five seconds, up to eight times in four hours with a growing interval, so that is the retry;
    the monolith's idempotent handling makes it safe. After repeated failures within 24 hours Shopify removes the
-   subscription, which `/api/check` then reports as `missing`
+   subscription, which `/stores/shopify-status` then reports as `missing`
    ([Shopify: troubleshoot webhooks](https://shopify.dev/docs/apps/build/webhooks/troubleshooting-webhooks)).
 6. Every verified delivery ends in one `WebhookDeliveryReport`: the `Webhook done …` summary line (info for a
    mirrored delivery and for a skip that is the normal shape of things, error for a skip that repeats until someone
-   acts, such as a shop without a token, warn for a transient failure, error for a permanent one) with the webhook
+   acts, such as a shop without a token, warn for a transient failure, error for a permanent one, for a missing
+   access scope, whose line adds `required_scopes=`, and for a monolith that refuses our key, `error=monolith_401` or
+   `error=monolith_403`) with the webhook
    id, the delivery lag and a countable `reason=` or `error=` label, and the `200` body that says the same, which
-   Shopify stores with the delivery in the Partner Dashboard. It is the one line a delivery leaves in the log.
+   Shopify stores with the delivery in the Partner Dashboard. It is the one line a delivery leaves in the log, but
+   for the report below.
+7. A mirror that ends in `ShopifyError.TokenRejected` or `ShopifyError.AccessDenied` is reported to the monolith
+   (`reportShopifyAccessProblem`, see "Shopify access problems") through the webhook monolith service, after the
+   mirror and inside what is left of `WEBHOOK_MIRROR_BUDGET`; with nothing left it is skipped and logged
+   (`reason=budget_exhausted`). The report never changes the status Shopify is answered.
 
 Deduplication of Shopify's at-least-once delivery is **not implemented**: the service runs as a single instance and
 relies on the monolith's idempotent handling.
@@ -185,33 +201,72 @@ decode or does not pass the domain validators is a `400` shaped by `StatusPages`
 | Route | Body | Does |
 |---|---|---|
 | `POST /sync-shipments-with-fulfillments` | `SyncShipmentsWithFulfillmentsRequest` | `syncShopifyShipmentsToFulfillments`: reconciles the order's fulfillments with every live shipment the monolith sends: cancels the fulfillments under the retired tracking numbers that no live shipment's content matches, creates one for each live shipment that has none and fits whole, skips what does not fit, and answers a per-shipment report (calculate → determine → effect, within `SHIPMENT_SYNC_BUDGET`, 25 s under the 30 s the monolith waits; see `docs/FULFILLMENT_VERIFICATION.md`). |
-| `POST /tracking-update` | `TrackingUpdateRequest` | `syncShopifyTrackingEvent`: a tracking status becomes a Shopify `FulfillmentEvent`. |
+| `POST /tracking-update` | `TrackingUpdateRequest` | `syncShopifyTrackingEvent`: a tracking status becomes a Shopify `FulfillmentEvent`, unless the fulfillment's newest 50 events (`fulfillmentEvents`) already hold one with the same status at the same second: then that event's id is answered and nothing is created, because the monolith delivers an update at least once. A failed read of the events fails the call, so the monolith retries it. |
 | `GET /products/catalog?shop=` | — | `readShopifyCatalog`: every variant the shop has, grouped under its product (`ShopCatalogResponse`), plus `next_request_after_seconds`, the wait the shop's rate budget calls for before the monolith's next call. Walks `productVariants` to the end inside the DSS, waiting for the bucket to refill when it drops under half and asking again for a page that failed retryably; answers the whole catalog or fails, never a partial one, because the monolith soft-deletes whatever the answer omits. A throttled page waits for the refill Shopify reports; a cursor that does not advance fails the walk; the whole walk is bounded by `CATALOG_READ_BUDGET` (140 s, under the monolith's 150) and answers `502` past it, so it never outlives the caller. |
 | `POST /products/fetch` | `FetchProductsRequest` | `fetchShopifyProducts`: the named products (at most `MAX_PRODUCTS_PER_FETCH`) as the `ProductVariantItem`s a `products/update` webhook would upsert, the ids Shopify no longer has, the ids it did not get to (`unfetched_product_ids`) and `next_request_after_seconds`. Loads one product at a time, every page of its variants (`loadShopifyProduct`), paced like the catalog walk (`ShopifyReadPacer`). A product is answered whole or listed as not fetched: at the first product that keeps failing, or at `FETCH_PRODUCTS_BUDGET` (25 s, under the 30 s the monolith waits), the fetch answers what it loaded and lists the rest. Only a fetch that loaded no product fails (a `429` when throttled, a `502` past the budget). Reads only; the monolith stores the answer. |
-| `PUT /stores/api-key` | `UpdateStoreApiKeyRequest` | Caches the shop's Admin token in memory and forwards it to the monolith; answers `502` (or `404` for a store the monolith does not know) when the monolith did not persist it, with the token still cached. A blank `api_key` or a non-positive `shopify_shop_id` is a `400` before the cache is touched; `shopify_shop_id` is `null` when unknown. |
+| `PUT /stores/api-key` | `UpdateStoreApiKeyRequest` | Caches the shop's Admin token in memory and forwards it to the monolith, with `granted_access_scopes` and `missing_access_scopes` as they came (the monolith sends neither); answers `502` (or `404` for a store the monolith does not know) when the monolith did not persist it, with the token still cached. A blank `api_key` or a non-positive `shopify_shop_id` is a `400` before the cache is touched; `shopify_shop_id` is `null` when unknown. The body is the one the monolith's own `PUT /stores/api-key` takes, which is where the generated DTO comes from: the monolith's document describes the calls it makes, and this route is not one of them, so this table is its description. |
+| `GET /stores/shopify-status?shopify_subdomain=` | — | `ShopifyStoreHandlers.handleShopifyStoreStatus` (`ShopifyStoreStatusResponse`): see below. |
+| `POST /stores/shopify-webhooks/register` | `RegisterShopifyWebhooksRequest` | `ShopifyStoreHandlers.handleRegisterShopifyWebhooks` (`RegisterShopifyWebhooksResponse`): see below. |
 
 A shop Shopify throttled is answered `429` on every monolith-facing route, with the contract's `ThrottledError` body
 (`retry_after_seconds`: the time the shop's point bucket needs to refill to half and to hold the refused query's
 requested cost, from what Shopify reported, or ten seconds when it reported nothing; `throttledRetryAfter`) and the
 same number in `Retry-After`, so the monolith waits the shop's real refill rather than a backoff of its own.
 
-The other inbound routes are the OAuth pair (`/install`, `/oauth/callback`), the diagnostics endpoints (`/`,
-`/health`, `/api`, `/api/redirect-url`) and the per-shop webhook subscription pair (`/api/check`,
-`/api/webhooks/register`, `WebhookSubscriptionHandlers`); all of them are constants in `path/Paths.kt`. `/health` answers
-`503` with `status=warming_up` until the warm-up is done (see "Warm-up and readiness") and `200` with `status=ok`
-after; it is the one route the readiness gate touches. The webhook subscription pair sits behind the bearer auth.
-`GET /api/check?shop=` answers whether the shop's token resolves, which scopes of `ShopifyAccessScope` its grant lacks
+On these routes the two refusals that need the merchant are told apart by status: `401` is a shop without a token or
+with one Shopify rejects (reinstall the app), `403` is a grant that lacks an access scope the operation needs
+(`DssError.ShopifyAccessScopeMissing`, from `ShopifyError.AccessDenied`; re-authorize the app). Their body is the
+contract's `ShopifyConnectionError`, the `ApiError` fields plus what the monolith reads without parsing the message:
+`code` (`shopify_token_missing`, `shopify_token_rejected` or `shopify_access_scope_missing`, from
+`DssError.shopifyConnectionCode()`) and, for the `403`, `required_access_scopes`, the handles Shopify named. A stopped
+shipments sync carries the same `code` in its own body. `403` is otherwise only `InvalidSignature`, which no
+monolith-facing route answers. The monolith reads both as refused and stops retrying; the token is kept for a `403`. A scope the install
+does not ask for (`ShopifyError.AccessDenied.needsDeploy`: every handle Shopify named is outside `ShopifyAccessScope`)
+is no `403`: no re-authorization grants it, so it is a `502`, as any query Shopify will not run, until a deploy adds it.
+
+The store status and the webhook registration are mounted by `shopifyStoreRoutes`, inside the same
+`authenticate(MONOLITH_WEBHOOK_AUTH)` block, and answer the contract's DTOs, whose rows `mapper/toShopifyStoreStatusRows.kt`
+builds from the domain's reports. `GET /stores/shopify-status?shopify_subdomain=` answers whether the shop's token resolves, which scopes of `ShopifyAccessScope` its grant lacks
 (`access_scopes`: `complete`, `missing`, or `unknown` when Shopify cannot list them, which fails nothing else) and, from
 a read-only `scanShopifyWebhooks`, one row
 per handled webhook topic (`active` at our callback URL with the payload fields the topic declares, no filter and JSON,
 `mismatched` when subscribed there otherwise, or `missing`, plus stale subscriptions pointing elsewhere) and the
 `obsolete` subscriptions at our URL for a topic the service does not handle, so "is this shop still subscribed" can be
-asked without a reinstall. `POST /api/webhooks/register?shop=` runs the install's registration for one shop without the
+asked without a reinstall; an access scopes query that finds the token refused is reported to the monolith (see "Shopify
+access problems") and answered `401` at once, without the scan. `POST /stores/shopify-webhooks/register` (`shopify_subdomain` in the body, a blank one a `400` from
+`validateRegisterShopifyWebhooksRequest`) runs the install's registration for one shop without the
 merchant (`reregisterShopifyWebhooks`): it is how a change to the handled topics or their payload fields reaches a shop
 installed before it, and the monolith calls it once per shop it wants to bring along. It answers the same rows with
 what the run changed (`added`, `updated`, `repointed`, `not_applied`, `failed`, obsolete ones `deleted` or
 `delete_failed`) and a `summary` of the counts; a failed scan is a `502`, because a run without it would register blind
-and delete nothing. It never touches the token.
+and delete nothing, a `403` on both routes when the grant does not reach the subscriptions, or a `401` when Shopify
+rejects the token. It never touches the token.
+
+The other inbound routes are the OAuth pair (`/install`, `/oauth/callback`) and the diagnostics endpoints (`/`,
+`/health`, `/api`, `/api/redirect-url`); all of them are constants in `path/Paths.kt`. `/health` answers
+`503` with `status=warming_up` until the warm-up is done (see "Warm-up and readiness") and `200` with `status=ok`
+after; it is the one route the readiness gate touches.
+
+## Shopify access problems
+A token Shopify refuses (`ShopifyError.TokenRejected`) or a grant that lacks a scope (`ShopifyError.AccessDenied`) needs
+the merchant, so the DSS tells the monolith the moment it sees one: `reportShopifyAccessProblem` (`workflow/`) sends
+`POST /stores/shopify-access-problems` (`ShopifyAccessProblemRequest`: the kind, the handles Shopify named, the operation
+it was seen during and when, and `token_fingerprint`, which names the token Shopify refused) and ignores every other
+failure. The fingerprint is the first 16 lowercase hex characters of the token's SHA-256 (`shopifyTokenFingerprint` in
+`lib/crypto/`), carried on `ShopifyError.TokenRejected` and `AccessDenied` by the service that held the token. The monolith
+computes the same of the token it holds and drops a report about a token a reinstall has since replaced, whatever
+either clock says. A scope the install does not ask for is not reported
+either (`AccessDenied.needsDeploy`): no reconnect grants it, so the line is an error naming the scopes
+(`reason=scope_not_requested`), for whoever deploys. It is called after an `orders/create` or product webhook's
+mirror; from `sync-shipments-with-fulfillments`, `tracking-update`, `products/catalog` and `products/fetch` before
+their `401` or `403` (and from a fetch that answered some products, for what stopped it); from the store status when
+its access scopes query finds the token refused, or its scan is refused; and from the webhook registration when its
+scan is refused. Each call is bounded by what its caller has left (the webhook's budget; the shipments sync's, the
+catalog walk's or the fetch's, at most `ACCESS_PROBLEM_REPORT_BUDGET`, five seconds; or those five seconds), and a
+report that finds no time left is a `warn` with `reason=budget_exhausted`. The report never changes an answer: a failure goes through
+`logMonolithFailure` (a `404` for a store the monolith does not know is a warn), and the monolith's own `401`/`403` and
+its next check carry the same fact. The install's side is `persistTokenToMonolith`, which sends the granted and missing
+scope lists with the token, from which the monolith clears or sets the store's need for re-authorization.
 
 The canonical contract is the monolith's `/openapi.json`, checked in here as `src/resources/monolith-dss-openapi.json`;
 the DTOs (`dropnext.dss.contract`) and `OutBoundMonolithPaths` are generated from it — never
@@ -229,6 +284,10 @@ holds a line; do not add precision there.
 ## OAuth install flow
 `GET /install?shop=…` redirects to Shopify's authorize URL with a signed `state` and the scopes of
 `ShopifyAccessScope` in `domain/` (hardcoded, never a setting: changing them takes a deploy either way).
+The monolith builds this link itself, `<DSS_BASE_URL>/install?shop=<subdomain>.myshopify.com`, and shows it as a
+store's *Reconnect the DropNext app* button and in its "needs reconnecting" notification. Its document does not
+describe the route, since the monolith never calls it, so keep the path and the `shop` parameter as they are: this
+section is the description.
 `GET /oauth/callback` verifies the callback HMAC and the state, exchanges the code for an Admin token and the scopes
 granted with it (`ShopifyOAuthService`) and hands the rest to the `installShop` workflow: hold the granted scopes
 against `ShopifyAccessScope` (what is missing is a warn line and a red block on the page), learn the shop's canonical
@@ -239,6 +298,17 @@ format differ, repoints one stale HTTPS subscription per missing topic to our UR
 the topics still missing with the fields each topic declares, deletes a subscription at our URL for a topic the
 service does not handle, and reports active/added/updated/repointed/not applied/failed/deleted) and answer a `ShopInstallReport` that
 `renderOAuthInstallPage` renders. Nothing after the exchange fails the install; each step reports on the page instead.
+The page addresses the merchant first: it sorts the report into a `ShopInstallOutcome` (`Connected`, `ConnectedWithGaps`,
+`UnknownStore` for the monolith's own `404`, never a router's, `NotSaved`), says what that means and what to do, and links *Continue to DropNext*
+to the retailer portal (`Config.portalBaseUrl`, the origin of `MONOLITH_BASE_URL`, plus
+`OutBoundMonolithPortalPaths.retailerPortalRoot`: the one monolith page the DSS names, hand-written as no contract
+describes it). The report follows in a `<details>` element for support, open unless the install is `Connected`, and the
+request's trace id closes the page as the reference a support request names.
+Of what the monolith answered, the page shows only its own message; a proxy's page or a transport's host stays in the
+log. The page is sent with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, as its URL carries the OAuth code.
+It is styled as the monolith's e-mails are, with one style sheet and no inline `style`; its logo,
+`src/resources/dropnext-logo.svg`, is a copy of the monolith's `src/resources/static/images/logos/dropnext-logo.svg`,
+replaced together with it.
 Failures in this flow are plain-text errors (`respondTextError`), not JSON.
 
 ## Shopify app distribution
@@ -262,7 +332,7 @@ installs again.
 `FakeMonolithService` (in `test/`) the recording fake.
 
 - Base URL: `MONOLITH_BASE_URL` (+ optional `MONOLITH_API_PREFIX`); the paths come from the generated `OutBoundMonolithPaths`.
-- Auth: optional `DSS_TO_MONOLITH_API_KEY`, sent as a Bearer token.
+- Auth: `DSS_TO_MONOLITH_API_KEY` (required, as the monolith requires it), sent as a Bearer token on every call.
 - Timeouts and retries (`lib/ktor/httpClientBuilders.kt`, where each number is explained): a monolith call may take
   5 s and is retried up to 3 times on a dropped or refused connection or a `5xx` (never on a timeout), after 0.5, 1, and
   2 s, except when made for a webhook, whose four-second budget fits one retry (`WEBHOOK_MONOLITH_MAX_RETRIES`); a
@@ -314,17 +384,41 @@ used to fail its first `orders/create`. `warmUpBeforeTakingTraffic` (`boot/warmu
 traffic, in two parts that each end in one log line: the **outbound** part (one `getStore` through the webhook monolith
 service) needs only the dependency graph and starts on
 Ktor's `ApplicationStarted`; the **inbound** part waits for `ServerReady` (the socket is bound) and sends the service
-two requests over `127.0.0.1` through `HttpWarmUpLoopbackService` (`boot/warmup/`): `GET /api/check` with the monolith's
+two requests over `127.0.0.1` through `HttpWarmUpLoopbackService` (`boot/warmup/`): `GET /stores/shopify-status` with the monolith's
 bearer, and a self-signed delivery for `orders/updated` (a topic the service does not subscribe to, so it is acknowledged
 without work) with webhook id `warm-up`, so every plugin and the HMAC have run once. Both parts name `WARM_UP_PLACEHOLDER_SHOP`, which the monolith answers `404` for. The warm-up changes nothing and never throws for an upstream failure; a step it cannot run is `skipped`
 with a reason, a step that goes wrong is `failed` with a countable label.
 
+- **Two of the steps are checks**, and their verdict decides whether the task takes traffic
+  (`WarmUpReport.verdict`). `checkMonolithAcceptsOurKey` is the `getStore`: any answer, the `404` included, proves the
+  monolith accepts `DSS_TO_MONOLITH_API_KEY`. `checkBearerProviderWiring` is the loopback `GET /stores/shopify-status`
+  with the `MONOLITH_TO_DSS_API_KEY` the provider is configured with: a `401` carrying our bearer provider's challenge
+  (`WWW-Authenticate: Bearer realm=dss-internal`, read by `HttpWarmUpLoopbackService` into
+  `LoopbackAnswer.bearerRejected`) proves the wiring broken, while the handler's JSON `401` for a shop without a token
+  means the bearer passed. It proves our own wiring only: the DSS cannot see the value the monolith holds, so a
+  monolith with another `MONOLITH_TO_DSS_API_KEY` is not caught at startup. **Only a `401` is fatal**: the step is
+  `rejected`, the outbound or inbound line is at error, and the verdict is `RefuseTraffic`. A `403`, a `5xx`, a timeout or
+  no answer is a `failed` step and the task serves anyway. The third step, `warmInboundPipeline` (the delivery), only warms.
+- **A refused verdict ends the process.** `startWarmUp` then logs `Warm-up refuses traffic: …` at error, leaves
+  `Readiness` unmarked and hands the reason to `WarmUp.refuseTraffic`, which production sets to `exitRefusingTraffic`:
+  the reason on stderr, then exit status `1` from a thread of its own, so Ktor's shutdown hook (and the Logflare drain)
+  is not held up by the coroutine that asked. ECS replaces the task; a rolling deploy keeps the old one serving.
+- **The contract copy is compared after the gate opens**: `reportContractDrift` is the `WarmUp.afterReady` step, which
+  `startWarmUp` launches on a coroutine of its own once `Readiness` is marked, on the warm-up's trace id, so it is
+  bounded by the monolith client's timeout and never by the warm-up's budget. It runs `getOpenApiDocument`
+  (`OutBoundMonolithDocumentPaths.openApiJson`, relative to the same root as every other call) against
+  `readCheckedInContractCopy()`, through `compareContractDocuments` in `lib/monolith/drift/`.
+  Each difference is a `warn` line (`Contract drift kind=… location=… breaking=…`, at most
+  `MAX_LOGGED_CONTRACT_DIFFERENCES`), then a `Contract drift summary` line with the true total; identical is one `info`
+  summary, an unfetchable document one `warn` line. Never `error`, never a refusal: right after a monolith deploy the two
+  differ by design. The build-time `checkMonolithContractCopy` task runs the same comparison (see "Development commands").
 - `Readiness` (`boot/warmup/`) is the flag `/health` reads; `startWarmUp` (same package, called by `dssModule`) marks it in a `finally` when the `WarmUp` returns,
   throws or outlives its budget (`WARM_UP_BUDGET`, 20 s, plus a second's backstop), and when the application stops
-  underneath it. So a task is ready at the latest ~21 s after start, whatever the monolith did. Nothing else marks it
+  underneath it, unless the `WarmUp` answered `RefuseTraffic`. So a task is ready at the latest ~21 s after start,
+  whatever the monolith did, or it exits. Nothing else marks it
   (`ArchitectureTest` checks): a gate opened early sends a still-cold task its first webhook.
-- The warm-up runs outside any request, so it mints its own trace id (`warmup-…`), sends it as `X-Trace-Id` on both
-  loopback requests and puts it in the MDC through `withMdcEntries` (an `MDCContext`, the same element Ktor's
+- The warm-up runs outside any request, so `startWarmUp` mints its own trace id (`warmup-…`) and hands it to both
+  coroutines; the warm-up sends it as `X-Trace-Id` on both loopback requests and puts it in the MDC through `withMdcEntries` (an `MDCContext`, the same element Ktor's
   `callIdMdc` uses), so every line it causes, the clients' retry and failure lines included, carries it.
 - `dssModule(deps, warmUp)` takes the warm-up explicitly: `main` passes `deps.warmUp`, the production one over the
   graph's own clients; `withDssApp` passes `WarmUp.NONE` unless a test hands in another, because the production
@@ -365,9 +459,13 @@ There are some exceptions, those can be found in the `ArchitectureTest` as well.
 
 # Error handling
 - **Expected failures are values, not exceptions.** Every outbound call returns a result4k `Result`:
-  `ShopifyResult<T>` with a `ShopifyError` (`Network`, `TokenRejected`, `HttpError`, `GraphqlError`, `UserError`,
-  `NotFound`, `Undecodable`, `Truncated`, `TimedOut`), each of which knows whether a retry can help (`isRetryable`), or `MonolithResult<T>` with
-  a `MonolithError` (`Transport`, `Rejected`, `Undecodable`). The triage — transport exception, top-level
+  `ShopifyResult<T>` with a `ShopifyError` (`Network`, `TokenRejected`, `AccessDenied`, `HttpError`, `GraphqlError`,
+  `UserError`, `NotFound`, `Undecodable`, `Truncated`, `TimedOut`), each of which knows whether a retry can help
+  (`isRetryable`) and whether only a human can make it help (`needsHumanAction`), or `MonolithResult<T>` with
+  a `MonolithError` (`Transport`, `Rejected`, `Undecodable`). `AccessDenied` is a response whose top-level errors are
+  all `ACCESS_DENIED`, with the scope handles Shopify's messages name: the one retryable failure that waits for the
+  merchant to re-authorize the app, unless every handle is one the install does not ask for (`needsDeploy`), which no
+  re-authorization grants and so is not retryable. The triage — transport exception, top-level
   Graphql errors, a payload's `userErrors`, a non-success status — happens once, inside `HttpShopifyGraphqlService`
   and `HttpMonolithService`; a caller pattern-matches on `Success` / `Failure` and never sees the wire. Workflows pass
   the same result up. Exceptions are for bugs.
@@ -428,7 +526,8 @@ Shared with the monolith, so a line from either service reads the same way in Lo
   `log.warn(e) { … }`), never a `LoggerFactory.getLogger` outside the Logflare wiring in `app.kt`.
 - **`domain` does not log**: a domain function returns its answer, it does not narrate it (`ArchitectureTest` forbids
   the import). Neither does `boot/config`: it is read before the Logflare appender is attached, so it fails the boot
-  instead. Workflows and handlers log; `lib` logs only its own failures.
+  instead. Nor do the mappers: they answer what the caller logs (`MonolithOrderMapping`, `MonolithProductMapping`).
+  Workflows and handlers log; `lib` logs only its own failures.
 - **Messages are prose with `key=value` detail**, e.g. `Webhook verified topic=orders/create bodyBytes=812`; a value
   the MDC already carries (the trace id, the shop, the route) is never interpolated. A line logged where the MDC has
   no `shop`, such as the warm-up's, names the shop in its message.
@@ -478,7 +577,7 @@ a token.
 All tests are in-process and fast: there is no database. Three flavours, cheapest first; pick the cheapest one that
 exercises the behaviour:
 
-1. **Pure unit** — mappers, parsers, validation, config (`ToProductVariantItemsTest`, `LegacyIdFromGidTest`, `ConfigTest`).
+1. **Pure unit** — mappers, parsers, validation, config (`MapProductForMonolithTest`, `LegacyIdFromGidTest`, `ConfigTest`).
 2. **Fake-backed** — workflows and handler classes against the in-memory fakes in `test/dropnext/dss/testutil/fake/`
    (`FakeMonolithService`, `FakeShopifyGraphqlService`, `FakeShopifyGraphqlServiceFactory`), wired through
    `dssDependencies(testConfig(), …)`.

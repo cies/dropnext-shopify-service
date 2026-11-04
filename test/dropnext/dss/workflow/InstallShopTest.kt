@@ -71,6 +71,29 @@ class InstallShopTest {
     assert(persisted.shopifyShopId == 9988L)
   }
 
+  /** The grant travels with the token, so the monolith can clear a store's need for re-authorization, or keep it. */
+  @Test
+  fun `an install persists the scopes it was granted and the ones it lacks`() = runBlocking {
+    val monolith = FakeMonolithService()
+    val granted = ShopifyAccessScope.entries.drop(1).map { it.handle }
+    installShop(FakeShopifyGraphqlService(ACME_SHOP), monolith, InMemoryShopTokenStore(), installedToken, granted, CALLBACK_URL)
+
+    val persisted = monolith.putStoreApiKeyCalls.single()
+    assert(persisted.grantedAccessScopes == granted)
+    assert(persisted.missingAccessScopes == listOf(ShopifyAccessScope.entries.first().handle))
+  }
+
+  /** An empty list, not `null`: a complete grant is news, and `null` would leave the monolith's flag as it is. */
+  @Test
+  fun `a complete grant persists an empty list of missing scopes`() = runBlocking {
+    val monolith = FakeMonolithService()
+    installShop(FakeShopifyGraphqlService(ACME_SHOP), monolith, InMemoryShopTokenStore(), installedToken, everyScope, CALLBACK_URL)
+
+    val persisted = monolith.putStoreApiKeyCalls.single()
+    assert(persisted.grantedAccessScopes == everyScope)
+    assert(persisted.missingAccessScopes == emptyList<String>())
+  }
+
   /** Without an identity the workflow falls back to the shop the service is bound to. */
   @Test
   fun `a failing identity lookup still caches the token under the bound shop`() = runBlocking {
@@ -97,27 +120,58 @@ class InstallShopTest {
     assert(monolith.putStoreApiKeyCalls.single().shopifyShopId == null)
   }
 
+  /** The monolith's own message is the one detail the page may show: it says nothing of the hosts in between. */
   @Test
-  fun `a rejected monolith persist is reported with its status`() = runBlocking {
+  fun `a rejected monolith persist is reported with its status and the monolith's message`() = runBlocking {
     val monolith = FakeMonolithService().apply { putStoreApiKeyStatus = 500 }
     val tokens = InMemoryShopTokenStore()
     val report = installShop(FakeShopifyGraphqlService(ACME_SHOP), monolith, tokens, installedToken, everyScope, CALLBACK_URL)
 
-    assert(report.monolithPersist == MonolithPersistOutcome.Failed(httpStatus = 500, detail = "forced fail"))
+    val expected = MonolithPersistOutcome.Failed(httpStatus = 500, detail = "forced fail", storeNotFound = false)
+    assert(report.monolithPersist == expected)
     // The install continues: the token is ours whether or not the monolith took it.
     assert(tokens.cached(ACME_SHOP) == installedToken)
   }
 
-  /** No status is how the page tells "the monolith did not answer" from "the monolith said no". */
+  /**
+   * No status is how the page tells "the monolith did not answer" from "the monolith said no".
+   * The transport's complaint names the host and port it failed to reach, so it stays in the log.
+   */
   @Test
-  fun `a monolith that does not answer the persist is reported without a status`() = runBlocking {
+  fun `a monolith that does not answer the persist is reported without a status or a detail`() = runBlocking {
     val monolith = FakeMonolithService().apply { putStoreApiKeyTransportFailure = true }
     val tokens = InMemoryShopTokenStore()
     val report = installShop(FakeShopifyGraphqlService(ACME_SHOP), monolith, tokens, installedToken, everyScope, CALLBACK_URL)
 
-    assert(report.monolithPersist == MonolithPersistOutcome.Failed(httpStatus = null, detail = "forced transport failure"))
+    val expected = MonolithPersistOutcome.Failed(httpStatus = null, detail = null, storeNotFound = false)
+    assert(report.monolithPersist == expected)
     assert(monolith.putStoreApiKeyCalls.size == 1)
     assert(tokens.cached(ACME_SHOP) == installedToken)
+  }
+
+  @Test
+  fun `the monolith's own 404 is a store it does not know`() = runBlocking {
+    val monolith = FakeMonolithService().apply { putStoreApiKeyStatus = 404 }
+    val report = installShop(FakeShopifyGraphqlService(ACME_SHOP), monolith, InMemoryShopTokenStore(), installedToken, everyScope, CALLBACK_URL)
+
+    val expected = MonolithPersistOutcome.Failed(httpStatus = 404, detail = "Store not found.", storeNotFound = true)
+    assert(report.monolithPersist == expected)
+  }
+
+  /**
+   * A router answers `404` too, when `MONOLITH_BASE_URL` names the wrong host or path.
+   * The store may well exist then, and the page it sends back is no message for the merchant.
+   */
+  @Test
+  fun `a 404 without the contract's envelope is no unknown store and carries no detail`() = runBlocking {
+    val monolith = FakeMonolithService().apply {
+      putStoreApiKeyStatus = 404
+      putStoreApiKeyErrorBody = "<html><body><h1>Not Found</h1>upstream host 10.0.3.7</body></html>"
+    }
+    val report = installShop(FakeShopifyGraphqlService(ACME_SHOP), monolith, InMemoryShopTokenStore(), installedToken, everyScope, CALLBACK_URL)
+
+    val expected = MonolithPersistOutcome.Failed(httpStatus = 404, detail = null, storeNotFound = false)
+    assert(report.monolithPersist == expected)
   }
 
   @Test

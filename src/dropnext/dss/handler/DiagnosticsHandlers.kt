@@ -28,10 +28,6 @@ class DiagnosticsHandlers(
         GET  ${Paths.api.padEnd(26)}JSON diagnostic info (config, URLs, issues)
         GET  ${Paths.apiRedirectUrl.padEnd(26)}Full OAuth redirect URL
 
-      --- Webhook subscriptions (Authorization: Bearer <MONOLITH_TO_DSS_API_KEY> required) ---
-        GET  ${Paths.apiCheck.padEnd(20)}?shop=  Readiness for a specific shop: token resolvable, access scopes, webhook subscriptions
-        POST ${Paths.apiWebhooksRegister}?shop=  Register a shop's webhook subscriptions as an install does, deleting those for topics no longer handled
-
       --- Shopify OAuth ---
         GET  ${Paths.install.padEnd(20)}?shop=  Start OAuth - redirects to Shopify authorize URL
         GET  ${dssConfig.oauthRedirectPath.padEnd(26)}OAuth callback - code exchange, saves token, registers webhooks
@@ -43,6 +39,8 @@ class DiagnosticsHandlers(
         PUT  ${Paths.storesApiKey.padEnd(40)} Set Shopify Admin token (see the checked-in monolith contract)
         POST ${Paths.syncShipmentsWithFulfillments.padEnd(40)} Monolith webhook: SyncShipmentsWithFulfillmentsRequest -> sync Shopify fulfillments
         POST ${Paths.trackingUpdate.padEnd(40)} Monolith webhook: TrackingUpdateRequest -> Shopify FulfillmentEvent
+        GET  ${(Paths.storesShopifyStatus + "?shopify_subdomain=").padEnd(40)} Readiness for a shop: token resolvable, access scopes, webhook subscriptions
+        POST ${Paths.storesShopifyWebhooksRegister.padEnd(40)} RegisterShopifyWebhooksRequest -> register a shop's webhook subscriptions as an install does
       """.trimIndent(),
       ContentType.Text.Plain,
       HttpStatusCode.OK,

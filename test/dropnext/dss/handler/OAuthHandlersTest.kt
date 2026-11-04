@@ -33,8 +33,10 @@ import dropnext.dss.testutil.helper.withDssApp
 import dropnext.dss.testutil.helper.withFakeShopifyServer
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.Parameters
 import io.ktor.http.contentType
@@ -129,6 +131,7 @@ class OAuthHandlersTest {
   /**
    * Over real HTTP: the one case that proves the exchange request Shopify receives. What the install then sends the
    * monolith is `InstallShopTest`'s.
+   * The page sends the merchant back to the configured portal, and names the log lines a support request is about.
    */
   @Test
   fun `oauth callback happy path exchanges the code, caches the token and renders the install page`() {
@@ -137,15 +140,22 @@ class OAuthHandlersTest {
       shopIdentityResult = Success(ShopIdentityInfo(shopId = ShopifyShopId(9988L), domain = ACME_SHOP))
     }
     withFakeShopifyServer { oauthServer, rewritingClient ->
-      val config = testConfig()
+      val config = testConfig(monolithBaseUrl = "https://portal.test/api/shopify-service/v1")
       val oauth = httpOAuthService(rewritingClient, config)
       withDssApp(deps(config, oauth, rewritingClient, tokens = tokens, shopify = shopify)) { client ->
-        val r = client.get(signedCallbackUrl(oauth.signedState(ACME_SHOP)))
+        val r = client.get(signedCallbackUrl(oauth.signedState(ACME_SHOP))) {
+          header("X-Trace-Id", "install-trace-1")
+        }
         assert(r.status == HttpStatusCode.OK)
+        // The page names the trace id and the subscription ids, and its URL carries the OAuth code and HMAC.
+        assert(r.headers[HttpHeaders.CacheControl] == "no-store, no-cache, must-revalidate")
+        assert(r.headers["Referrer-Policy"] == "no-referrer")
         val page = r.bodyAsText()
-        assert("App installed" in page)
+        assert("<h1>DropNext is connected to ${ACME_SHOP.normalizedShopifyHost}</h1>" in page)
         // Shopify answers the granted scopes with the token; the fake grants what the install asks for.
         assert("All ${ShopifyAccessScope.entries.size} required access scopes granted." in page)
+        assert("""<a href="https://portal.test/retailer-portal" class="button">Continue to DropNext</a>""" in page)
+        assert("Reference for support: <code>install-trace-1</code>" in page)
         assert(tokens.cached(ACME_SHOP) == ShopifyAdminToken("shpat_fake_admin_token"))
         assert("\"code\":\"abc-code\"" in oauthServer.oauthCalls.single())
         assert(shopify.shopIdentityCalls.size == 1)
@@ -277,6 +287,22 @@ class OAuthHandlersTest {
       assert(tokens.cached(CANONICAL_ACME_SHOP) == ShopifyAdminToken("shpat_fake_admin_token"))
       assert(monolith.putStoreApiKeyCalls.single().shopifySubdomain == "acme-canonical")
     }
+  }
+
+  @Test
+  fun `oauth callback hands the monolith the granted and the missing scopes with the token`() {
+    val monolith = FakeMonolithService()
+    val granted = ShopifyAccessScope.entries.drop(1).map { it.handle }
+    val oauth = FakeShopifyOAuthService().apply {
+      exchangeCodeResult = Success(ShopifyAccessGrant(ShopifyAdminToken("shpat_fake_admin_token"), granted))
+    }
+    withDssApp(deps(oauth = oauth, monolith = monolith, shopify = FakeShopifyGraphqlService(ACME_SHOP))) { client ->
+      val r = client.get(signedCallbackUrl(oauth.signedState(ACME_SHOP)))
+      assert(r.status == HttpStatusCode.OK)
+    }
+    val persisted = monolith.putStoreApiKeyCalls.single()
+    assert(persisted.grantedAccessScopes == granted)
+    assert(persisted.missingAccessScopes == listOf(ShopifyAccessScope.entries.first().handle))
   }
 
   // ---------- what the callback must not log ----------

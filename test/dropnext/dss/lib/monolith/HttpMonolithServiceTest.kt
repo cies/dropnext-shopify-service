@@ -4,6 +4,9 @@ import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
 import dropnext.dss.contract.ProductStatus
 import dropnext.dss.contract.ProductVariantItem
+import dropnext.dss.contract.ShopifyAccessProblemKind
+import dropnext.dss.contract.ShopifyAccessProblemRequest
+import dropnext.dss.contract.ShopifyAccessProblemResponse
 import dropnext.dss.contract.UpdateStoreApiKeyRequest
 import dropnext.dss.contract.UpsertProductVariantsRequest
 import dropnext.dss.domain.DssToMonolithApiKey
@@ -15,9 +18,11 @@ import dropnext.dss.lib.json.MonolithJson
 import dropnext.dss.lib.ktor.createMonolithHttpClient
 import dropnext.dss.testutil.fake.FakeFlakyServer
 import dropnext.dss.testutil.fake.FakeMonolithHttpServer
+import dropnext.dss.testutil.fixture.TEST_DSS_TO_MONOLITH_API_KEY
 import dropnext.dss.testutil.fixture.minimalOrder
 import dropnext.dss.testutil.helper.failureReason
 import dropnext.dss.testutil.helper.orderToCreateShopifyOrderRequest
+import dropnext.dss.testutil.helper.successValue
 import dropnext.dss.testutil.helper.testHttpClient
 import dropnext.dss.testutil.helper.withFakeMonolithServer
 import io.ktor.callid.withCallId
@@ -49,7 +54,7 @@ class HttpMonolithServiceTest {
     httpClient: HttpClient,
     baseUrl: String,
     apiPrefix: String? = null,
-    apiKey: DssToMonolithApiKey? = null,
+    apiKey: DssToMonolithApiKey = DssToMonolithApiKey(TEST_DSS_TO_MONOLITH_API_KEY),
   ): HttpMonolithService =
     HttpMonolithService(
       httpClient = httpClient,
@@ -98,7 +103,7 @@ class HttpMonolithServiceTest {
     // A server that accepts and then resets, rather than a just-freed port that another test's
     // `port = 0` bind could claim between the close and the connect.
     FakeFlakyServer().use { unreachable ->
-      val deadService = HttpMonolithService(httpClient, unreachable.baseUrl, null, null)
+      val deadService = HttpMonolithService(httpClient, unreachable.baseUrl, null, DssToMonolithApiKey(TEST_DSS_TO_MONOLITH_API_KEY))
       val req = orderToCreateShopifyOrderRequest("acme", minimalOrder())
       val result = deadService.postCreateOrder(req)
       assert(result is Failure)
@@ -116,12 +121,68 @@ class HttpMonolithServiceTest {
       val baseClient = testHttpClient()
       val monolithClient = createMonolithHttpClient(baseClient, requestTimeoutMillis = 300)
       try {
-        val result = HttpMonolithService(monolithClient, hung.baseUrl, null, null).getStore("acme")
+        val result = HttpMonolithService(monolithClient, hung.baseUrl, null, DssToMonolithApiKey(TEST_DSS_TO_MONOLITH_API_KEY)).getStore("acme")
         assert(result.failureReason() is MonolithError.Transport)
       } finally {
         monolithClient.close()
         baseClient.close()
       }
+    }
+  }
+
+  // ---------- postShopifyAccessProblem ----------
+
+  private val accessProblem = ShopifyAccessProblemRequest(
+    shopifySubdomain = "acme",
+    kind = ShopifyAccessProblemKind.ACCESS_SCOPE_MISSING,
+    missingAccessScopes = listOf("read_orders", "write_fulfillments"),
+    observedDuring = "orders/create webhook",
+    observedAt = "2026-11-04T12:00:00Z",
+  )
+
+  @Test
+  fun `postShopifyAccessProblem sends the report as the contract's JSON and decodes the answer`() = withMonolith { server, httpClient, baseUrl ->
+    server.enqueue(HttpStatusCode.OK, """{"store_id":42,"first_report":true}""")
+    val result = service(httpClient, baseUrl).postShopifyAccessProblem(accessProblem)
+    assert(result == Success(ShopifyAccessProblemResponse(storeId = 42L, firstReport = true)))
+    val recorded = server.requests.single()
+    assert(recorded.method == "POST")
+    assert(recorded.path == "/stores/shopify-access-problems")
+    assert(recorded.contentType()?.startsWith("application/json") == true)
+    val body = MonolithJson.parseToJsonElement(recorded.body).jsonObject
+    assert(body["shopify_subdomain"]!!.jsonPrimitive.content == "acme")
+    assert(body["kind"]!!.jsonPrimitive.content == "access_scope_missing")
+    assert(body["missing_access_scopes"]!!.jsonArray.map { it.jsonPrimitive.content } == listOf("read_orders", "write_fulfillments"))
+    assert(body["observed_during"]!!.jsonPrimitive.content == "orders/create webhook")
+    assert(body["observed_at"]!!.jsonPrimitive.content == "2026-11-04T12:00:00Z")
+  }
+
+  @Test
+  fun `postShopifyAccessProblem encodes a rejected token's kind`() = withMonolith { server, httpClient, baseUrl ->
+    server.enqueue(HttpStatusCode.OK, """{"store_id":42,"first_report":false}""")
+    val request = accessProblem.copy(kind = ShopifyAccessProblemKind.TOKEN_REJECTED, missingAccessScopes = emptyList())
+    val result = service(httpClient, baseUrl).postShopifyAccessProblem(request)
+    assert(result.successValue().firstReport == false)
+    val body = MonolithJson.parseToJsonElement(server.requests.single().body).jsonObject
+    assert(body["kind"]!!.jsonPrimitive.content == "token_rejected")
+    assert(body["missing_access_scopes"]!!.jsonArray.isEmpty())
+  }
+
+  @Test
+  fun `postShopifyAccessProblem on 404 is Rejected with the monolith's message`() = withMonolith { server, httpClient, baseUrl ->
+    server.enqueue(HttpStatusCode.NotFound, """{"error":"Store not found.","trace_id":"t-404"}""")
+    val rejected = rejectedOrNull(service(httpClient, baseUrl).postShopifyAccessProblem(accessProblem))
+    assert(rejected?.status == 404)
+    assert(rejected?.message == "Store not found.")
+    assert(rejected?.body?.monolithTraceId == "t-404")
+  }
+
+  @Test
+  fun `postShopifyAccessProblem answers Transport on connection failure`() = withMonolith { _, httpClient, _ ->
+    FakeFlakyServer().use { unreachable ->
+      val deadService = HttpMonolithService(httpClient, unreachable.baseUrl, null, DssToMonolithApiKey(TEST_DSS_TO_MONOLITH_API_KEY))
+      val result = deadService.postShopifyAccessProblem(accessProblem)
+      assert(result.failureReason() is MonolithError.Transport)
     }
   }
 
@@ -139,6 +200,29 @@ class HttpMonolithServiceTest {
     assert(recorded.method == "PUT")
     assert(recorded.path == "/stores/api-key")
     assert("\"api_key\":\"shpat_x\"" in recorded.body)
+  }
+
+  /** The install's grant travels beside the token; a re-sent token carries `null` for both, which the monolith reads as "no news". */
+  @Test
+  fun `putStoreApiKey sends the granted and missing scopes, and null for a token without them`() = withMonolith { server, httpClient, baseUrl ->
+    val monolith = service(httpClient, baseUrl)
+    server.enqueue(HttpStatusCode.OK, """{"store_id":42}""")
+    val withGrant = UpdateStoreApiKeyRequest(
+      shopifySubdomain = "acme",
+      shopifyShopId = 99L,
+      apiKey = "shpat_x",
+      grantedAccessScopes = listOf("read_products"),
+      missingAccessScopes = listOf("write_fulfillments"),
+    )
+    assert(monolith.putStoreApiKey(withGrant) == Success(StoreId(42L)))
+    server.enqueue(HttpStatusCode.OK, """{"store_id":42}""")
+    monolith.putStoreApiKey(UpdateStoreApiKeyRequest("acme", 99L, "shpat_x"))
+
+    val (installed, resent) = server.requests.map { MonolithJson.parseToJsonElement(it.body).jsonObject }
+    assert(installed["granted_access_scopes"]!!.jsonArray.map { it.jsonPrimitive.content } == listOf("read_products"))
+    assert(installed["missing_access_scopes"]!!.jsonArray.map { it.jsonPrimitive.content } == listOf("write_fulfillments"))
+    assert(resent["granted_access_scopes"] == JsonNull)
+    assert(resent["missing_access_scopes"] == JsonNull)
   }
 
   /** A proxy's maintenance page or a drifted contract is an expected failure, not a bug to answer a 500 for. */
@@ -257,6 +341,40 @@ class HttpMonolithServiceTest {
     assert(rejectedOrNull(result)?.status == 500)
   }
 
+  // ---------- getOpenApiDocument ----------
+
+  @Test
+  fun `getOpenApiDocument on 200 answers the parsed document`() = withMonolith { server, httpClient, baseUrl ->
+    server.enqueue(HttpStatusCode.OK, """{"openapi":"3.1.0","paths":{"/api/shopify-service/v1/orders":{"post":{}}}}""")
+    val document = service(httpClient, baseUrl).getOpenApiDocument().successValue()
+    assert(document["openapi"]?.jsonPrimitive?.content == "3.1.0")
+    assert(document["paths"]?.jsonObject?.keys == setOf("/api/shopify-service/v1/orders"))
+    val recorded = server.requests.single()
+    assert(recorded.method == "GET")
+    assert(recorded.path == "/openapi.json")
+  }
+
+  /** Built like every other call, so a base url that already ends in the root asks for the document under it. */
+  @Test
+  fun `getOpenApiDocument is asked relative to the api prefix`() = withMonolith { server, httpClient, baseUrl ->
+    server.enqueue(HttpStatusCode.OK, """{"openapi":"3.1.0"}""")
+    service(httpClient, baseUrl, apiPrefix = "api/shopify-service/v1").getOpenApiDocument()
+    assert(server.requests.single().path == "/api/shopify-service/v1/openapi.json")
+  }
+
+  @Test
+  fun `getOpenApiDocument on a 200 that is not a JSON object is Undecodable`() = withMonolith { server, httpClient, baseUrl ->
+    server.enqueue(HttpStatusCode.OK, "<html>maintenance</html>")
+    val error = service(httpClient, baseUrl).getOpenApiDocument().failureReason()
+    assert(error is MonolithError.Undecodable)
+  }
+
+  @Test
+  fun `getOpenApiDocument on 404 is Rejected`() = withMonolith { server, httpClient, baseUrl ->
+    server.enqueue(HttpStatusCode.NotFound, """{"error":"Not found."}""")
+    assert(rejectedOrNull(service(httpClient, baseUrl).getOpenApiDocument())?.status == 404)
+  }
+
   // ---------- the bodies as the monolith's parser sees them ----------
 
   /**
@@ -366,23 +484,26 @@ class HttpMonolithServiceTest {
     assert(server.requests.single().path == "/api/v1/stores")
   }
 
+  /** The monolith binds its whole DSS API behind the bearer, so a request without it is a `401` whatever it asks. */
   @Test
-  fun `apiKey header behavior — null, blank, and non-blank`() = withMonolith { server, httpClient, baseUrl ->
-    val cases = listOf<Pair<DssToMonolithApiKey?, String?>>(
-      null to null,
-      DssToMonolithApiKey("") to null,
-      DssToMonolithApiKey("   ") to null,
-      DssToMonolithApiKey("key-abc") to "Bearer key-abc",
-    )
-    cases.forEach { (apiKey, expected) ->
-      server.clear()
-      server.enqueue(HttpStatusCode.OK, """{"store_id":1,"shopify_shop_id":99,"api_key":null}""")
-      service(httpClient, baseUrl, apiKey = apiKey).getStore("acme")
-      val actual = server.requests.single().authorization()
-      assert(actual == expected) {
-        "apiKey=$apiKey expected Authorization=$expected but got $actual"
-      }
-    }
+  fun `every request carries the key as a bearer token`() = withMonolith { server, httpClient, baseUrl ->
+    val monolith = service(httpClient, baseUrl)
+    server.enqueue(HttpStatusCode.OK, """{"shopify_order_id":1001}""")
+    monolith.postCreateOrder(orderToCreateShopifyOrderRequest("acme", minimalOrder()))
+    server.enqueue(HttpStatusCode.OK, """{"store_id":42}""")
+    monolith.putStoreApiKey(UpdateStoreApiKeyRequest("acme", 99L, "shpat_x"))
+    server.enqueue(HttpStatusCode.OK, """{"store_id":1,"shopify_shop_id":99,"api_key":null}""")
+    monolith.getStore("acme")
+    server.enqueue(HttpStatusCode.OK, """{"upserted":1,"deleted":0}""")
+    monolith.upsertProductVariants(UpsertProductVariantsRequest("acme", listOf(sampleVariantItem())))
+    server.enqueue(HttpStatusCode.OK, """{"deleted":1}""")
+    monolith.deleteProductVariants("acme", ShopifyProductId(1L))
+    server.enqueue(HttpStatusCode.OK, """{"openapi":"3.1.0"}""")
+    monolith.getOpenApiDocument()
+    server.enqueue(HttpStatusCode.OK, """{"store_id":42,"first_report":true}""")
+    monolith.postShopifyAccessProblem(accessProblem)
+    assert(server.requests.size == 7)
+    assert(server.requests.map { it.authorization() }.distinct() == listOf("Bearer $TEST_DSS_TO_MONOLITH_API_KEY"))
   }
 
   /**
@@ -411,7 +532,7 @@ class HttpMonolithServiceTest {
   ) {
     val monolithClient = createMonolithHttpClient(httpClient)
     try {
-      block(HttpMonolithService(monolithClient, baseUrl, null, null))
+      block(HttpMonolithService(monolithClient, baseUrl, null, DssToMonolithApiKey(TEST_DSS_TO_MONOLITH_API_KEY)))
     } finally {
       monolithClient.close()
     }

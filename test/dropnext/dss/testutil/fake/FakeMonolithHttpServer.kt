@@ -8,6 +8,7 @@ import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.request.httpMethod
 import io.ktor.server.request.receiveText
+import io.ktor.server.response.header
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
@@ -38,6 +39,7 @@ class FakeMonolithHttpServer : RecordingFake {
     val status: HttpStatusCode,
     val body: String,
     val contentType: ContentType = ContentType.Application.Json,
+    val headers: Map<String, String> = emptyMap(),
   )
 
   private val server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration> =
@@ -56,6 +58,7 @@ class FakeMonolithHttpServer : RecordingFake {
               )
             requests.add(recorded)
             val response = cannedResponses.poll() ?: defaultResponse
+            response.headers.forEach { (name, value) -> call.response.header(name, value) }
             call.respondText(response.body, response.contentType, response.status)
           }
         }
@@ -88,7 +91,7 @@ class FakeMonolithHttpServer : RecordingFake {
   }
 
   /** Scripts the answer to the next unanswered request; call it once per expected request. */
-  fun enqueue(status: HttpStatusCode, body: String) {
-    cannedResponses.add(CannedResponse(status, body))
+  fun enqueue(status: HttpStatusCode, body: String, headers: Map<String, String> = emptyMap()) {
+    cannedResponses.add(CannedResponse(status, body, headers = headers))
   }
 }

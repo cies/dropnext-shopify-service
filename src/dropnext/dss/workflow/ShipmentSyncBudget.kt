@@ -29,6 +29,9 @@ class ShipmentSyncBudget(
 
   fun allowsAnotherCall(): Boolean = lastCallStart?.hasNotPassedNow() ?: true
 
+  /** What is left before the deadline, never negative; unbounded for [unlimited]. */
+  fun remaining(): Duration = deadline?.let { (-it.elapsedNow()).coerceAtLeast(Duration.ZERO) } ?: Duration.INFINITE
+
   fun timedOut(): ShopifyError.TimedOut = ShopifyError.TimedOut("syncing the shipments", budget)
 
   companion object {

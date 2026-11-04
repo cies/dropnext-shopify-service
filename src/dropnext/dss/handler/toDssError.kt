@@ -10,11 +10,15 @@ import dropnext.dss.workflow.CATALOG_BUDGET_FLOOR
 
 /**
  * Maps a Shopify failure onto the HTTP answer: what Shopify refused is the caller's problem, a
- * refused token is ours to fix by reinstalling, what failed on the way is upstream.
+ * refused token is ours to fix by reinstalling, a grant that lacks a scope by re-authorizing, what failed on the way is
+ * upstream.
  *
  * An upstream failure is a `502` whether or not a retry can fix it ([ShopifyError.isRetryable]). The monolith retries a
  * `5xx` into its dead-letter queue, where the message waits to be replayed once the cause is fixed, and drops a `4xx` for
- * good; a missing scope or a query Shopify will not run is not the caller's fault, so it gets the answer that keeps it.
+ * good; a query Shopify will not run is not the caller's fault, so it gets the answer that keeps it. So does a scope the
+ * install does not ask for, which only a deploy adds. A missing scope the install asks for is a `403` instead: retrying
+ * cannot fix it before the merchant acts. Once the store is re-authorized, the monolith re-enqueues the shipment syncs
+ * and replays the newest tracking checkpoint per shipment.
  *
  * The one exception is throttling, a `429` that says how long to wait: the monolith retries it as well, and waiting the
  * shop's own refill time is what keeps a retry from being throttled again.
@@ -23,6 +27,8 @@ fun ShopifyError.toDssError(): DssError = when (this) {
   is ShopifyError.NotFound -> DssError.NotFound(message)
   is ShopifyError.UserError -> DssError.InvalidRequest(message)
   is ShopifyError.TokenRejected -> DssError.ShopifyAdminTokenRejected(httpStatus)
+  is ShopifyError.AccessDenied ->
+    if (needsDeploy) DssError.UpstreamFailure(message) else DssError.ShopifyAccessScopeMissing(requiredScopeHandles)
   is ShopifyError.GraphqlError, is ShopifyError.HttpError ->
     throttledRetryAfter(CATALOG_BUDGET_FLOOR)?.let { DssError.Throttled(it) } ?: DssError.UpstreamFailure(message)
   is ShopifyError.Network -> DssError.UpstreamFailure(message)
@@ -46,12 +52,13 @@ fun OAuthError.toDssError(): DssError = when (this) {
 
 /**
  * A token the monolith did not persist is cached here regardless, so the answer has to say that the
- * monolith does not have it. A store the monolith does not know is the caller's to fix; anything else
- * is the monolith's, and a retry of the same request is safe. The monolith's own message stays in the log.
+ * monolith does not have it. A store the monolith says it does not know is the caller's to fix; anything else,
+ * a router's `404` included, is the monolith's, and a retry of the same request is safe.
+ * The monolith's own message stays in the log.
  */
-fun MonolithPersistOutcome.Failed.toDssError(): DssError = when (httpStatus) {
-  404 -> DssError.NotFound("the monolith knows no store for this shop; the token is cached in memory only")
-  null -> DssError.UpstreamFailure("the monolith did not answer; the token is cached in memory only")
+fun MonolithPersistOutcome.Failed.toDssError(): DssError = when {
+  storeNotFound -> DssError.NotFound("the monolith knows no store for this shop; the token is cached in memory only")
+  httpStatus == null -> DssError.UpstreamFailure("the monolith did not answer; the token is cached in memory only")
   else -> DssError.UpstreamFailure("the monolith answered HTTP $httpStatus; the token is cached in memory only")
 }
 

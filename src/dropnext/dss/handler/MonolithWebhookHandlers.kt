@@ -22,24 +22,32 @@ import dropnext.dss.lib.ktor.inWholeSecondsRoundedUp
 import dropnext.dss.lib.ktor.respondContract
 import dropnext.dss.lib.ktor.respondError
 import dropnext.dss.lib.monolith.MonolithService
+import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlServiceFactory
 import dropnext.dss.lib.shopify.token.ShopTokenStore
 import dropnext.dss.lib.slf4j.SHOP_MDC_KEY
 import dropnext.dss.lib.slf4j.withMdcEntries
 import dropnext.dss.mapper.toSyncShipmentsResponse
+import dropnext.dss.workflow.ACCESS_PROBLEM_REPORT_BUDGET
 import dropnext.dss.workflow.CATALOG_BUDGET_FLOOR
+import dropnext.dss.workflow.CATALOG_READ_BUDGET
+import dropnext.dss.workflow.FETCH_PRODUCTS_BUDGET
 import dropnext.dss.workflow.SHIPMENT_SYNC_BUDGET
 import dropnext.dss.workflow.ShipmentSyncBudget
+import dropnext.dss.workflow.UnknownProductStatusWarning
 import dropnext.dss.workflow.fetchShopifyProducts
 import dropnext.dss.workflow.persistTokenToMonolith
 import dropnext.dss.workflow.readShopifyCatalog
+import dropnext.dss.workflow.reportShopifyAccessProblem
 import dropnext.dss.workflow.syncShopifyShipmentsToFulfillments
 import dropnext.dss.workflow.syncShopifyTrackingEvent
 import io.github.oshai.kotlinlogging.KotlinLogging
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.request.receive
 import io.ktor.server.util.getOrFail
+import java.time.Clock
 import kotlin.time.Duration
+import kotlin.time.TimeMark
 import kotlin.time.TimeSource
 
 
@@ -57,6 +65,9 @@ class MonolithWebhookHandlers(
   private val monolithService: MonolithService,
   private val shopTokens: ShopTokenStore,
   private val shopifyReadPause: suspend (Duration) -> Unit,
+  private val unknownProductStatusWarning: UnknownProductStatusWarning,
+  /** When an access problem was observed, the time the monolith's race rule compares. */
+  private val clock: Clock,
   private val shipmentSyncTimeSource: TimeSource = TimeSource.Monotonic,
   private val shipmentSyncBudget: Duration = SHIPMENT_SYNC_BUDGET,
 ) {
@@ -79,6 +90,11 @@ class MonolithWebhookHandlers(
           val stopped = synced.reason
           // The log gets Shopify's whole message; the caller may be told less (see `toDssError`).
           log.warn { "sync-shipments failed error=${stopped.cause.message}" }
+          // Inside what is left of the sync's budget, so the report cannot keep the monolith waiting past its timeout.
+          val reportBudget = minOf(budget.remaining(), ACCESS_PROBLEM_REPORT_BUDGET)
+          val observedDuring = "sync-shipments-with-fulfillments"
+          val observedAt = clock.instant()
+          reportShopifyAccessProblem(monolithService, shop, stopped.cause, observedDuring, observedAt, reportBudget)
           val report = stopped.report.toSyncShipmentsResponse()
           call.respondError(DssError.ShipmentSyncStopped(stopped.cause.toDssError(), report))
         }
@@ -101,6 +117,7 @@ class MonolithWebhookHandlers(
 
         is Failure -> {
           log.warn { "tracking-update failed error=${synced.reason.message}" }
+          reportShopifyAccessProblem(monolithService, shop, synced.reason, "tracking-update", clock.instant())
           call.respondError(synced.reason.toDssError())
         }
       }
@@ -114,6 +131,7 @@ class MonolithWebhookHandlers(
    * minutes on a large catalog, which is why the monolith calls it from a job.
    */
   suspend fun handleProductsCatalog(call: ApplicationCall) {
+    val arrived = TimeSource.Monotonic.markNow()
     val rawShop = call.request.queryParameters.getOrFail("shop")
     val shop = call.shopDomainOrRespond(rawShop, "shop") ?: return
     withMdcEntries(SHOP_MDC_KEY to shop.normalizedShopifyHost) {
@@ -134,30 +152,48 @@ class MonolithWebhookHandlers(
           )
         )
         // The walk has logged its failure, with how far it got.
-        is Failure -> call.respondError(catalog.reason.toDssError())
+        is Failure -> {
+          val reportBudget = arrived.reportBudgetWithin(CATALOG_READ_BUDGET)
+          val observedAt = clock.instant()
+          reportShopifyAccessProblem(monolithService, shop, catalog.reason, "products/catalog", observedAt, reportBudget)
+          call.respondError(catalog.reason.toDssError())
+        }
       }
     }
   }
 
   /** `POST /products/fetch` — the named products as the variant items the monolith's upsert already takes. */
   suspend fun handleFetchProducts(call: ApplicationCall) {
+    val arrived = TimeSource.Monotonic.markNow()
     val request = call.receive<FetchProductsRequest>()
     val shop = call.shopDomainOrRespond(request.shopifySubdomain, "shopify_subdomain") ?: return
     withMdcEntries(SHOP_MDC_KEY to shop.normalizedShopifyHost) {
       val shopify = call.shopifyServiceOrRespond(shopifyGraphqlServiceFactory, shop) ?: return@withMdcEntries
       val productIds = request.shopifyProductIds.map(::ShopifyProductId)
-      when (val fetched = fetchShopifyProducts(shopify, productIds, pause = shopifyReadPause)) {
-        is Success -> call.respondContract(
-          FetchProductsResponse.serializer(),
-          FetchProductsResponse(
-            productVariants = fetched.value.productVariants,
-            missingProductIds = fetched.value.missingProductIds.map { it.value },
-            nextRequestAfterSeconds = fetched.value.nextRequestAfter.inWholeSecondsRoundedUp(),
-            unfetchedProductIds = fetched.value.unfetchedProductIds.map { it.value },
+      val reportProblem: suspend (ShopifyError) -> Unit = { error ->
+        val reportBudget = arrived.reportBudgetWithin(FETCH_PRODUCTS_BUDGET)
+        reportShopifyAccessProblem(monolithService, shop, error, "products/fetch", clock.instant(), reportBudget)
+      }
+      val fetched = fetchShopifyProducts(shopify, productIds, unknownProductStatusWarning, pause = shopifyReadPause)
+      when (fetched) {
+        is Success -> {
+          // The products it loaded are the answer, but what stopped it before the rest is news all the same.
+          fetched.value.stoppedBy?.let { reportProblem(it) }
+          call.respondContract(
+            FetchProductsResponse.serializer(),
+            FetchProductsResponse(
+              productVariants = fetched.value.productVariants,
+              missingProductIds = fetched.value.missingProductIds.map { it.value },
+              nextRequestAfterSeconds = fetched.value.nextRequestAfter.inWholeSecondsRoundedUp(),
+              unfetchedProductIds = fetched.value.unfetchedProductIds.map { it.value },
+            )
           )
-        )
+        }
         // The fetch has logged its failure, naming the product it failed on, which is more than this could say.
-        is Failure -> call.respondError(fetched.reason.toDssError())
+        is Failure -> {
+          reportProblem(fetched.reason)
+          call.respondError(fetched.reason.toDssError())
+        }
       }
     }
   }
@@ -177,7 +213,16 @@ class MonolithWebhookHandlers(
       shopTokens.remember(shop, token)
       log.info { "PUT stores/api-key: token cached in memory" }
 
-      when (val persisted = persistTokenToMonolith(monolithService, shop, shopId, token)) {
+      // Forwarded as they came: the monolith sends none, and a caller that knows the grant is the one to say it.
+      val persisted = persistTokenToMonolith(
+        monolithService,
+        shop,
+        shopId,
+        token,
+        grantedAccessScopes = request.grantedAccessScopes,
+        missingAccessScopes = request.missingAccessScopes,
+      )
+      when (persisted) {
         is MonolithPersistOutcome.Persisted -> call.respondContract(
           UpdateStoreApiKeyResponse.serializer(),
           UpdateStoreApiKeyResponse(storeId = persisted.storeId.value),
@@ -187,6 +232,13 @@ class MonolithWebhookHandlers(
     }
   }
 }
+
+/**
+ * What a report may take, counted from the request's arrival: what is left of [budget], the time the monolith is
+ * known to wait for, and never more than one attempt of the monolith client.
+ */
+private fun TimeMark.reportBudgetWithin(budget: Duration): Duration =
+  minOf((budget - elapsedNow()).coerceAtLeast(Duration.ZERO), ACCESS_PROBLEM_REPORT_BUDGET)
 
 /**
  * How long the monolith should wait before its next call for this shop: the refill a bucket under

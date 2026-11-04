@@ -13,6 +13,7 @@ import dropnext.dss.contract.ShipmentSkipReason
 import dropnext.dss.contract.ShipmentSyncEntry
 import dropnext.dss.contract.ShipmentSyncOutcome
 import dropnext.dss.contract.ShopCatalogResponse
+import dropnext.dss.contract.ShopifyAccessProblemKind
 import dropnext.dss.contract.SyncShipmentsWithFulfillmentsFailure
 import dropnext.dss.contract.SyncShipmentsWithFulfillmentsRequest
 import dropnext.dss.contract.SyncShipmentsWithFulfillmentsResponse
@@ -30,12 +31,14 @@ import dropnext.dss.domain.ShopifyRateBudget
 import dropnext.dss.domain.ShopifyVariantId
 import dropnext.dss.domain.fulfillment.PackageContent
 import dropnext.dss.lib.ktor.DssError
+import dropnext.dss.lib.ktor.SHOPIFY_ACCESS_SCOPE_MISSING_CODE
 import dropnext.dss.lib.shopify.graphql.FulfillmentLine
 import dropnext.dss.lib.shopify.graphql.FulfillmentTracking
 import dropnext.dss.lib.shopify.graphql.ShopProduct
 import dropnext.dss.lib.shopify.graphql.ShopifyCatalogEntry
 import dropnext.dss.lib.shopify.graphql.ShopifyCatalogPage
 import dropnext.dss.lib.shopify.graphql.ShopifyError
+import dropnext.dss.lib.shopify.graphql.ShopifyFulfillmentEvent
 import dropnext.dss.lib.shopify.token.InMemoryShopTokenStore
 import dropnext.dss.lib.shopify.token.ShopLookup
 import dropnext.dss.lib.slf4j.ROUTE_MDC_KEY
@@ -45,6 +48,7 @@ import dropnext.dss.testutil.fake.FakeMonolithService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlService
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlServiceFactory
 import dropnext.dss.testutil.fixture.ACME_SHOP
+import dropnext.dss.testutil.fixture.FULFILLMENT_ORDERS_SCOPE
 import dropnext.dss.testutil.fixture.fulfillment
 import dropnext.dss.testutil.fixture.minimalOrder
 import dropnext.dss.testutil.fixture.orderWithFoQuantities
@@ -60,6 +64,8 @@ import dropnext.dss.testutil.helper.MutableTimeSource
 import dropnext.dss.testutil.helper.capturingLogs
 import dropnext.dss.testutil.helper.mdcOf
 import dropnext.dss.testutil.helper.withDssApp
+import dropnext.dss.workflow.SHIPMENT_SYNC_BUDGET
+import dropnext.graphql.generated.enums.FulfillmentEventStatus
 import dropnext.graphql.generated.enums.FulfillmentStatus
 import io.ktor.client.call.body
 import io.ktor.client.request.get
@@ -71,6 +77,9 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
+import java.time.Clock
+import java.time.Instant
+import java.time.ZoneOffset
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.serialization.json.JsonNull
@@ -447,6 +456,43 @@ class MonolithWebhookHandlersTest {
     }
   }
 
+  /** A `403`, not a `502`: the monolith stops retrying, and the shipments wait for the merchant to re-authorize the app. */
+  @Test
+  fun `sync-shipments answers 403 naming the scope when the grant lacks it, and creates nothing`() {
+    val denied = ShopifyError.AccessDenied("Access denied for fulfillmentOrders field.", listOf(FULFILLMENT_ORDERS_SCOPE))
+    val fakeShopify = FakeShopifyGraphqlService().apply { orderForDssResult = Failure(denied) }
+    withDssApp(testDependencies(shopify = fakeShopify), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(validSyncRequest())
+      }
+      assert(r.status == HttpStatusCode.Forbidden)
+      assert(r.errorMessage() == DssError.ShopifyAccessScopeMissing(listOf(FULFILLMENT_ORDERS_SCOPE)).message)
+      assert(fakeShopify.createFulfillmentCalls.isEmpty())
+    }
+  }
+
+  @Test
+  fun `sync-shipments answers 403 when the fulfillment create is refused for a missing scope`() {
+    val denied = ShopifyError.AccessDenied("Access denied for fulfillmentCreate field.", listOf(FULFILLMENT_ORDERS_SCOPE))
+    val fakeShopify = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Success(minimalOrder())
+      createFulfillmentResult = Failure(denied)
+    }
+    withDssApp(testDependencies(shopify = fakeShopify), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(validSyncRequest())
+      }
+      assert(r.status == HttpStatusCode.Forbidden)
+      val body = r.body<SyncShipmentsWithFulfillmentsFailure>()
+      assert(FULFILLMENT_ORDERS_SCOPE in body.error)
+      // The code of what stopped the run, as a refusal before the run would carry it.
+      assert(body.code == SHOPIFY_ACCESS_SCOPE_MISSING_CODE)
+      assert(body.shipments == listOf(ShipmentSyncEntry("1Z999", ShipmentSyncOutcome.FAILED)))
+    }
+  }
+
   // ---------- retired tracking numbers ----------
 
   /** The split: F1 carries T1 with the content before it, B keeps T1 with less, C gets T2. */
@@ -662,6 +708,49 @@ class MonolithWebhookHandlersTest {
     }
   }
 
+  /** The monolith cannot tell a reused event from a created one, and does not need to: both are its event id. */
+  @Test
+  fun `tracking-update answers a redelivered event with the id of the one the fulfillment already has`() {
+    val fakeShopify = FakeShopifyGraphqlService()
+    fakeShopify.orderForDssResult = Success(orderWithFulfillment(id = 8000L, trackingNumbers = listOf("1Z999")))
+    val alreadyThere = ShopifyFulfillmentEvent(
+      ShopifyFulfillmentEventId(7001L),
+      FulfillmentEventStatus.IN_TRANSIT,
+      Instant.parse("2026-04-02T08:30:00Z"),
+    )
+    fakeShopify.fulfillmentEventsResult = Success(listOf(alreadyThere))
+    withDssApp(testDependencies(shopifyGraphqlServiceFactory = FakeShopifyGraphqlServiceFactory(service = fakeShopify)), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.trackingUpdate) {
+        contentType(ContentType.Application.Json)
+        setBody(validTrackingRequest())
+      }
+      assert(r.status == HttpStatusCode.OK)
+      assert(r.body<TrackingUpdateResponse>().fulfillmentEventId == 7001L)
+      assert(fakeShopify.createFulfillmentEventCalls.isEmpty())
+    }
+  }
+
+  /** The events read is the one a redelivery depends on, so its throttle is answered like any other: wait, then retry. */
+  @Test
+  fun `tracking-update answers 429 with the shop's refill time and creates nothing when the events read is throttled`() {
+    val empty = ShopifyRateBudget(maximumAvailable = 1000.0, currentlyAvailable = 0.0, restoreRate = 50.0)
+    val throttled = ShopifyError.GraphqlError("Throttled", codes = listOf("THROTTLED"), rateBudget = empty)
+    val fakeShopify = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Success(orderWithFulfillment(id = 8000L, trackingNumbers = listOf("1Z999")))
+      fulfillmentEventsResult = Failure(throttled)
+    }
+    withDssApp(testDependencies(shopify = fakeShopify), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.trackingUpdate) {
+        contentType(ContentType.Application.Json)
+        setBody(validTrackingRequest())
+      }
+      assert(r.status == HttpStatusCode.TooManyRequests)
+      assert(r.headers[HttpHeaders.RetryAfter] == "10")
+      assert(r.body<ThrottledError>().retryAfterSeconds == 10)
+      assert(fakeShopify.createFulfillmentEventCalls.isEmpty())
+    }
+  }
+
   /** A cancelled fulfillment keeps its tracking number; the event belongs to the live one carrying it too. */
   @Test
   fun `tracking-update attaches the event to the live fulfillment when a cancelled one has the same tracking number`() {
@@ -763,6 +852,28 @@ class MonolithWebhookHandlersTest {
       assert(forwarded.shopifyShopId == 99L)
       assert(forwarded.apiKey == "shpat_new")
     }
+  }
+
+  /** The monolith sends no grant, and the DSS invents none: what came is what goes on. */
+  @Test
+  fun `PUT stores api-key forwards the scope lists as they came`() {
+    val fake = FakeMonolithService()
+    withDssApp(testDependencies(monolith = fake), authenticateAsMonolith = true) { client ->
+      val withoutGrant = UpdateStoreApiKeyRequest(shopifySubdomain = "acme", apiKey = "shpat_new", shopifyShopId = 99L)
+      val withGrant = withoutGrant.copy(grantedAccessScopes = listOf("read_products"), missingAccessScopes = listOf("write_fulfillments"))
+      listOf(withoutGrant, withGrant).forEach { request ->
+        val r = client.put(Paths.storesApiKey) {
+          contentType(ContentType.Application.Json)
+          setBody(request)
+        }
+        assert(r.status == HttpStatusCode.OK)
+      }
+    }
+    val (first, second) = fake.putStoreApiKeyCalls
+    assert(first.grantedAccessScopes == null)
+    assert(first.missingAccessScopes == null)
+    assert(second.grantedAccessScopes == listOf("read_products"))
+    assert(second.missingAccessScopes == listOf("write_fulfillments"))
   }
 
   /** The answer used to be a `200` with `store_id: 0`, which the caller could not tell from a persisted token. */
@@ -921,6 +1032,164 @@ class MonolithWebhookHandlersTest {
     }
   }
 
+  // ---------- what the monolith is told of a broken installation ----------
+
+  /** `observed_at` is what the monolith's race rule compares, so it is the injected clock's time. */
+  @Test
+  fun `sync-shipments reports a rejected token to the monolith before answering 401`() {
+    val monolith = FakeMonolithService()
+    val fakeShopify = FakeShopifyGraphqlService().apply { orderForDssResult = Failure(ShopifyError.TokenRejected(401)) }
+    val clock = Clock.fixed(Instant.parse("2026-11-04T12:00:00Z"), ZoneOffset.UTC)
+    val deps = testDependencies(monolith = monolith, shopify = fakeShopify, clock = clock)
+    withDssApp(deps, authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(validSyncRequest())
+      }
+      assert(r.status == HttpStatusCode.Unauthorized)
+    }
+    val reported = monolith.postShopifyAccessProblemCalls.single()
+    assert(reported.kind == ShopifyAccessProblemKind.TOKEN_REJECTED)
+    assert(reported.observedDuring == "sync-shipments-with-fulfillments")
+    assert(reported.observedAt == "2026-11-04T12:00:00Z")
+  }
+
+  @Test
+  fun `sync-shipments reports a missing scope to the monolith before answering 403`() {
+    val monolith = FakeMonolithService()
+    val denied = ShopifyError.AccessDenied("Access denied for fulfillmentOrders field.", listOf(FULFILLMENT_ORDERS_SCOPE))
+    val fakeShopify = FakeShopifyGraphqlService().apply { orderForDssResult = Failure(denied) }
+    withDssApp(testDependencies(monolith = monolith, shopify = fakeShopify), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(validSyncRequest())
+      }
+      assert(r.status == HttpStatusCode.Forbidden)
+    }
+    val reported = monolith.postShopifyAccessProblemCalls.single()
+    assert(reported.kind == ShopifyAccessProblemKind.ACCESS_SCOPE_MISSING)
+    assert(reported.missingAccessScopes == listOf(FULFILLMENT_ORDERS_SCOPE))
+  }
+
+  @Test
+  fun `tracking-update reports a rejected token to the monolith before answering 401`() {
+    val monolith = FakeMonolithService()
+    val fakeShopify = FakeShopifyGraphqlService().apply { orderForDssResult = Failure(ShopifyError.TokenRejected(401)) }
+    withDssApp(testDependencies(monolith = monolith, shopify = fakeShopify), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.trackingUpdate) {
+        contentType(ContentType.Application.Json)
+        setBody(validTrackingRequest())
+      }
+      assert(r.status == HttpStatusCode.Unauthorized)
+    }
+    val reported = monolith.postShopifyAccessProblemCalls.single()
+    assert(reported.kind == ShopifyAccessProblemKind.TOKEN_REJECTED)
+    assert(reported.observedDuring == "tracking-update")
+  }
+
+  @Test
+  fun `tracking-update reports a missing scope to the monolith before answering 403`() {
+    val monolith = FakeMonolithService()
+    val denied = ShopifyError.AccessDenied("Access denied for fulfillmentEventCreate field.", listOf(FULFILLMENT_ORDERS_SCOPE))
+    val fakeShopify = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Success(orderWithFulfillment(id = 8000L, trackingNumbers = listOf("1Z999")))
+      createFulfillmentEventResult = Failure(denied)
+    }
+    withDssApp(testDependencies(monolith = monolith, shopify = fakeShopify), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.trackingUpdate) {
+        contentType(ContentType.Application.Json)
+        setBody(validTrackingRequest())
+      }
+      assert(r.status == HttpStatusCode.Forbidden)
+    }
+    assert(monolith.postShopifyAccessProblemCalls.single().kind == ShopifyAccessProblemKind.ACCESS_SCOPE_MISSING)
+  }
+
+  /**
+   * The report runs inside what is left of the sync's budget, not its own five seconds, so it cannot keep the monolith
+   * waiting past its timeout: the load used all but a tenth of a second, and the monolith takes two to answer.
+   */
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `sync-shipments bounds its report by what is left of the sync's budget`() {
+    val clock = MutableTimeSource()
+    val monolith = FakeMonolithService().apply { writeDelay = 2.seconds }
+    val fakeShopify = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Failure(ShopifyError.TokenRejected(401))
+      shipmentSyncTimeSource = clock
+      shipmentSyncCallTakes = SHIPMENT_SYNC_BUDGET - 100.milliseconds
+    }
+    val deps = testDependencies(monolith = monolith, shopify = fakeShopify, shipmentSyncTimeSource = clock)
+    val lines = capturingLogs {
+      withDssApp(deps, authenticateAsMonolith = true) { client ->
+        val r = client.post(Paths.syncShipmentsWithFulfillments) {
+          contentType(ContentType.Application.Json)
+          setBody(validSyncRequest())
+        }
+        assert(r.status == HttpStatusCode.Unauthorized)
+      }
+    }
+    assert(monolith.postShopifyAccessProblemCalls.size == 1)
+    val notReported = lines.single { "Shopify access problem not reported" in it }
+    assert("reason=budget_exhausted" in notReported)
+    assert(lines.none { "Shopify access problem reported" in it })
+  }
+
+  /** A scope the install never asks for is a deploy's to fix, not a merchant's: no notification, and a `502` that keeps the work. */
+  @Test
+  fun `tracking-update refused for a scope the install does not ask for answers 502 and reports nothing`() {
+    val monolith = FakeMonolithService()
+    val denied = ShopifyError.AccessDenied("Access denied for customer field.", listOf("read_customers"))
+    val fakeShopify = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Success(orderWithFulfillment(id = 8000L, trackingNumbers = listOf("1Z999")))
+      createFulfillmentEventResult = Failure(denied)
+    }
+    withDssApp(testDependencies(monolith = monolith, shopify = fakeShopify), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.trackingUpdate) {
+        contentType(ContentType.Application.Json)
+        setBody(validTrackingRequest())
+      }
+      assert(r.status == HttpStatusCode.BadGateway)
+      assert(r.errorMessage() == "Access denied for customer field.")
+    }
+    assert(monolith.postShopifyAccessProblemCalls.isEmpty())
+  }
+
+  /** The monolith's own `401` or `403` and its next check carry the same fact, so a lost report changes no answer. */
+  @Test
+  fun `a report the monolith cannot take changes neither answer`() {
+    val monolith = FakeMonolithService().apply { postShopifyAccessProblemTransportFailure = true }
+    val rejected = FakeShopifyGraphqlService().apply { orderForDssResult = Failure(ShopifyError.TokenRejected(401)) }
+    withDssApp(testDependencies(monolith = monolith, shopify = rejected), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.syncShipmentsWithFulfillments) {
+        contentType(ContentType.Application.Json)
+        setBody(validSyncRequest())
+      }
+      assert(r.status == HttpStatusCode.Unauthorized)
+      assert(r.errorMessage() == DssError.ShopifyAdminTokenRejected(401).message)
+      val t = client.post(Paths.trackingUpdate) {
+        contentType(ContentType.Application.Json)
+        setBody(validTrackingRequest())
+      }
+      assert(t.status == HttpStatusCode.Unauthorized)
+    }
+    assert(monolith.postShopifyAccessProblemCalls.size == 2)
+  }
+
+  @Test
+  fun `a Shopify failure that is not about the installation is not reported`() {
+    val monolith = FakeMonolithService()
+    val fakeShopify = FakeShopifyGraphqlService().apply { orderForDssResult = Failure(ShopifyError.Network("connection reset")) }
+    withDssApp(testDependencies(monolith = monolith, shopify = fakeShopify), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.trackingUpdate) {
+        contentType(ContentType.Application.Json)
+        setBody(validTrackingRequest())
+      }
+      assert(r.status == HttpStatusCode.BadGateway)
+    }
+    assert(monolith.postShopifyAccessProblemCalls.isEmpty())
+  }
+
   // ---------- upstream failures ----------
 
   /** The token lookup behind the call got no answer from the monolith: a retry can help, so not the 401 of a shop without a token. */
@@ -950,6 +1219,25 @@ class MonolithWebhookHandlersTest {
       }
       assert(r.status == HttpStatusCode.BadGateway)
       assert(r.errorMessage() == "throttled")
+      assert(fakeShopify.createFulfillmentEventCalls.size == 1)
+    }
+  }
+
+  @Test
+  fun `tracking-update answers 403 naming the scope when the grant lacks it`() {
+    val denied = ShopifyError.AccessDenied("Access denied for fulfillmentEventCreate field.", listOf(FULFILLMENT_ORDERS_SCOPE))
+    val fakeShopify = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Success(orderWithFulfillment(id = 8000L, trackingNumbers = listOf("1Z999")))
+      createFulfillmentEventResult = Failure(denied)
+    }
+    withDssApp(testDependencies(shopify = fakeShopify), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.trackingUpdate) {
+        contentType(ContentType.Application.Json)
+        setBody(validTrackingRequest())
+      }
+      assert(r.status == HttpStatusCode.Forbidden)
+      assert(r.errorMessage() == DssError.ShopifyAccessScopeMissing(listOf(FULFILLMENT_ORDERS_SCOPE)).message)
+      // Asked once: the DSS retries nothing, the monolith stops on a `403`.
       assert(fakeShopify.createFulfillmentEventCalls.size == 1)
     }
   }
@@ -1049,6 +1337,34 @@ class MonolithWebhookHandlersTest {
       assert(r.errorMessage() == "Shopify's answer could not be read")
       assert(fakeShopify.productVariantIdsPageCalls.size == 2)
     }
+  }
+
+  /** A quiet store's only Shopify traffic may be this walk, so it is where a dead token is found first. */
+  @Test
+  fun `products-catalog reports a rejected token to the monolith before answering 401`() {
+    val monolith = FakeMonolithService()
+    val fakeShopify = FakeShopifyGraphqlService().apply { productVariantIdsPageResult = Failure(ShopifyError.TokenRejected(401)) }
+    withDssApp(testDependencies(monolith = monolith, shopify = fakeShopify), authenticateAsMonolith = true) { client ->
+      val r = client.get(catalogPath())
+      assert(r.status == HttpStatusCode.Unauthorized)
+    }
+    val reported = monolith.postShopifyAccessProblemCalls.single()
+    assert(reported.kind == ShopifyAccessProblemKind.TOKEN_REJECTED)
+    assert(reported.observedDuring == "products/catalog")
+  }
+
+  @Test
+  fun `products-catalog reports a missing scope to the monolith before answering 403`() {
+    val monolith = FakeMonolithService()
+    val denied = ShopifyError.AccessDenied("Access denied for productVariants field.", listOf("read_products"))
+    val fakeShopify = FakeShopifyGraphqlService().apply { productVariantIdsPageResult = Failure(denied) }
+    withDssApp(testDependencies(monolith = monolith, shopify = fakeShopify), authenticateAsMonolith = true) { client ->
+      val r = client.get(catalogPath())
+      assert(r.status == HttpStatusCode.Forbidden)
+    }
+    val reported = monolith.postShopifyAccessProblemCalls.single()
+    assert(reported.kind == ShopifyAccessProblemKind.ACCESS_SCOPE_MISSING)
+    assert(reported.missingAccessScopes == listOf("read_products"))
   }
 
   // ---------- products/fetch ----------
@@ -1195,6 +1511,60 @@ class MonolithWebhookHandlersTest {
       assert(r.status == HttpStatusCode.BadGateway)
       assert(r.errorMessage() == "connection reset")
     }
+  }
+
+  @Test
+  fun `products-fetch reports a rejected token to the monolith before answering 401`() {
+    val monolith = FakeMonolithService()
+    val fakeShopify = FakeShopifyGraphqlService().apply { productByIdResult = Failure(ShopifyError.TokenRejected(401)) }
+    withDssApp(testDependencies(monolith = monolith, shopify = fakeShopify), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.productsFetch) {
+        contentType(ContentType.Application.Json)
+        setBody(fetchRequest(501L))
+      }
+      assert(r.status == HttpStatusCode.Unauthorized)
+    }
+    val reported = monolith.postShopifyAccessProblemCalls.single()
+    assert(reported.kind == ShopifyAccessProblemKind.TOKEN_REJECTED)
+    assert(reported.observedDuring == "products/fetch")
+  }
+
+  /** The products it loaded are still the answer, but what stopped it is the same news for the monolith. */
+  @Test
+  fun `products-fetch that answered some products reports the missing scope that stopped it`() {
+    val monolith = FakeMonolithService()
+    val denied = ShopifyError.AccessDenied("Access denied for product field.", listOf("read_products"))
+    val fakeShopify = FakeShopifyGraphqlService().apply {
+      productByIdResultQueue += Success(ShopProduct(sampleProduct(legacyResourceId = "501", variantId = "9001"), "EUR"))
+      productByIdResult = Failure(denied)
+    }
+    withDssApp(testDependencies(monolith = monolith, shopify = fakeShopify), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.productsFetch) {
+        contentType(ContentType.Application.Json)
+        setBody(fetchRequest(501L, 502L))
+      }
+      assert(r.status == HttpStatusCode.OK)
+      assert(r.body<FetchProductsResponse>().unfetchedProductIds == listOf(502L))
+    }
+    val reported = monolith.postShopifyAccessProblemCalls.single()
+    assert(reported.kind == ShopifyAccessProblemKind.ACCESS_SCOPE_MISSING)
+    assert(reported.observedDuring == "products/fetch")
+  }
+
+  @Test
+  fun `products-fetch that answered every product reports nothing`() {
+    val monolith = FakeMonolithService()
+    val fakeShopify = FakeShopifyGraphqlService().apply {
+      productByIdResult = Success(ShopProduct(sampleProduct(legacyResourceId = "501", variantId = "9001"), "EUR"))
+    }
+    withDssApp(testDependencies(monolith = monolith, shopify = fakeShopify), authenticateAsMonolith = true) { client ->
+      val r = client.post(Paths.productsFetch) {
+        contentType(ContentType.Application.Json)
+        setBody(fetchRequest(501L))
+      }
+      assert(r.status == HttpStatusCode.OK)
+    }
+    assert(monolith.postShopifyAccessProblemCalls.isEmpty())
   }
 
   /** A batch throttled part-way still answers what it loaded, so the monolith keeps it and asks for the rest later. */

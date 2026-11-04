@@ -36,6 +36,17 @@ class ShipmentSyncBudgetTest {
   }
 
   @Test
+  fun `what remains shrinks with the time spent and stops at zero`() {
+    val clock = MutableTimeSource()
+    val budget = ShipmentSyncBudget.startedAt(clock.markNow(), 25.seconds)
+    clock += 20.seconds
+    assert(budget.remaining() == 5.seconds)
+    clock += 10.seconds
+    assert(budget.remaining() == Duration.ZERO)
+    assert(ShipmentSyncBudget.unlimited().remaining() == Duration.INFINITE)
+  }
+
+  @Test
   fun `an unlimited budget always allows another call`() {
     val budget = ShipmentSyncBudget.unlimited()
     assert(budget.allowsAnotherCall())

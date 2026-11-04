@@ -11,10 +11,12 @@ import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.domain.ShopifyVariantId
 import dropnext.dss.domain.WebhookSubscriptionStatus
 import dropnext.dss.domain.fulfillment.PackageContent
+import dropnext.dss.domain.isRequestedShopifyAccessScope
 import dropnext.graphql.generated.enums.FulfillmentEventStatus
 import dropnext.graphql.generated.enums.WebhookSubscriptionTopic
 import dropnext.graphql.generated.getorderfordss.Order
 import dropnext.graphql.generated.getproductbyid.Product
+import java.time.Instant
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
@@ -72,6 +74,14 @@ interface ShopifyGraphqlService {
    * it has more lines than one page.
    */
   suspend fun fulfillmentContent(fulfillmentGid: String): ShopifyResult<PackageContent>
+
+  /**
+   * `GetFulfillmentEvents` — the fulfillment's most recent events, newest first.
+   * One page, never more, because the only reader looks for an event it may have created recently.
+   * [ShopifyError.NotFound] when Shopify has no such fulfillment.
+   * [ShopifyError.Undecodable] for an event whose id or time does not read.
+   */
+  suspend fun fulfillmentEvents(fulfillmentGid: String): ShopifyResult<List<ShopifyFulfillmentEvent>>
 
   // ---------- fulfillment primitives (composed by the workflow functions) ----------
 
@@ -132,6 +142,8 @@ typealias ShopifyResult<T> = Result<T, ShopifyError>
  *
  * [UserError] and [NotFound] are Shopify refusing what we sent (a `400` / `404` for the caller);
  * [TokenRejected] is Shopify refusing *us* (a `401`, and no retry can help);
+ * [AccessDenied] is Shopify refusing what the grant does not reach (a `403`, until the merchant re-authorizes the app,
+ * or a `502` when the scope is one the install does not ask for and only a deploy can add);
  * [GraphqlError], [HttpError] and [Network] are Shopify or the wire failing (a `502`);
  * [Undecodable] is an answer the generated client can no longer read;
  * [Truncated] is a list longer than this service loads, which no retry changes (a `500`);
@@ -144,6 +156,11 @@ sealed interface ShopifyError {
    * Whether asking again can go differently. Decided here, where each failure is recognised, so every reader draws the
    * same line: a webhook answered `502` for a failure a redelivery cannot fix only burns Shopify's retries, and enough
    * failed deliveries cost the subscription.
+   *
+   * [AccessDenied] is the one retryable failure that waits for a human: a later attempt goes through once the merchant
+   * approves the missing scope, and Shopify's four-hour redelivery window is what keeps the deliveries made meanwhile.
+   * Asking again seconds later cannot help, which is what [needsHumanAction] tells apart. A scope the install does not
+   * ask for is the exception ([AccessDenied.needsDeploy]): no approval is coming, so it is not retryable.
    */
   val isRetryable: Boolean
 
@@ -156,11 +173,34 @@ sealed interface ShopifyError {
    * Shopify answered `401`: the Admin token is no longer valid, which is what an uninstall looks like
    * from here. Kept apart from [HttpError] because it is the one failure a retry cannot fix and the
    * one an operator has to act on (reinstall the app), so it must never read as a network blip.
+   * [tokenFingerprint] names the token Shopify refused (`shopifyTokenFingerprint`), for the access problem report.
    */
-  data class TokenRejected(val httpStatus: Int) : ShopifyError {
+  data class TokenRejected(val httpStatus: Int, val tokenFingerprint: String? = null) : ShopifyError {
     override val message: String
       get() = "Shopify rejected the Admin token (HTTP $httpStatus): the app was uninstalled or the token revoked"
     override val isRetryable: Boolean get() = false
+  }
+
+  /**
+   * Every top-level error was `ACCESS_DENIED`: the token is valid, but the app's grant on the shop lacks a scope the
+   * operation needs, as it does for every shop installed before the install asked for that scope. Kept apart from
+   * [GraphqlError] because a merchant's click fixes it, not a deploy, unless the scope is one the install never asks
+   * for ([needsDeploy]). [requiredScopeHandles] is what Shopify's messages name, each once; it may be empty, since the
+   * handles are read off the wording rather than a field. [tokenFingerprint] names the token whose grant fell short.
+   */
+  data class AccessDenied(
+    override val message: String,
+    val requiredScopeHandles: List<String>,
+    val tokenFingerprint: String? = null,
+  ) : ShopifyError {
+    /**
+     * Shopify named scopes, and the install asks for none of them: no merchant's click grants them, only a deploy that
+     * adds them to `ShopifyAccessScope`. Without a handle the two cases cannot be told apart, so it stays the merchant's.
+     */
+    val needsDeploy: Boolean
+      get() = requiredScopeHandles.isNotEmpty() && requiredScopeHandles.none(::isRequestedShopifyAccessScope)
+
+    override val isRetryable: Boolean get() = !needsDeploy
   }
 
   /**
@@ -177,8 +217,9 @@ sealed interface ShopifyError {
 
   /**
    * Shopify answered with top-level `errors`, or without the data asked for. These arrive with HTTP `200`, and [codes]
-   * holds their `extensions.code` (`THROTTLED`, `ACCESS_DENIED`, `MAX_COST_EXCEEDED`, a validation error's code): the
-   * only thing that tells a throttled request from one that will never be allowed.
+   * holds their `extensions.code` (`THROTTLED`, `MAX_COST_EXCEEDED`, a validation error's code): the only thing that
+   * tells a throttled request from one that will never be allowed. `ACCESS_DENIED` appears here only beside another
+   * code or an uncoded error; alone it is [AccessDenied].
    *
    * [rateBudget] is what Shopify said was left of the shop's bucket when it refused, if it said. Shopify throttles with
    * this error rather than with an HTTP status, and a throttled answer still carries the cost block, so this is where a
@@ -253,6 +294,7 @@ val ShopifyError.errorLabel: String
     is ShopifyError.Network -> "shopify_network"
     is ShopifyError.HttpError -> "shopify_http_$httpStatus"
     is ShopifyError.TokenRejected -> "shopify_token_rejected"
+    is ShopifyError.AccessDenied -> "shopify_access_denied"
     is ShopifyError.GraphqlError -> "shopify_graphql"
     is ShopifyError.UserError -> "shopify_user_error"
     is ShopifyError.NotFound -> "shopify_not_found"
@@ -260,6 +302,14 @@ val ShopifyError.errorLabel: String
     is ShopifyError.Truncated -> "shopify_truncated"
     is ShopifyError.TimedOut -> "shopify_timed_out"
   }
+
+/**
+ * Whether only a person can make the next attempt go differently: a failure no retry fixes, or a missing scope, which a
+ * retry fixes once the merchant approved it. It decides the level an alert reads, and keeps a run of reads from asking
+ * again within seconds for what only that approval changes.
+ */
+val ShopifyError.needsHumanAction: Boolean
+  get() = !isRetryable || this is ShopifyError.AccessDenied
 
 /** The `extensions.code` values Shopify documents as passing conditions: its rate limit and its own internal error. */
 private val RETRYABLE_GRAPHQL_ERROR_CODES = setOf(THROTTLED_CODE, "INTERNAL_SERVER_ERROR")
@@ -335,6 +385,13 @@ data class ShopifyCatalogPage(
 data class ShopifyCatalogEntry(
   val productId: ShopifyProductId,
   val productVariantId: ShopifyVariantId,
+)
+
+/** One event on a fulfillment's timeline, as much of it as tells one tracking checkpoint from another. */
+data class ShopifyFulfillmentEvent(
+  val id: ShopifyFulfillmentEventId,
+  val status: FulfillmentEventStatus,
+  val happenedAt: Instant,
 )
 
 /** One line of a fulfillment to create: [quantity] of a fulfillment-order line item. */

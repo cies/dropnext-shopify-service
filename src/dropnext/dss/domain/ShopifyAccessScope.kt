@@ -34,6 +34,17 @@ fun missingShopifyAccessScopes(grantedHandles: Collection<String>): List<Shopify
   return ShopifyAccessScope.entries.filterNot { scope -> scope.coveringHandles.any { it in granted } }
 }
 
+/**
+ * Whether the install asks for [handle], or for a scope that includes it: whether a merchant re-authorizing the app can
+ * grant it. A handle this answers `false` for takes a deploy that adds it to [ShopifyAccessScope].
+ */
+fun isRequestedShopifyAccessScope(handle: String): Boolean =
+  ShopifyAccessScope.entries.any { scope -> handle.trim() in scope.coveredHandles }
+
+/** What a grant of this scope gives: itself, and for a write scope the read scope of the same resource. */
+private val ShopifyAccessScope.coveredHandles: List<String>
+  get() = if (handle.startsWith("write_")) listOf(handle, "read_" + handle.removePrefix("write_")) else listOf(handle)
+
 /** A read scope is covered by itself or by the write scope of its resource; a write scope only by itself. */
 private val ShopifyAccessScope.coveringHandles: List<String>
   get() = if (handle.startsWith("read_")) listOf(handle, "write_" + handle.removePrefix("read_")) else listOf(handle)

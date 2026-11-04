@@ -58,11 +58,15 @@ enum class WebhookSkipReason {
 }
 
 /**
- * Whether a redelivery has a chance: Shopify or the monolith not answering (in time), throttling, or answering a `5xx`
- * passes; a token Shopify refuses, a request either side refuses, a resource that is gone or an answer that no longer
- * reads does not, and answering a `5xx` for those would only make Shopify hammer a closed door. An answer that no
+ * Whether a redelivery has a chance: Shopify or the monolith not answering (in time), throttling, answering a `5xx`, or
+ * a scope the grant lacks (a redelivery after the merchant approved it goes through) passes; a token Shopify refuses, a
+ * request either side refuses, a scope the install does not ask for, a resource that is gone or an answer that no
+ * longer reads does not, and answering a `5xx` for those would only make Shopify hammer a closed door. An answer that no
  * longer reads is judged the same on both sides: a success whose body is not the contract's DTO is the contract having
  * drifted, which only a deploy fixes, and the next attempt reads the same.
+ *
+ * The monolith refusing our key ([refusesOurKey]) passes too: it is a key rotation that has not reached both sides yet,
+ * and a redelivery after the DSS is redeployed with the new key goes through, where a `200` would lose the delivery.
  */
 val WebhookMirrorOutcome.isTransient: Boolean
   get() = when (this) {
@@ -70,8 +74,12 @@ val WebhookMirrorOutcome.isTransient: Boolean
     is WebhookMirrorOutcome.ShopifyFailed -> error.isRetryable
     is WebhookMirrorOutcome.MonolithFailed -> when (val error = error) {
       is MonolithError.Transport -> true
-      is MonolithError.Rejected -> error.status >= 500
+      is MonolithError.Rejected -> error.status >= 500 || error.refusesOurKey
       is MonolithError.Undecodable -> false
     }
     is WebhookMirrorOutcome.TokenUnavailable, is WebhookMirrorOutcome.TimedOut, is WebhookMirrorOutcome.Overloaded -> true
   }
+
+/** A `401` or a `403`: the monolith does not take the key we sent, which no redelivery fixes before someone acts. */
+val MonolithError.Rejected.refusesOurKey: Boolean
+  get() = status == 401 || status == 403

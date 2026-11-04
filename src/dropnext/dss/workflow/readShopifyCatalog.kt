@@ -9,6 +9,7 @@ import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlService
 import dropnext.dss.lib.shopify.graphql.ShopifyResult
 import dropnext.dss.lib.shopify.graphql.errorLabel
+import dropnext.dss.lib.shopify.graphql.needsHumanAction
 import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
@@ -45,10 +46,11 @@ val CATALOG_READ_BUDGET: Duration = 140.seconds
 const val CATALOG_MAX_PAGES: Int = 200
 
 /**
- * How often a page is waited out and asked for again before the whole walk fails. Throttling is the case this exists
- * for, but any failure Shopify says a retry can fix qualifies ([ShopifyError.isRetryable]): the page is a read with the
- * same cursor, so asking again is harmless, and a walk of two hundred pages should not be lost to one dropped
- * connection.
+ * How often a page is waited out and asked for again before the whole walk fails.
+ * Throttling is the case this exists for,
+ * but any failure a retry can fix without anyone acting qualifies ([ShopifyError.needsHumanAction] is `false`).
+ * The page is a read with the same cursor, so asking again is harmless.
+ * A walk of two hundred pages should not be lost to one dropped connection.
  */
 const val CATALOG_PAGE_RETRIES: Int = 3
 
@@ -99,11 +101,11 @@ suspend fun readShopifyCatalog(
       "Catalog read done products=${result.value.products.size} variants=${result.value.productVariantCount} " +
         "pages=${walk.pages} waited_ms=${walk.waited.inWholeMilliseconds}"
     }
-    // A failure a retry cannot fix needs a human: a revoked token, a catalog too large for this shape.
-    is Failure -> if (result.reason.isRetryable) {
-      log.warn { walk.failureLine(result.reason) }
-    } else {
+    // A revoked token, a missing scope, a catalog too large for this shape: someone has to act.
+    is Failure -> if (result.reason.needsHumanAction) {
       log.error { walk.failureLine(result.reason) }
+    } else {
+      log.warn { walk.failureLine(result.reason) }
     }
   }
   return result

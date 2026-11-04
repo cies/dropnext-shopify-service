@@ -6,6 +6,7 @@ import dropnext.dss.domain.ShopifyRateBudget
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.lib.shopify.graphql.ShopifyResult
 import dropnext.dss.lib.shopify.graphql.errorLabel
+import dropnext.dss.lib.shopify.graphql.needsHumanAction
 import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
@@ -19,8 +20,8 @@ private val RETRY_BACKOFF: Duration = 1.seconds
 /**
  * Paces a run of Shopify reads for one shop against its point bucket, which the shop's live webhook traffic draws on
  * too. Before a read it waits for a refill when the last answer left the bucket under [floor]. A read that failed in a
- * way a retry can fix ([ShopifyError.isRetryable]) is asked again, up to [retries] times, after the longer of a growing
- * backoff and the refill the answer calls for.
+ * way a retry can fix without anyone acting ([ShopifyError.needsHumanAction]) is asked again, up to [retries] times,
+ * after the longer of a growing backoff and the refill the answer calls for.
  *
  * The one place this service retries Shopify, and safe only because every call it wraps is a read: the rule against
  * retrying Shopify exists so a mutation is never sent twice.
@@ -56,7 +57,7 @@ class ShopifyReadPacer(
       val reason = failure.reason
       // A throttled answer says how empty the bucket is, which is newer than what the last success said.
       (reason as? ShopifyError.GraphqlError)?.rateBudget?.let { budget = it }
-      if (!reason.isRetryable || attempt >= retries) return failure
+      if (reason.needsHumanAction || attempt >= retries) return failure
       attempt++
       log.warn { "Shopify read failed, asking again attempt=$attempt error=${reason.errorLabel}" }
       wait(maxOf(RETRY_BACKOFF * attempt, refillAfter(reason)))

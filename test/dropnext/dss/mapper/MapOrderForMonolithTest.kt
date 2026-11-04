@@ -27,8 +27,9 @@ class MapOrderForMonolithTest {
   private val orderId = ShopifyOrderId(1001L)
 
   /**
-   * The whole request, so a field nobody asserts on its own is still pinned. The two snapshot titles cross over on
-   * purpose: Shopify's line `name` is the variant's title ("T-Shirt - Blue"), its `title` the product's.
+   * The whole request, so a field nobody asserts on its own is still pinned.
+   * Shopify's line `title` is the product's title and its `variantTitle` the variant's own ("Blue");
+   * its `name` is the two combined ("T-Shirt - Blue"), which is only the fallback.
    */
   @Test
   fun `maps the minimal order to the request the monolith expects`() {
@@ -58,7 +59,7 @@ class MapOrderForMonolithTest {
           shopifyLineItemId = 201L,
           productVariantId = 101L,
           quantity = 2,
-          snapshotOfVariantTitle = "T-Shirt - Blue",
+          snapshotOfVariantTitle = "Blue",
           snapshotOfProductTitle = "T-Shirt",
           snapshotOfPriceAsString = "19.99",
           shopifyProductId = 501L,
@@ -349,6 +350,32 @@ class MapOrderForMonolithTest {
     val order = minimalOrder().withSingleLineItem { it.copy(id = "gid://shopify/LineItem/") }
     val mapping = mapOrderForMonolith("dropnext-staging", orderId, order)
     assert(mapping.omittedLineItems.single() == OmittedOrderLineItem("gid://shopify/LineItem/", OrderLineItemOmission.UNPARSEABLE_LINE_ITEM_ID))
+  }
+
+  /**
+   * Shopify documents the variant title as null for a product without distinct variants
+   * (on its sibling line item types), and the line's `name` is then the product title alone.
+   */
+  @Test
+  fun `a line without a variant title falls back to the line's name`() {
+    val order = minimalOrder().withSingleLineItem { it.copy(name = "T-Shirt", variantTitle = null) }
+    val line = mapOrderForMonolith("dropnext-staging", orderId, order).request.lineItems.single()
+    assert(line.snapshotOfVariantTitle == "T-Shirt")
+    assert(line.snapshotOfProductTitle == "T-Shirt")
+  }
+
+  /**
+   * Shopify titles the one variant of a product without options "Default Title",
+   * though a line of such a product likely carries no variant title at all (see above).
+   * Should one carry it, it is passed on as Shopify wrote it:
+   * matching that string would break silently the day Shopify rewords it,
+   * and the product title sits in the column beside it.
+   */
+  @Test
+  fun `a variant Shopify titles Default Title keeps that title`() {
+    val order = minimalOrder().withSingleLineItem { it.copy(name = "T-Shirt", variantTitle = "Default Title") }
+    val line = mapOrderForMonolith("dropnext-staging", orderId, order).request.lineItems.single()
+    assert(line.snapshotOfVariantTitle == "Default Title")
   }
 
   private fun Order.withSingleLineItem(change: (LineItem) -> LineItem): Order =

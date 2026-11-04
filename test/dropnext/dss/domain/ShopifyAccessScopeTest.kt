@@ -10,6 +10,23 @@ class ShopifyAccessScopeTest {
 
   private val everyHandle = ShopifyAccessScope.entries.map { it.handle }
 
+  /** What a merchant's re-authorization can still grant: a scope the install asks for, or one such a scope includes. */
+  @Test
+  fun `a handle the install asks for is requested`() {
+    assert(everyHandle.all { isRequestedShopifyAccessScope(it) })
+  }
+
+  @Test
+  fun `a read handle whose write scope the install asks for is requested`() {
+    assert(isRequestedShopifyAccessScope("read_fulfillments"))
+  }
+
+  @Test
+  fun `a handle the install asks for nothing covering is not requested`() {
+    assert(!isRequestedShopifyAccessScope("read_customers"))
+    assert(!isRequestedShopifyAccessScope("write_orders"))
+  }
+
   @Test
   fun `a grant of every handle misses nothing`() {
     assert(missingShopifyAccessScopes(everyHandle).isEmpty())

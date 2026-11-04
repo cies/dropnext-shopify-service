@@ -3,6 +3,7 @@ package dropnext.dss.boot.config
 import dropnext.dss.domain.DssToMonolithApiKey
 import dropnext.dss.domain.LogflareApiKey
 import dropnext.dss.domain.MonolithToDssApiKey
+import dropnext.dss.testutil.fixture.testConfig
 import org.junit.jupiter.api.Test
 
 
@@ -13,6 +14,7 @@ private fun requiredEnv(): Map<String, String> = mapOf(
   "DSS_BASE_URL" to "https://dss.example.org/",
   "MONOLITH_BASE_URL" to "https://monolith.example.org",
   "MONOLITH_TO_DSS_API_KEY" to "x".repeat(32),
+  "DSS_TO_MONOLITH_API_KEY" to "dss-to-monolith-secret",
 )
 
 class ConfigTest {
@@ -24,7 +26,7 @@ class ConfigTest {
     assert(config.oauthRedirectPath == "/oauth/callback")
     assert(config.serverPort == 8080)
     assert(config.monolithApiPrefix == null)
-    assert(config.dssToMonolithApiKey == null)
+    assert(config.dssToMonolithApiKey == DssToMonolithApiKey("dss-to-monolith-secret"))
     assert(!config.allowInsecureMonolithUrl)
     assert(!config.logflareEnabled)
     assert(config.mode == DssMode.PROD)
@@ -161,7 +163,7 @@ class ConfigTest {
     assert(Config.from(requiredEnv() + ("MONOLITH_TO_DSS_API_KEY" to "a-b.c_d~e+f/" + "0".repeat(20) + "==")).monolithToDssApiKey.value.endsWith("=="))
   }
 
-  /** The same value is read by the monolith under the same name, so the same checks apply; it is optional, so only when set. */
+  /** The same value is read by the monolith under the same name, so the same checks apply. */
   @Test
   fun `a DSS_TO_MONOLITH_API_KEY that is a placeholder or outside the bearer token alphabet is rejected`() {
     val placeholder = runCatching { Config.from(requiredEnv() + ("DSS_TO_MONOLITH_API_KEY" to "your_monolith_key")) }.exceptionOrNull()
@@ -228,6 +230,37 @@ class ConfigTest {
       assert(failure is IllegalStateException)
       assert("MONOLITH_BASE_URL" in failure!!.message.orEmpty())
     }
+  }
+
+  /** The monolith serves its portals on the host of its DSS API, so the install page links there. */
+  @Test
+  fun `the portal base url is the monolith url without its path`() {
+    val env = requiredEnv() + ("MONOLITH_BASE_URL" to "https://staging.dropnext.com/api/shopify-service/v1")
+    assert(Config.from(env).portalBaseUrl == "https://staging.dropnext.com")
+  }
+
+  @Test
+  fun `the portal base url keeps the port of the monolith url`() {
+    val local = requiredEnv() + mapOf(
+      "MONOLITH_BASE_URL" to "http://localhost:8080/api",
+      "DSS_ALLOW_INSECURE_MONOLITH" to "true",
+      "DSS_MODE" to "DEV",
+    )
+    assert(Config.from(local).portalBaseUrl == "http://localhost:8080")
+  }
+
+  /** Derived rather than stored, so no configuration, a test's included, can send the merchant to another host. */
+  @Test
+  fun `the portal base url follows the monolith url however the config was built`() {
+    val config = testConfig(monolithBaseUrl = "https://other.test/api/shopify-service/v1")
+    assert(config.portalBaseUrl == "https://other.test")
+  }
+
+  /** What a browser is sent to must not carry the credentials a URL may hold. */
+  @Test
+  fun `the portal base url drops user info, query and fragment`() {
+    val env = requiredEnv() + ("MONOLITH_BASE_URL" to "https://user:secret@monolith.example.org/api?x=1#top")
+    assert(Config.from(env).portalBaseUrl == "https://monolith.example.org")
   }
 
   /** The flag is a local-development escape hatch; `PROD` is the default, so a deployment that sets it by mistake does not boot. */

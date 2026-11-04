@@ -6,6 +6,7 @@ import dropnext.dss.testutil.helper.awaitUntilBlocking
 import dropnext.dss.testutil.helper.capturingLogs
 import io.ktor.server.testing.ApplicationTestBuilder
 import io.ktor.server.testing.testApplication
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
@@ -17,9 +18,9 @@ import org.junit.jupiter.api.parallel.ResourceLock
 
 
 /**
- * The one thing this trigger owes the load balancer: [Readiness] is marked whatever the warm-up did.
- * Nothing else in the service marks it, so a way out of the `finally` leaves `/health` answering
- * `503` for the rest of the process and the task out of rotation until someone notices.
+ * The one thing this trigger owes the load balancer: [Readiness] is marked whatever the warm-up did, unless a check
+ * proved a shared secret wrong. Nothing else in the service marks it, so a way out of the `finally` leaves `/health`
+ * answering `503` for the rest of the process and the task out of rotation until someone notices.
  */
 class StartWarmUpTest {
 
@@ -36,10 +37,85 @@ class StartWarmUpTest {
   fun `a warm-up that returns marks the service ready`() {
     val readiness = Readiness()
     val ran = CompletableDeferred<Unit>()
-    startingWarmUp(readiness, WarmUp(5.seconds) { ran.complete(Unit) }) {
+    startingWarmUp(readiness, WarmUp(5.seconds) { _, _ -> ran.complete(Unit); WarmUpVerdict.TakeTraffic }) {
       assert(ran.isCompleted)
       assert(readiness.isReady)
     }
+  }
+
+  /**
+   * What nothing waits on runs after the gate is open, so it can never keep a task out of rotation, and on the trace id
+   * the warm-up's own lines carry, so a start's lines are still found together.
+   */
+  @Test
+  fun `the after-ready step runs once the gate is open, on the warm-up's trace id`() {
+    val readiness = Readiness()
+    val warmUpTraceId = CompletableDeferred<String>()
+    val afterReadyTraceId = CompletableDeferred<String>()
+    val readyWhenItStarted = CompletableDeferred<Boolean>()
+    val warmUp = WarmUp(
+      5.seconds,
+      afterReady = { traceId ->
+        readyWhenItStarted.complete(readiness.isReady)
+        afterReadyTraceId.complete(traceId)
+      },
+    ) { _, traceId ->
+      warmUpTraceId.complete(traceId)
+      WarmUpVerdict.TakeTraffic
+    }
+    startingWarmUp(readiness, warmUp) {
+      assert(awaitUntil { afterReadyTraceId.isCompleted })
+      assert(readyWhenItStarted.await())
+      assert(afterReadyTraceId.await() == warmUpTraceId.await())
+      assert(warmUpTraceId.await().startsWith("warmup-"))
+    }
+  }
+
+  /** An after-ready step that never ends is not something the gate waits for. */
+  @Test
+  fun `an after-ready step that hangs leaves the service ready`() {
+    val readiness = Readiness()
+    val entered = CompletableDeferred<Unit>()
+    val warmUp = WarmUp(5.seconds, afterReady = { entered.complete(Unit); awaitCancellation() }) { _, _ -> WarmUpVerdict.TakeTraffic }
+    startingWarmUp(readiness, warmUp) {
+      assert(awaitUntil { entered.isCompleted })
+      assert(readiness.isReady)
+    }
+  }
+
+  /** A task that is about to exit has nothing to report on. */
+  @Test
+  fun `a warm-up that refuses traffic never runs the after-ready step`() {
+    val readiness = Readiness()
+    val refusals = CopyOnWriteArrayList<String>()
+    val ranAfterReady = CompletableDeferred<Unit>()
+    val warmUp = WarmUp(5.seconds, refuseTraffic = { refusals += it }, afterReady = { ranAfterReady.complete(Unit) }) { _, _ ->
+      WarmUpVerdict.RefuseTraffic("Shared secret rejected: DSS_TO_MONOLITH_API_KEY.")
+    }
+    startingWarmUp(readiness, warmUp) {
+      assert(awaitUntil { refusals.isNotEmpty() })
+    }
+    assert(!ranAfterReady.isCompleted)
+  }
+
+  /** A wrong shared secret never reaches the load balancer's rotation: the gate stays shut and the process is ended. */
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `a warm-up that refuses traffic leaves the service unready and hands over the reason`() {
+    val readiness = Readiness()
+    val refusals = CopyOnWriteArrayList<String>()
+    val warmUp = WarmUp(5.seconds, refuseTraffic = { refusals += it }) { _, _ ->
+      WarmUpVerdict.RefuseTraffic("Shared secret rejected: DSS_TO_MONOLITH_API_KEY.")
+    }
+    val lines = capturingLogs {
+      startingWarmUp(readiness, warmUp) {
+        assert(awaitUntil { refusals.isNotEmpty() })
+        assert(!readiness.isReady)
+      }
+    }
+    assert(refusals.single() == "Shared secret rejected: DSS_TO_MONOLITH_API_KEY.")
+    assert(!readiness.isReady)
+    assert(lines.single { "Warm-up refuses traffic" in it }.startsWith("ERROR Warm-up refuses traffic: Shared secret rejected"))
   }
 
   @Test
@@ -47,7 +123,7 @@ class StartWarmUpTest {
   fun `a warm-up that throws marks the service ready and logs what broke`() {
     val readiness = Readiness()
     val lines = capturingLogs {
-      startingWarmUp(readiness, WarmUp(5.seconds) { error("the loopback client was never built") }) {
+      startingWarmUp(readiness, WarmUp(5.seconds) { _, _ -> error("the loopback client was never built") }) {
         assert(awaitUntil { readiness.isReady })
       }
     }
@@ -63,7 +139,7 @@ class StartWarmUpTest {
     val entered = CompletableDeferred<Unit>()
     startingWarmUp(
       readiness,
-      WarmUp(100.milliseconds) {
+      WarmUp(100.milliseconds) { _, _ ->
         entered.complete(Unit)
         awaitCancellation()
       },
@@ -84,7 +160,7 @@ class StartWarmUpTest {
     val entered = CompletableDeferred<Unit>()
     startingWarmUp(
       readiness,
-      WarmUp(10.minutes) {
+      WarmUp(10.minutes) { _, _ ->
         entered.complete(Unit)
         awaitCancellation()
       },
@@ -101,7 +177,7 @@ class StartWarmUpTest {
   fun `a zero budget marks the service ready without running the warm-up`() {
     val readiness = Readiness()
     val ran = CompletableDeferred<Unit>()
-    startingWarmUp(readiness, WarmUp(Duration.ZERO) { ran.complete(Unit) }) {
+    startingWarmUp(readiness, WarmUp(Duration.ZERO) { _, _ -> ran.complete(Unit); WarmUpVerdict.TakeTraffic }) {
       assert(readiness.isReady)
       assert(!ran.isCompleted)
     }

@@ -108,9 +108,39 @@ class ToDssErrorTest {
 
   @Test
   fun `a Graphql error that is not a throttle is an upstream failure`() {
-    val denied = ShopifyError.GraphqlError("Access denied", codes = listOf("ACCESS_DENIED"), rateBudget = emptyBucket)
+    val tooCostly = ShopifyError.GraphqlError("Too costly", codes = listOf("MAX_COST_EXCEEDED"), rateBudget = emptyBucket)
 
-    assert(denied.toDssError() == DssError.UpstreamFailure("Access denied"))
+    assert(tooCostly.toDssError() == DssError.UpstreamFailure("Too costly"))
+  }
+
+  // ---------- a grant that lacks a scope ----------
+
+  /** `401` asks for a reinstall, `403` for a re-authorization: the monolith stops retrying either way. */
+  @Test
+  fun `a missing access scope is a 403 naming the scopes to re-authorize`() {
+    val denied = ShopifyError.AccessDenied("Access denied", listOf("read_orders", "write_merchant_managed_fulfillment_orders"))
+    val mapped = denied.toDssError()
+    assert(mapped == DssError.ShopifyAccessScopeMissing(listOf("read_orders", "write_merchant_managed_fulfillment_orders")))
+    assert(mapped.toHttpStatus() == HttpStatusCode.Forbidden)
+    assert(
+      mapped.message == "Shopify refused: the app's grant on this shop lacks the access scope(s) " +
+        "read_orders, write_merchant_managed_fulfillment_orders; re-authorize the app",
+    )
+  }
+
+  /** No re-authorization grants it, so the monolith keeps the work for a replay, as for a query Shopify will not run. */
+  @Test
+  fun `a denied scope the install does not ask for is a 502`() {
+    val mapped = ShopifyError.AccessDenied("Access denied for customer field.", listOf("read_customers")).toDssError()
+    assert(mapped == DssError.UpstreamFailure("Access denied for customer field."))
+    assert(mapped.toHttpStatus() == HttpStatusCode.BadGateway)
+  }
+
+  @Test
+  fun `a missing access scope Shopify named no handle for is a 403 naming none`() {
+    val mapped = ShopifyError.AccessDenied("Access denied for order field.", emptyList()).toDssError()
+    assert(mapped.toHttpStatus() == HttpStatusCode.Forbidden)
+    assert(mapped.message == "Shopify refused: the app's grant on this shop lacks an access scope; re-authorize the app")
   }
 
   @Test
@@ -131,21 +161,29 @@ class ToDssErrorTest {
   /** The caller has to fix a store the monolith does not know; a retry of the same request cannot. */
   @Test
   fun `a store the monolith does not know is a not found`() {
-    val mapped = MonolithPersistOutcome.Failed(httpStatus = 404, detail = "no store").toDssError()
+    val storeNotFound = MonolithPersistOutcome.Failed(httpStatus = 404, detail = "Store not found.", storeNotFound = true)
+    val mapped = storeNotFound.toDssError()
     assert(mapped == DssError.NotFound("the monolith knows no store for this shop; the token is cached in memory only"))
+  }
+
+  /** A router's `404` says nothing about the store: the monolith was never asked. */
+  @Test
+  fun `a 404 that is not the monolith's store not found is an upstream failure`() {
+    val mapped = MonolithPersistOutcome.Failed(httpStatus = 404, detail = null, storeNotFound = false).toDssError()
+    assert(mapped == DssError.UpstreamFailure("the monolith answered HTTP 404; the token is cached in memory only"))
   }
 
   /** No status is how a transport failure arrives; the answer must still say the token lives in memory only. */
   @Test
   fun `a monolith that did not answer is an upstream failure`() {
-    val mapped = MonolithPersistOutcome.Failed(httpStatus = null, detail = "connection refused").toDssError()
+    val mapped = MonolithPersistOutcome.Failed(httpStatus = null, detail = null, storeNotFound = false).toDssError()
     assert(mapped == DssError.UpstreamFailure("the monolith did not answer; the token is cached in memory only"))
   }
 
   /** The monolith's own message stays in the log: the answer names the status and nothing it said. */
   @Test
   fun `any other monolith status is an upstream failure naming the status`() {
-    val mapped = MonolithPersistOutcome.Failed(httpStatus = 500, detail = "boom").toDssError()
+    val mapped = MonolithPersistOutcome.Failed(httpStatus = 500, detail = "boom", storeNotFound = false).toDssError()
     assert(mapped == DssError.UpstreamFailure("the monolith answered HTTP 500; the token is cached in memory only"))
   }
 }

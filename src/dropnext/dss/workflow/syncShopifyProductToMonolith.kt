@@ -7,7 +7,7 @@ import dropnext.dss.lib.monolith.MonolithService
 import dropnext.dss.lib.monolith.logMonolithFailure
 import dropnext.dss.lib.shopify.graphql.ShopifyError
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlService
-import dropnext.dss.mapper.toProductVariantItems
+import dropnext.dss.mapper.mapProductForMonolith
 import io.github.oshai.kotlinlogging.KotlinLogging
 
 
@@ -30,6 +30,7 @@ suspend fun syncShopifyProductToMonolith(
   shopify: ShopifyGraphqlService,
   monolith: MonolithService,
   productGid: String,
+  statusWarning: UnknownProductStatusWarning,
 ): WebhookMirrorOutcome {
   val shopProduct = when (val loaded = loadShopifyProduct(shopify, productGid, maxPages = WEBHOOK_MAX_VARIANT_PAGES)) {
     is Failure -> {
@@ -43,7 +44,9 @@ suspend fun syncShopifyProductToMonolith(
   }
   val variantCount = shopProduct.product.variants.edges.size
   log.info { "Webhook product loaded id=$productGid title=${shopProduct.product.title} variants=$variantCount" }
-  val variantItems = shopProduct.product.toProductVariantItems(shopProduct.shopCurrencyCode)
+  val mapping = mapProductForMonolith(shopProduct.product, shopProduct.shopCurrencyCode)
+  statusWarning.warnIfUnknown(shopProduct.product.legacyResourceId, mapping)
+  val variantItems = mapping.productVariants
   if (variantItems.isEmpty()) return WebhookMirrorOutcome.Skipped(WebhookSkipReason.NO_MAPPABLE_LINES)
 
   val request = UpsertProductVariantsRequest(

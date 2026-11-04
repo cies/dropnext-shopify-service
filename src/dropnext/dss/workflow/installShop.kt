@@ -53,7 +53,14 @@ suspend fun installShop(
   val canonical = domain.normalizedShopifyHost.takeIf { it != shopify.shop.normalizedShopifyHost }
   log.info { "OAuth token cached in memory" + canonical?.let { " canonical_shop=$it" }.orEmpty() }
 
-  val monolithPersist = persistTokenToMonolith(monolith, domain, identity?.shopId, token)
+  val monolithPersist = persistTokenToMonolith(
+    monolith,
+    domain,
+    identity?.shopId,
+    token,
+    grantedAccessScopes = accessScopes.grantedHandles,
+    missingAccessScopes = accessScopes.missing.map { it.handle },
+  )
 
   val productCount = when (val counted = shopify.productCount()) {
     is Success -> counted.value.also {
@@ -77,12 +84,18 @@ suspend fun installShop(
   )
 }
 
-/** Persists the freshly obtained Shopify Admin token to the monolith; answers what the page renders. */
+/**
+ * Persists a Shopify Admin token to the monolith; answers what the page renders. The two scope lists are the grant the
+ * token came with, which only an install knows: from them the monolith clears or sets a store's need for
+ * re-authorization. A token re-sent without them (`null`) leaves what the monolith knows of the grant as it is.
+ */
 suspend fun persistTokenToMonolith(
   monolith: MonolithService,
   shop: ShopDomain,
   shopId: ShopifyShopId?,
   token: ShopifyAdminToken,
+  grantedAccessScopes: List<String>?,
+  missingAccessScopes: List<String>?,
 ): MonolithPersistOutcome {
   val request = UpdateStoreApiKeyRequest(
     shopifySubdomain = shop.subdomainOnly,
@@ -90,6 +103,8 @@ suspend fun persistTokenToMonolith(
     // this and locked a fresh store to shop id zero, so every later, real install of it was a mismatch.
     shopifyShopId = shopId?.value,
     apiKey = token.value,
+    grantedAccessScopes = grantedAccessScopes,
+    missingAccessScopes = missingAccessScopes,
   )
   return when (val result = monolith.putStoreApiKey(request)) {
     is Success -> {
@@ -100,14 +115,20 @@ suspend fun persistTokenToMonolith(
     is Failure -> {
       logMonolithFailure("putStoreApiKey", result.reason)
       when (val error = result.reason) {
-        is MonolithError.Rejected ->
-          MonolithPersistOutcome.Failed(httpStatus = error.status, detail = error.body.message)
+        is MonolithError.Rejected -> {
+          val envelope = error.body.takeIf { it.isContractEnvelope }
+          MonolithPersistOutcome.Failed(
+            httpStatus = error.status,
+            detail = envelope?.message,
+            storeNotFound = envelope != null && error.status == 404,
+          )
+        }
 
         is MonolithError.Undecodable ->
-          MonolithPersistOutcome.Failed(httpStatus = error.status, detail = error.message)
+          MonolithPersistOutcome.Failed(httpStatus = error.status, detail = null, storeNotFound = false)
 
         is MonolithError.Transport ->
-          MonolithPersistOutcome.Failed(httpStatus = null, detail = error.message)
+          MonolithPersistOutcome.Failed(httpStatus = null, detail = null, storeNotFound = false)
       }
     }
   }

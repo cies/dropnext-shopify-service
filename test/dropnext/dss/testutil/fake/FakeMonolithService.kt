@@ -3,6 +3,8 @@ package dropnext.dss.testutil.fake
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
 import dropnext.dss.contract.CreateShopifyOrderRequest
+import dropnext.dss.contract.ShopifyAccessProblemRequest
+import dropnext.dss.contract.ShopifyAccessProblemResponse
 import dropnext.dss.contract.UpdateStoreApiKeyRequest
 import dropnext.dss.contract.UpsertProductVariantsRequest
 import dropnext.dss.domain.ShopifyAdminToken
@@ -15,9 +17,11 @@ import dropnext.dss.lib.monolith.MonolithResult
 import dropnext.dss.lib.monolith.MonolithService
 import dropnext.dss.lib.monolith.MonolithStore
 import dropnext.dss.lib.monolith.UpsertedProductVariants
+import dropnext.dss.lib.monolith.drift.readCheckedInContractCopy
 import dropnext.dss.lib.monolith.monolithError
 import kotlin.time.Duration
 import kotlinx.coroutines.delay
+import kotlinx.serialization.json.JsonObject
 
 
 /** What one [FakeMonolithService.deleteProductVariants] call was asked. */
@@ -30,13 +34,21 @@ class FakeMonolithService : MonolithService, RecordingFake {
   val getStoreCalls: MutableList<String> = mutableListOf()
   val upsertProductVariantsCalls: MutableList<UpsertProductVariantsRequest> = mutableListOf()
   val deleteProductVariantsCalls: MutableList<DeleteProductVariantsCall> = mutableListOf()
+  val postShopifyAccessProblemCalls: MutableList<ShopifyAccessProblemRequest> = mutableListOf()
+
+  /** The call takes no argument, so each entry only says it happened. */
+  val getOpenApiDocumentCalls: MutableList<Unit> = mutableListOf()
 
   /** `200` created, `409` already existed, anything else is answered as a rejection with [createOrderErrorBody]. */
   var createOrderStatus: Int = 200
   var createOrderErrorBody: String? = null
 
+  /** `200` saves, `404` is the monolith's own "store not found"; anything else a rejection with [putStoreApiKeyErrorBody]. */
   var putStoreApiKeyStatus: Int = 200
   var putStoreApiKeyStoreId: Long = 1L
+
+  /** The body a rejection of [putStoreApiKey] carries in place of the contract's envelope, such as a router's page. */
+  var putStoreApiKeyErrorBody: String? = null
 
   /** When true, [putStoreApiKey] fails to reach the monolith at all: the install reports that with no status. */
   var putStoreApiKeyTransportFailure: Boolean = false
@@ -48,6 +60,12 @@ class FakeMonolithService : MonolithService, RecordingFake {
   var getStoreTransportFailure: Boolean = false
   var getStoreToken: ShopifyAdminToken? = ShopifyAdminToken("shpat_fake")
 
+  /** When set, [getStore] is rejected with this status, as the monolith answers a key it does not accept. */
+  var getStoreRejectionStatus: Int? = null
+
+  /** What [getOpenApiDocument] answers: by default the checked-in copy, so a monolith in step with the DSS. */
+  var openApiDocumentResult: MonolithResult<JsonObject> = Success(readCheckedInContractCopy())
+
   /** `200` answers the request's own count; anything else is a rejection with that status. */
   var upsertProductVariantsStatus: Int = 200
   var deleteProductVariantsStatus: Int = 200
@@ -55,7 +73,16 @@ class FakeMonolithService : MonolithService, RecordingFake {
   /** What a `200` on [deleteProductVariants] reports as `deleted`: the request no longer says how many variants there are. */
   var deleteProductVariantsDeleted: Int = 1
 
-  /** How long each write (create order, upsert or delete variants) takes once recorded: a monolith still busy when a budget ends. */
+  /** `200` answers a first report for store `1`; `404` is a store the monolith does not know; anything else a rejection. */
+  var postShopifyAccessProblemStatus: Int = 200
+
+  /** When true, [postShopifyAccessProblem] fails to reach the monolith at all. */
+  var postShopifyAccessProblemTransportFailure: Boolean = false
+
+  /**
+   * How long each write (create order, upsert or delete variants, an access problem report) takes once recorded: a
+   * monolith still busy when a budget ends.
+   */
   var writeDelay: Duration = Duration.ZERO
 
 
@@ -77,8 +104,12 @@ class FakeMonolithService : MonolithService, RecordingFake {
   override suspend fun putStoreApiKey(request: UpdateStoreApiKeyRequest): MonolithResult<StoreId> {
     putStoreApiKeyCalls.add(request)
     if (putStoreApiKeyTransportFailure) return Failure(MonolithError.Transport("forced transport failure"))
-    return when (putStoreApiKeyStatus) {
-      200 -> Success(StoreId(putStoreApiKeyStoreId))
+    val errorBody = putStoreApiKeyErrorBody
+    return when {
+      putStoreApiKeyStatus == 200 -> Success(StoreId(putStoreApiKeyStoreId))
+      errorBody != null -> Failure(rejected(putStoreApiKeyStatus, errorBody))
+      putStoreApiKeyStatus == 404 ->
+        Failure(rejected(404, """{"error":"Store not found.","code":"NotFound","trace_id":"fake-trace"}"""))
       else -> Failure(
         rejected(putStoreApiKeyStatus, """{"error":"forced fail","code":"StoreError","trace_id":"fake-trace"}"""),
       )
@@ -89,6 +120,8 @@ class FakeMonolithService : MonolithService, RecordingFake {
     getStoreCalls.add(shopifySubdomain)
     return when {
       getStoreTransportFailure -> Failure(MonolithError.Transport("forced transport failure"))
+      getStoreRejectionStatus != null ->
+        Failure(rejected(getStoreRejectionStatus!!, """{"error":"forced fail","code":"Unauthorized","trace_id":"fake-store"}"""))
       getStoreReturnsNotFound -> Success(null)
       else -> Success(MonolithStore(storeId = StoreId(1L), shopifyShopId = ShopifyShopId(99L), apiKey = getStoreToken))
     }
@@ -112,6 +145,22 @@ class FakeMonolithService : MonolithService, RecordingFake {
     }
   }
 
+  override suspend fun postShopifyAccessProblem(request: ShopifyAccessProblemRequest): MonolithResult<ShopifyAccessProblemResponse> {
+    postShopifyAccessProblemCalls.add(request)
+    delay(writeDelay)
+    if (postShopifyAccessProblemTransportFailure) return Failure(MonolithError.Transport("forced transport failure"))
+    return when (postShopifyAccessProblemStatus) {
+      200 -> Success(ShopifyAccessProblemResponse(storeId = 1L, firstReport = true))
+      404 -> Failure(rejected(404, """{"error":"Store not found.","trace_id":"fake-problem"}"""))
+      else -> Failure(rejected(postShopifyAccessProblemStatus, """{"error":"forced fail","trace_id":"fake-problem"}"""))
+    }
+  }
+
+  override suspend fun getOpenApiDocument(): MonolithResult<JsonObject> {
+    getOpenApiDocumentCalls.add(Unit)
+    return openApiDocumentResult
+  }
+
 
   private fun rejected(status: Int, rawBody: String): MonolithError.Rejected {
     val (message, parsed) = monolithError(status, rawBody)
@@ -124,17 +173,24 @@ class FakeMonolithService : MonolithService, RecordingFake {
     getStoreCalls.clear()
     upsertProductVariantsCalls.clear()
     deleteProductVariantsCalls.clear()
+    postShopifyAccessProblemCalls.clear()
+    getOpenApiDocumentCalls.clear()
     createOrderStatus = 200
     createOrderErrorBody = null
     putStoreApiKeyStatus = 200
     putStoreApiKeyStoreId = 1L
+    putStoreApiKeyErrorBody = null
     putStoreApiKeyTransportFailure = false
     getStoreReturnsNotFound = false
     getStoreTransportFailure = false
     getStoreToken = ShopifyAdminToken("shpat_fake")
+    getStoreRejectionStatus = null
+    openApiDocumentResult = Success(readCheckedInContractCopy())
     upsertProductVariantsStatus = 200
     deleteProductVariantsStatus = 200
     deleteProductVariantsDeleted = 1
+    postShopifyAccessProblemStatus = 200
+    postShopifyAccessProblemTransportFailure = false
     writeDelay = Duration.ZERO
   }
 

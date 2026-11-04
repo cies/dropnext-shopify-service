@@ -29,3 +29,6 @@ internal const val TEST_APP_SECRET: String = "shpss_test_app_secret"
 
 /** The bearer the monolith-facing routes expect. Thirty-two characters, the length `Config` requires of a real one. */
 internal const val TEST_MONOLITH_TO_DSS_API_KEY: String = "monolith-to-dss-test-api-key-000"
+
+/** The bearer the service presents to the monolith: a value of its own, so a test cannot mix up the two directions. */
+internal const val TEST_DSS_TO_MONOLITH_API_KEY: String = "dss-to-monolith-test-api-key"

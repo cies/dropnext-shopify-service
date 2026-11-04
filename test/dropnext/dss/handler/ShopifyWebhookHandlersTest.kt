@@ -2,6 +2,7 @@ package dropnext.dss.handler
 
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
+import dropnext.dss.contract.ShopifyAccessProblemKind
 import dropnext.dss.domain.ShopDomain
 import dropnext.dss.domain.ShopifyProductId
 import dropnext.dss.lib.shopify.graphql.ShopProduct
@@ -55,6 +56,8 @@ import org.junit.jupiter.api.parallel.ResourceLock
  * `ShopifyHmacVerifierService` cannot make both sides agree on the wrong thing.
  */
 class ShopifyWebhookHandlersTest {
+
+  private val order1001Body = """{"id":1001,"admin_graphql_api_id":"gid://shopify/Order/1001","domain":"acme.myshopify.com"}"""
 
   @Test
   fun `rejects request with missing HMAC header as 401`() = withDssApp(testDependencies()) { client ->
@@ -393,6 +396,50 @@ class ShopifyWebhookHandlersTest {
     }
   }
 
+  /**
+   * A monolith that refuses our key is a key rotation that has not reached both sides yet: once it has, a redelivery
+   * goes through. So the delivery is kept for Shopify's four-hour redelivery window rather than acknowledged and lost,
+   * and someone has to act, so it is an error.
+   */
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `orders_create the monolith refuses with a 401 is answered 502 and logged as an error`() {
+    val monolith = FakeMonolithService().apply { createOrderStatus = 401 }
+    val shopify = FakeShopifyGraphqlService().apply { orderForDssResult = Success(minimalOrder()) }
+    val lines = capturingLogs {
+      withDssApp(testDependencies(monolith = monolith, shopify = shopify)) { client ->
+        val r = client.signedWebhook("orders/create", order1001Body)
+        assert(r.status == HttpStatusCode.BadGateway)
+      }
+    }
+    assert(monolith.createOrderCalls.size == 1)
+    val done = lines.single { "Webhook done" in it }
+    assert(done.startsWith("ERROR"))
+    assert(" transient=true error=monolith_401 " in done)
+  }
+
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `products_update the monolith refuses with a 403 is answered 502 and logged as an error`() {
+    val monolith = FakeMonolithService().apply { upsertProductVariantsStatus = 403 }
+    val shopify = FakeShopifyGraphqlService().apply {
+      productByIdResult = Success(ShopProduct(sampleProduct(legacyResourceId = "502", variantId = "9002"), "EUR"))
+    }
+    val lines = capturingLogs {
+      withDssApp(testDependencies(monolith = monolith, shopify = shopify)) { client ->
+        val r = client.signedWebhook(
+          "products/update",
+          """{"id":502,"admin_graphql_api_id":"gid://shopify/Product/502","domain":"acme.myshopify.com"}""",
+        )
+        assert(r.status == HttpStatusCode.BadGateway)
+      }
+    }
+    assert(monolith.upsertProductVariantsCalls.size == 1)
+    val done = lines.single { "Webhook done" in it }
+    assert(done.startsWith("ERROR"))
+    assert(" transient=true error=monolith_403 " in done)
+  }
+
   /** After a restart the token is only at the monolith; a monolith that does not answer must not cost the order. */
   @Test
   fun `orders_create whose token the monolith could not be asked for is answered 502 so Shopify redelivers`() {
@@ -456,29 +503,135 @@ class ShopifyWebhookHandlersTest {
   }
 
   /**
-   * A missing scope answers the same on every redelivery; asking for them would only cost the subscription. The code
-   * reaches only the summary line, while the response body carries the label alone, so this case reads the log.
+   * A missing scope is fixed by the merchant approving it, after which a redelivery goes through: a `502` keeps the
+   * delivery within Shopify's four-hour redelivery window instead of losing it. Someone has to act, so it is an error.
    */
   @Test
   @ResourceLock(GLOBAL_LOG_REGISTRY)
-  fun `orders_create that Shopify refuses with ACCESS_DENIED is acknowledged with 200 and logged with the code`() {
+  fun `orders_create that Shopify refuses for a missing scope is answered 502 and logged as an error naming the scope`() {
     val monolith = FakeMonolithService()
-    val shopify = FakeShopifyGraphqlService().apply {
-      orderForDssResult = Failure(ShopifyError.GraphqlError("Access denied for order field.", codes = listOf("ACCESS_DENIED")))
-    }
+    val denied = ShopifyError.AccessDenied("Access denied for order field.", listOf("read_orders"))
+    val shopify = FakeShopifyGraphqlService().apply { orderForDssResult = Failure(denied) }
     val lines = capturingLogs {
       withDssApp(testDependencies(monolith = monolith, shopify = shopify)) { client ->
         val r = client.signedWebhook(
           "orders/create",
           """{"id":1001,"admin_graphql_api_id":"gid://shopify/Order/1001","domain":"acme.myshopify.com"}""",
         )
-        assert(r.status == HttpStatusCode.OK)
-        r.body<WebhookDeliveryResponse>()
+        assert(r.status == HttpStatusCode.BadGateway)
       }
     }
-    assert(lines.value.error == "shopify_graphql")
     assert(monolith.createOrderCalls.isEmpty())
-    assert("transient=false error=shopify_graphql codes=ACCESS_DENIED" in lines.single { "Webhook done" in it })
+    val done = lines.single { "Webhook done" in it }
+    assert(done.startsWith("ERROR"))
+    assert("transient=true error=shopify_access_denied required_scopes=read_orders" in done)
+  }
+
+  /**
+   * No merchant's click grants a scope the install never asks for, so a redelivery cannot go differently before a
+   * deploy adds it: acknowledged, so Shopify keeps the subscription, and an error, since someone has to deploy.
+   */
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `orders_create refused for a scope the install does not ask for is acknowledged, logged as an error and not reported`() {
+    val monolith = FakeMonolithService()
+    val denied = ShopifyError.AccessDenied("Access denied for customer field.", listOf("read_customers"))
+    val shopify = FakeShopifyGraphqlService().apply { orderForDssResult = Failure(denied) }
+    val lines = capturingLogs {
+      withDssApp(testDependencies(monolith = monolith, shopify = shopify)) { client ->
+        val r = client.signedWebhook("orders/create", order1001Body)
+        assert(r.status == HttpStatusCode.OK)
+        assert(r.body<WebhookDeliveryResponse>().error == "shopify_access_denied")
+      }
+    }
+    assert(monolith.postShopifyAccessProblemCalls.isEmpty())
+    val done = lines.single { "Webhook done" in it }
+    assert(done.startsWith("ERROR"))
+    assert("transient=false error=shopify_access_denied required_scopes=read_customers" in done)
+  }
+
+  // ---------- what the monolith is told of a broken installation ----------
+
+  @Test
+  fun `orders_create with a rejected token reports it to the monolith and is still acknowledged with 200`() {
+    val monolith = FakeMonolithService()
+    val shopify = FakeShopifyGraphqlService().apply { orderForDssResult = Failure(ShopifyError.TokenRejected(401)) }
+    val observedAt = Instant.parse("2026-11-04T12:00:00Z")
+    val deps = testDependencies(monolith = monolith, shopify = shopify, clock = Clock.fixed(observedAt, ZoneOffset.UTC))
+    withDssApp(deps) { client ->
+      val r = client.signedWebhook("orders/create", order1001Body)
+      assert(r.status == HttpStatusCode.OK)
+    }
+    val reported = monolith.postShopifyAccessProblemCalls.single()
+    assert(reported.shopifySubdomain == "acme")
+    assert(reported.kind == ShopifyAccessProblemKind.TOKEN_REJECTED)
+    assert(reported.observedDuring == "orders/create webhook")
+    assert(reported.observedAt == "2026-11-04T12:00:00Z")
+  }
+
+  @Test
+  fun `products_update refused for a missing scope reports the scope and is still answered 502`() {
+    val monolith = FakeMonolithService()
+    val denied = ShopifyError.AccessDenied("Access denied for product field.", listOf("read_products"))
+    val shopify = FakeShopifyGraphqlService().apply { productByIdResult = Failure(denied) }
+    withDssApp(testDependencies(monolith = monolith, shopify = shopify)) { client ->
+      val r = client.signedWebhook("products/update", """{"id":101,"admin_graphql_api_id":"gid://shopify/Product/101"}""")
+      assert(r.status == HttpStatusCode.BadGateway)
+    }
+    val reported = monolith.postShopifyAccessProblemCalls.single()
+    assert(reported.kind == ShopifyAccessProblemKind.ACCESS_SCOPE_MISSING)
+    assert(reported.missingAccessScopes == listOf("read_products"))
+    assert(reported.observedDuring == "products/update webhook")
+  }
+
+  /** The monolith's next check carries the same fact, so a report it refuses changes nothing Shopify is told. */
+  @Test
+  fun `a report the monolith refuses changes neither answer`() {
+    val monolith = FakeMonolithService().apply { postShopifyAccessProblemStatus = 500 }
+    val rejected = FakeShopifyGraphqlService().apply { orderForDssResult = Failure(ShopifyError.TokenRejected(401)) }
+    withDssApp(testDependencies(monolith = monolith, shopify = rejected)) { client ->
+      assert(client.signedWebhook("orders/create", order1001Body).status == HttpStatusCode.OK)
+    }
+    val denied = FakeShopifyGraphqlService().apply {
+      orderForDssResult = Failure(ShopifyError.AccessDenied("Access denied for order field.", listOf("read_orders")))
+    }
+    withDssApp(testDependencies(monolith = monolith, shopify = denied)) { client ->
+      assert(client.signedWebhook("orders/create", order1001Body).status == HttpStatusCode.BadGateway)
+    }
+    assert(monolith.postShopifyAccessProblemCalls.size == 2)
+  }
+
+  @Test
+  fun `a Shopify failure that is not about the installation is not reported`() {
+    val monolith = FakeMonolithService()
+    val shopify = FakeShopifyGraphqlService().apply { orderForDssResult = Failure(ShopifyError.Network("connection reset")) }
+    withDssApp(testDependencies(monolith = monolith, shopify = shopify)) { client ->
+      assert(client.signedWebhook("orders/create", order1001Body).status == HttpStatusCode.BadGateway)
+    }
+    assert(monolith.postShopifyAccessProblemCalls.isEmpty())
+  }
+
+  /** A mirror that used up the webhook's budget leaves the report out rather than outliving Shopify's five seconds. */
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `a report with no mirror budget left is skipped and logged`() {
+    val timeSource = MutableTimeSource()
+    val monolith = FakeMonolithService()
+    val shopify = FakeShopifyGraphqlService().apply { orderForDssResult = Failure(ShopifyError.TokenRejected(401)) }
+    val factory = object : ShopifyGraphqlServiceFactory {
+      override suspend fun forShop(shop: ShopDomain): ShopLookup<ShopifyGraphqlService> {
+        timeSource += WEBHOOK_MIRROR_BUDGET + 1.milliseconds
+        return ShopLookup.Found(shopify)
+      }
+    }
+    val deps = testDependencies(monolith = monolith, shopifyGraphqlServiceFactory = factory, webhookTimeSource = timeSource)
+    val lines = capturingLogs {
+      withDssApp(deps) { client ->
+        assert(client.signedWebhook("orders/create", order1001Body).status == HttpStatusCode.OK)
+      }
+    }
+    assert(monolith.postShopifyAccessProblemCalls.isEmpty())
+    assert("reason=budget_exhausted" in lines.single { "Shopify access problem not reported" in it })
   }
 
   // ---------- what the delivery log and the Partner Dashboard get to read ----------
@@ -549,7 +702,7 @@ class ShopifyWebhookHandlersTest {
     val receivedAt = Instant.parse("2026-09-16T10:00:00Z")
     val shopify = FakeShopifyGraphqlService().apply { orderForDssResult = Success(minimalOrder()) }
     val lines = capturingLogs {
-      withDssApp(testDependencies(shopify = shopify, webhookClock = Clock.fixed(receivedAt, ZoneOffset.UTC))) { client ->
+      withDssApp(testDependencies(shopify = shopify, clock = Clock.fixed(receivedAt, ZoneOffset.UTC))) { client ->
         client.signedWebhook(
           "orders/create",
           """{"id":1001,"admin_graphql_api_id":"gid://shopify/Order/1001","domain":"acme.myshopify.com"}""",

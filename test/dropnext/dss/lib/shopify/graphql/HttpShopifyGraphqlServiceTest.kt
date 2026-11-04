@@ -10,12 +10,17 @@ import dropnext.dss.domain.ShopifyRateBudget
 import dropnext.dss.domain.ShopifyShopId
 import dropnext.dss.domain.WebhookSubscriptionStatus
 import dropnext.dss.domain.fulfillment.PackageContent
+import dropnext.dss.lib.crypto.shopifyTokenFingerprint
 import dropnext.dss.lib.json.AppJson
 import dropnext.dss.testutil.fake.FakeFlakyServer
 import dropnext.dss.testutil.fake.FakeShopifyGraphqlServer
 import dropnext.dss.testutil.fixture.ACME_SHOP
+import dropnext.dss.testutil.fixture.FULFILLMENT_ORDERS_SCOPE
 import dropnext.dss.testutil.fixture.TEST_ADMIN_TOKEN
+import dropnext.dss.testutil.fixture.accessDeniedEnvelope
+import dropnext.dss.testutil.fixture.accessDeniedMessage
 import dropnext.dss.testutil.fixture.fulfillment
+import dropnext.dss.testutil.fixture.graphqlErrorEnvelope
 import dropnext.dss.testutil.fixture.minimalOrder
 import dropnext.dss.testutil.fixture.orderWithFulfillments
 import dropnext.dss.testutil.fixture.sampleProduct
@@ -46,6 +51,7 @@ import dropnext.graphql.generated.enums.FulfillmentEventStatus
 import dropnext.graphql.generated.enums.FulfillmentOrderStatus
 import dropnext.graphql.generated.enums.FulfillmentStatus
 import dropnext.graphql.generated.enums.OrderDisplayFulfillmentStatus
+import dropnext.graphql.generated.enums.ProductStatus
 import dropnext.graphql.generated.enums.WebhookSubscriptionFormat
 import dropnext.graphql.generated.enums.WebhookSubscriptionTopic
 import dropnext.graphql.generated.fulfillmentcancelmutation.Fulfillment as CancelledFulfillment
@@ -76,6 +82,7 @@ import dropnext.graphql.generated.updatewebhooksubscription.UserError as UpdateU
 import dropnext.graphql.generated.updatewebhooksubscription.WebhookSubscription as UpdatedSubscription
 import dropnext.graphql.generated.updatewebhooksubscription.WebhookSubscriptionUpdatePayload
 import io.ktor.http.HttpStatusCode
+import java.time.Instant
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.boolean
@@ -101,6 +108,9 @@ private const val CALLBACK_URL = "https://dss.test/webhooks/shopify"
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS) // Stop it from unnecessarily reconstructing per instance.
 class HttpShopifyGraphqlServiceTest {
+
+  /** What a refusal names the token by: the fake servers' services all hold [TEST_ADMIN_TOKEN]. */
+  private val testTokenFingerprint = shopifyTokenFingerprint(TEST_ADMIN_TOKEN.value)
 
   // One server for the class, as `val`s rather than a `lateinit` trio filled in by a `@BeforeAll`, and closed by JUnit
   // once the class is done (`@AutoClose` on a per-class instance), so there is no teardown method to forget. The
@@ -416,6 +426,26 @@ class HttpShopifyGraphqlServiceTest {
     assert(page.rateBudget == ShopifyRateBudget(maximumAvailable = 2000.0, currentlyAvailable = 1988.0, restoreRate = 100.0))
   }
 
+  /**
+   * Shopify adds product statuses between API versions, as it added `UNLISTED`.
+   * One this build does not know must decode to `__UNKNOWN_VALUE`, which the mapper records as a draft:
+   * a product that does not decode is `Undecodable`, its webhook is acknowledged, and it never reaches the monolith.
+   */
+  @Test
+  fun `productById decodes a status added after the schema snapshot as unknown`() = runBlocking {
+    fake.stubRaw("GetProductById", rawProductJson(status = "A_STATUS_ADDED_LATER"))
+    val product = shopify.productById("gid://shopify/Product/501").successValue()
+    assert(product?.product?.status == ProductStatus.__UNKNOWN_VALUE)
+  }
+
+  /** The generated name makes Shopify's spelling near-certain; only the wire proves it. */
+  @Test
+  fun `productById decodes an unlisted product as unlisted`() = runBlocking {
+    fake.stubRaw("GetProductById", rawProductJson(status = "UNLISTED"))
+    val product = shopify.productById("gid://shopify/Product/501").successValue()
+    assert(product?.product?.status == ProductStatus.UNLISTED)
+  }
+
   @Test
   fun `productById carries the rate budget Shopify reported with the product`() = runBlocking {
     fake.stubRaw(
@@ -525,15 +555,91 @@ class HttpShopifyGraphqlServiceTest {
     assert(error.isRetryable)
   }
 
+  /** A grant that lacks a scope is fixed by the merchant's click, not by a deploy: it is its own failure, naming the scope. */
   @Test
-  fun `a top-level access denied is not retryable`() = runBlocking {
-    fake.stubRaw(
-      "ShopIdentity",
-      """{"data":null,"errors":[{"message":"Access denied for shop field.","extensions":{"code":"ACCESS_DENIED","documentation":"https://shopify.dev/api/usage/access-scopes"}}]}""",
+  fun `an access denied read is AccessDenied naming the scope Shopify requires`() = runBlocking {
+    fake.stubRaw("GetOrderForDss", accessDeniedEnvelope())
+    val error = shopify.orderForDss("gid://shopify/Order/1001").failureReason()
+    assert(error == ShopifyError.AccessDenied(accessDeniedMessage(), listOf(FULFILLMENT_ORDERS_SCOPE), testTokenFingerprint))
+  }
+
+  @Test
+  fun `an access denied mutation is AccessDenied naming the scope Shopify requires`() = runBlocking {
+    fake.stubRaw("FulfillmentCreateWithLineItems", accessDeniedEnvelope())
+    val result = shopify.createFulfillment(
+      lines = listOf(FulfillmentLine("gid://shopify/FulfillmentOrder/301", "gid://shopify/FulfillmentOrderLineItem/401", 1)),
+      tracking = FulfillmentTracking(company = "UPS", number = "1Z999", url = null),
+      notifyCustomer = false,
     )
-    val error = shopify.shopIdentity().failureReason()
-    assert((error as ShopifyError.GraphqlError).codes == listOf("ACCESS_DENIED"))
-    assert(!error.isRetryable)
+    val error = result.failureReason() as ShopifyError.AccessDenied
+    assert(error.requiredScopeHandles == listOf(FULFILLMENT_ORDERS_SCOPE))
+  }
+
+  @Test
+  fun `access denied on several fields names each required scope once`() = runBlocking {
+    fake.stubRaw(
+      "GetOrderForDss",
+      graphqlErrorEnvelope(
+        accessDeniedMessage(field = "fulfillmentOrders") to "ACCESS_DENIED",
+        accessDeniedMessage(field = "customer", scope = "read_customers") to "ACCESS_DENIED",
+        accessDeniedMessage(field = "assignedFulfillmentOrders") to "ACCESS_DENIED",
+      ),
+    )
+    val error = shopify.orderForDss("gid://shopify/Order/1001").failureReason() as ShopifyError.AccessDenied
+    assert(error.requiredScopeHandles == listOf(FULFILLMENT_ORDERS_SCOPE, "read_customers"))
+  }
+
+  /** Shopify words a field that any one of several scopes opens as a list; every handle is one a human may grant. */
+  @Test
+  fun `access denied naming alternative scopes lists every one of them`() = runBlocking {
+    val message = "Access denied for fulfillmentOrders field. Required access: `read_assigned_fulfillment_orders` " +
+      "access scope, `read_merchant_managed_fulfillment_orders` access scope or `read_third_party_fulfillment_orders` " +
+      "access scope."
+    fake.stubRaw("GetOrderForDss", accessDeniedEnvelope(message))
+    val error = shopify.orderForDss("gid://shopify/Order/1001").failureReason() as ShopifyError.AccessDenied
+    val expected = listOf(
+      "read_assigned_fulfillment_orders",
+      "read_merchant_managed_fulfillment_orders",
+      "read_third_party_fulfillment_orders",
+    )
+    assert(error.requiredScopeHandles == expected)
+  }
+
+  @Test
+  fun `an access denied whose message names no scope is AccessDenied with no handles`() = runBlocking {
+    fake.stubRaw("GetOrderForDss", accessDeniedEnvelope("Access denied for order field."))
+    val error = shopify.orderForDss("gid://shopify/Order/1001").failureReason()
+    assert(error == ShopifyError.AccessDenied("Access denied for order field.", emptyList(), testTokenFingerprint))
+  }
+
+  /** A throttle beside the refusal must still read as one, so nothing hides behind the friendlier name. */
+  @Test
+  fun `access denied mixed with another code stays a GraphqlError carrying both codes`() = runBlocking {
+    fake.stubRaw(
+      "GetOrderForDss",
+      graphqlErrorEnvelope(accessDeniedMessage() to "ACCESS_DENIED", "Throttled" to "THROTTLED"),
+    )
+    val error = shopify.orderForDss("gid://shopify/Order/1001").failureReason() as ShopifyError.GraphqlError
+    assert(error.codes == listOf("ACCESS_DENIED", "THROTTLED"))
+    assert(error.isRetryable)
+  }
+
+  @Test
+  fun `access denied beside an error without a code stays a GraphqlError`() = runBlocking {
+    fake.stubRaw(
+      "GetOrderForDss",
+      """{"data":null,"errors":[{"message":"Access denied for order field.","extensions":{"code":"ACCESS_DENIED"}},{"message":"Something else"}]}""",
+    )
+    assert(shopify.orderForDss("gid://shopify/Order/1001").failureReason() is ShopifyError.GraphqlError)
+  }
+
+  /** The grant is short, the token is valid: evicting it would turn a re-authorization into a full reinstall. */
+  @Test
+  fun `an access denied answer does not report a rejected token`() = runBlocking {
+    fake.stubRaw("GetOrderForDss", accessDeniedEnvelope())
+    var reported = false
+    serviceReporting { reported = true }.orderForDss("gid://shopify/Order/1001")
+    assert(!reported)
   }
 
   @Test
@@ -670,6 +776,89 @@ class HttpShopifyGraphqlServiceTest {
     fake.stubData("GetFulfillmentContent", GetFulfillmentContent.Result(fulfillment = null), GetFulfillmentContent.Result.serializer())
     val result = shopify.fulfillmentContent("gid://shopify/Fulfillment/8000")
     assert(result.failureReason() == ShopifyError.NotFound("fulfillment 8000 not found"))
+  }
+
+  /** Written by hand, so the field names are Shopify's rather than whatever the generated types round-trip. */
+  @Test
+  fun `fulfillmentEvents sends the gid and its page size and answers the events as Shopify writes them`() = runBlocking {
+    fake.stubRaw(
+      "GetFulfillmentEvents",
+      """
+      {"data":{"fulfillment":{"events":{"nodes":[
+        {"id":"gid://shopify/FulfillmentEvent/7002","status":"OUT_FOR_DELIVERY","happenedAt":"2026-04-03T07:00:00Z"},
+        {"id":"gid://shopify/FulfillmentEvent/7001","status":"IN_TRANSIT","happenedAt":"2026-04-02T10:30:00+02:00"}
+      ]}}}}
+      """.trimIndent(),
+    )
+    val events = shopify.fulfillmentEvents("gid://shopify/Fulfillment/5000").successValue()
+
+    val expected = listOf(
+      ShopifyFulfillmentEvent(
+        ShopifyFulfillmentEventId(7002L),
+        FulfillmentEventStatus.OUT_FOR_DELIVERY,
+        Instant.parse("2026-04-03T07:00:00Z"),
+      ),
+      ShopifyFulfillmentEvent(
+        ShopifyFulfillmentEventId(7001L),
+        FulfillmentEventStatus.IN_TRANSIT,
+        Instant.parse("2026-04-02T08:30:00Z"),
+      ),
+    )
+    assert(events == expected)
+    val variables = fake.calls.single().variables.jsonObject
+    assert(variables["id"]?.jsonPrimitive?.content == "gid://shopify/Fulfillment/5000")
+    assert(variables["eventsFirst"]?.jsonPrimitive?.int == 50)
+  }
+
+  @Test
+  fun `fulfillmentEvents answers NotFound naming the legacy id when Shopify has no such fulfillment`() = runBlocking {
+    fake.stubRaw("GetFulfillmentEvents", """{"data":{"fulfillment":null}}""")
+    val result = shopify.fulfillmentEvents("gid://shopify/Fulfillment/5000")
+    assert(result.failureReason() == ShopifyError.NotFound("fulfillment 5000 not found"))
+  }
+
+  /** An event in a status this build does not know is still an event: the read answers it rather than failing. */
+  @Test
+  fun `fulfillmentEvents decodes a status this build does not know`() = runBlocking {
+    fake.stubRaw(
+      "GetFulfillmentEvents",
+      """
+      {"data":{"fulfillment":{"events":{"nodes":[
+        {"id":"gid://shopify/FulfillmentEvent/7001","status":"TELEPORTED","happenedAt":"2026-04-02T08:30:00Z"}
+      ]}}}}
+      """.trimIndent(),
+    )
+    val events = shopify.fulfillmentEvents("gid://shopify/Fulfillment/5000").successValue()
+    assert(events.single().status == FulfillmentEventStatus.__UNKNOWN_VALUE)
+  }
+
+  /** A time that does not read cannot be compared, and taking it for "no such event" would create a duplicate. */
+  @Test
+  fun `fulfillmentEvents refuses an event whose time does not read`() = runBlocking {
+    fake.stubRaw(
+      "GetFulfillmentEvents",
+      """
+      {"data":{"fulfillment":{"events":{"nodes":[
+        {"id":"gid://shopify/FulfillmentEvent/7001","status":"IN_TRANSIT","happenedAt":"yesterday"}
+      ]}}}}
+      """.trimIndent(),
+    )
+    val result = shopify.fulfillmentEvents("gid://shopify/Fulfillment/5000")
+    assert(result.failureReason() is ShopifyError.Undecodable)
+  }
+
+  @Test
+  fun `fulfillmentEvents refuses an event whose id carries no number`() = runBlocking {
+    fake.stubRaw(
+      "GetFulfillmentEvents",
+      """
+      {"data":{"fulfillment":{"events":{"nodes":[
+        {"id":"gid://shopify/FulfillmentEvent/","status":"IN_TRANSIT","happenedAt":"2026-04-02T08:30:00Z"}
+      ]}}}}
+      """.trimIndent(),
+    )
+    val result = shopify.fulfillmentEvents("gid://shopify/Fulfillment/5000")
+    assert(result.failureReason() is ShopifyError.Undecodable)
   }
 
   private fun contentFulfillment(vararg lines: ContentLine, morePages: Boolean = false) =
@@ -1047,7 +1236,7 @@ class HttpShopifyGraphqlServiceTest {
   fun `a 401 from Shopify is a rejected token, not a network failure`() = runBlocking {
     fake.stubRaw("ShopIdentity", """{"errors":"[API] Invalid API key or access token"}""", HttpStatusCode.Unauthorized)
     val result = shopify.shopIdentity()
-    assert(result.failureReason() == ShopifyError.TokenRejected(401))
+    assert(result.failureReason() == ShopifyError.TokenRejected(401, testTokenFingerprint))
   }
 
   @Test
@@ -1055,7 +1244,7 @@ class HttpShopifyGraphqlServiceTest {
     fake.stubRaw("ShopIdentity", """{"errors":"[API] Invalid API key or access token"}""", HttpStatusCode.Unauthorized)
     var reported = 0
     val result = serviceReporting { reported++ }.shopIdentity()
-    assert(result.failureReason() == ShopifyError.TokenRejected(401))
+    assert(result.failureReason() == ShopifyError.TokenRejected(401, testTokenFingerprint))
     assert(reported == 1)
   }
 
@@ -1119,6 +1308,23 @@ class HttpShopifyGraphqlServiceTest {
     )
     val result = shopify.createFulfillmentEvent("gid://shopify/Fulfillment/5001", FulfillmentEventStatus.IN_TRANSIT, "2026-04-02T08:30:00Z", null)
     assert(result.failureReason() is ShopifyError.GraphqlError)
+  }
+
+  /** Classed as the events read classes the same id. */
+  @Test
+  fun `createFulfillmentEvent with an event whose id carries no number is Undecodable`() = runBlocking {
+    fake.stubRaw(
+      "FulfillmentEventCreateMutation",
+      """
+      {"data":{"fulfillmentEventCreate":{
+        "fulfillmentEvent":{"id":"gid://shopify/FulfillmentEvent/","status":"IN_TRANSIT","message":null},
+        "userErrors":[]
+      }}}
+      """.trimIndent(),
+    )
+    val fulfillmentGid = "gid://shopify/Fulfillment/5001"
+    val result = shopify.createFulfillmentEvent(fulfillmentGid, FulfillmentEventStatus.IN_TRANSIT, "2026-04-02T08:30:00Z", null)
+    assert(result.failureReason() is ShopifyError.Undecodable)
   }
 
   @Test
@@ -1452,6 +1658,18 @@ id: String = "gid://shopify/Shop/1", domain: String = "acme.myshopify.com") {
   }
 
   /** A `GetOrderForDss` answer written the way Shopify writes it, matching [minimalOrder] unless a case changes a value. */
+  /** A product as Shopify writes it, without variants or media: what a case about one product field needs. */
+  private fun rawProductJson(status: String): String =
+    """
+    {"data":{"shop":{"currencyCode":"EUR"},"product":{
+      "legacyResourceId":"501","title":"Sample","description":"","descriptionHtml":"","vendor":"","productType":"",
+      "tags":[],"handle":"sample","status":"$status","publishedAt":null,
+      "createdAt":"2026-04-01T00:00:00Z","updatedAt":"2026-04-01T00:00:00Z",
+      "media":{"pageInfo":{"hasNextPage":false},"edges":[]},
+      "variants":{"pageInfo":{"hasNextPage":false},"edges":[]}
+    }}}
+    """.trimIndent()
+
   private fun rawOrderJson(
     displayFulfillmentStatus: String = "UNFULFILLED",
     fulfillmentOrderStatus: String = "OPEN",
@@ -1465,7 +1683,7 @@ id: String = "gid://shopify/Shop/1", domain: String = "acme.myshopify.com") {
       "shippingAddress":null,
       "lineItems":{"pageInfo":{"hasNextPage":false},"edges":[{"node":{
         "id":"gid://shopify/LineItem/201","quantity":2,"name":"T-Shirt - Blue","title":"T-Shirt",
-        "originalUnitPriceSet":{"shopMoney":{"amount":"19.99"}},"variant":{"legacyResourceId":"101"},
+        "variantTitle":"Blue","originalUnitPriceSet":{"shopMoney":{"amount":"19.99"}},"variant":{"legacyResourceId":"101"},
         "product":{"legacyResourceId":"501"}
       }}]},
       "fulfillmentOrders":{"pageInfo":{"hasNextPage":false},"edges":[{"node":{

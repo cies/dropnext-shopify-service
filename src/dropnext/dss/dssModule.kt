@@ -15,7 +15,7 @@ import dropnext.dss.routing.diagnosticsRoutes
 import dropnext.dss.routing.monolithWebhookRoutes
 import dropnext.dss.routing.oauthRoutes
 import dropnext.dss.routing.shopifyWebhookRoutes
-import dropnext.dss.routing.webhookSubscriptionRoutes
+import dropnext.dss.routing.shopifyStoreRoutes
 import io.ktor.server.application.Application
 import io.ktor.server.application.ApplicationStopped
 import io.ktor.server.routing.routing
@@ -45,7 +45,7 @@ fun Application.dssModule(deps: DssDependencies, warmUp: WarmUp) {
 
   routing {
     diagnosticsRoutes(handlers = deps.diagnosticsHandlers)
-    webhookSubscriptionRoutes(handlers = deps.webhookSubscriptionHandlers)
+    shopifyStoreRoutes(handlers = deps.shopifyStoreHandlers)
     oauthRoutes(
       handlers = deps.oauthHandlers,
       oauthCallbackPath = deps.config.oauthRedirectPath,

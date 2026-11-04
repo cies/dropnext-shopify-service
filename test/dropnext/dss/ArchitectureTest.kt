@@ -328,6 +328,35 @@ class ArchitectureTest {
   }
 
   /**
+   * Every value the install page shows is escaped by `kotlinx.html`.
+   * The one exception is its style sheet, which a style element would not decode if it were escaped:
+   * a fixed string written with `unsafe`, in that one file, so a value can never reach the page unescaped.
+   * Mirrors the monolith's rule for its e-mail layout.
+   */
+  @Test
+  fun `only the install page's style sheet is written unescaped`() {
+    val unsafeUse = Regex("""\bunsafe\b""")
+    val styleSheetUse = Regex("""\bunsafe\s*\{\s*raw\(STYLE_SHEET\)\s*}""")
+    val presentationFiles = srcFiles.filter { "/src/dropnext/dss/presentation/" in it.path }
+    assert(presentationFiles.isNotEmpty()) // After a package rename the sweep would pass on nothing.
+    val installPage = presentationFiles.single { it.path.endsWith("/presentation/renderOAuthInstallPage.kt") }
+    val offenders = presentationFiles.filter { file ->
+      val code = file.code.lines().filterNot { it.trimStart().startsWith("import ") }.joinToString("\n")
+      val allowed = if (file == installPage) styleSheetUse.findAll(code).count() else 0
+      unsafeUse.findAll(code).count() != allowed
+    }
+    assert(offenders.isEmpty()) {
+      "presentation/* writes raw HTML other than the install page's fixed style sheet:\n" +
+        offenders.joinToString("\n") { it.path }
+    }
+    // A template would let a value in after all.
+    val styleSheetStart = "STYLE_SHEET = \"\"\""
+    assert(styleSheetStart in installPage.code)
+    val styleSheet = installPage.code.substringAfter(styleSheetStart).substringBefore("\"\"\"")
+    assert('$' !in styleSheet)
+  }
+
+  /**
    * Files allowed to build a `kotlinx.serialization.json.Json` instance or use the default one. Everywhere else must
    * reuse the shared `AppJson` (inbound Shopify), `MonolithJson` (outbound monolith) or `ContractJson` (what this
    * service answers the monolith with) singletons so serialization config stays consistent.
@@ -408,6 +437,7 @@ class ArchitectureTest {
    */
   private val contractRespondingFiles = listOf(
     "/dropnext/dss/handler/MonolithWebhookHandlers.kt", // Every monolith-facing route's success answer.
+    "/dropnext/dss/handler/ShopifyStoreHandlers.kt", // The store status and the webhook registration.
     "/dropnext/dss/lib/ktor/DssError.kt", // `respondError`: the contract's error bodies.
   )
 

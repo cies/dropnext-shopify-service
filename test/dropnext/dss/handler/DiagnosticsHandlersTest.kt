@@ -29,7 +29,8 @@ class DiagnosticsHandlersTest {
     assert(Paths.syncShipmentsWithFulfillments in body)
     assert(Paths.trackingUpdate in body)
     assert(Paths.storesApiKey in body)
-    assert(Paths.apiWebhooksRegister in body)
+    assert(Paths.storesShopifyStatus in body)
+    assert(Paths.storesShopifyWebhooksRegister in body)
   }
 
   @Test

@@ -6,6 +6,8 @@ import dropnext.dss.boot.warmup.Readiness
 import dropnext.dss.boot.warmup.WARM_UP_BUDGET
 import dropnext.dss.boot.warmup.WarmUp
 import dropnext.dss.boot.warmup.WarmUpLoopbackService
+import dropnext.dss.boot.warmup.exitRefusingTraffic
+import dropnext.dss.boot.warmup.reportContractDrift
 import dropnext.dss.boot.warmup.warmUpBeforeTakingTraffic
 import dropnext.dss.handler.DiagnosticsHandlers
 import dropnext.dss.handler.MAX_CONCURRENT_MIRRORS
@@ -15,11 +17,12 @@ import dropnext.dss.handler.ShopifyWebhookHandlers
 import dropnext.dss.handler.WEBHOOK_MIRROR_BUDGET
 import dropnext.dss.handler.WEBHOOK_MONOLITH_MAX_RETRIES
 import dropnext.dss.handler.WEBHOOK_WRITE_GRACE
-import dropnext.dss.handler.WebhookSubscriptionHandlers
+import dropnext.dss.handler.ShopifyStoreHandlers
 import dropnext.dss.lib.ktor.createMonolithHttpClient
 import dropnext.dss.lib.ktor.createSharedHttpClient
 import dropnext.dss.lib.monolith.HttpMonolithService
 import dropnext.dss.lib.monolith.MonolithService
+import dropnext.dss.lib.monolith.OutBoundMonolithPortalPaths
 import dropnext.dss.lib.shopify.graphql.HttpShopifyGraphqlServiceFactory
 import dropnext.dss.lib.shopify.graphql.ShopifyGraphqlServiceFactory
 import dropnext.dss.lib.shopify.oauth.HttpShopifyOAuthService
@@ -28,6 +31,7 @@ import dropnext.dss.lib.shopify.token.InMemoryShopTokenStore
 import dropnext.dss.lib.shopify.token.ShopTokenStore
 import dropnext.dss.lib.shopify.webhook.ShopifyHmacVerifierService
 import dropnext.dss.workflow.SHIPMENT_SYNC_BUDGET
+import dropnext.dss.workflow.UnknownProductStatusWarning
 import dropnext.dss.workflow.resolveShopTokenFromMonolith
 import io.github.oshai.kotlinlogging.KotlinLogging
 import io.ktor.client.HttpClient
@@ -54,7 +58,7 @@ class DssDependencies(
   private val monolithHttpClient: HttpClient,
   private val webhookMonolithHttpClient: HttpClient,
   val diagnosticsHandlers: DiagnosticsHandlers,
-  val webhookSubscriptionHandlers: WebhookSubscriptionHandlers,
+  val shopifyStoreHandlers: ShopifyStoreHandlers,
   val oauthHandlers: OAuthHandlers,
   val shopifyWebhookHandlers: ShopifyWebhookHandlers,
   val monolithWebhookHandlers: MonolithWebhookHandlers,
@@ -138,14 +142,20 @@ fun dssDependencies(
   webhookMirrorBudget: Duration = WEBHOOK_MIRROR_BUDGET,
   webhookWriteGrace: Duration = WEBHOOK_WRITE_GRACE,
   webhookMirrorSlots: Semaphore = Semaphore(MAX_CONCURRENT_MIRRORS),
-  /** The two the delivery report's timings are read from; a test hands in a fixed pair to assert what it printed. */
-  webhookClock: Clock = Clock.systemUTC(),
+  /**
+   * The wall clock: when a webhook delivery was received, and when an access problem was observed.
+   * A test hands in a fixed one to assert what was printed or reported.
+   */
+  clock: Clock = Clock.systemUTC(),
+  /** What a delivery's `took_ms` is measured with. */
   webhookTimeSource: TimeSource = TimeSource.Monotonic,
   /** How the monolith-facing reads wait for a shop's Shopify bucket; a test hands in one that records instead. */
   shopifyReadPause: suspend (Duration) -> Unit = { delay(it) },
   /** What a shipments sync measures its budget on; a test hands in one it moves on by hand. */
   shipmentSyncTimeSource: TimeSource = TimeSource.Monotonic,
   shipmentSyncBudget: Duration = SHIPMENT_SYNC_BUDGET,
+  /** One per process, so a status Shopify adds is warned about once, whichever route maps it first. */
+  unknownProductStatusWarning: UnknownProductStatusWarning = UnknownProductStatusWarning(Config.SHOPIFY_API_VERSION),
   readiness: Readiness = Readiness(),
   /** The requests the warm-up sends the service itself: the shared client, to the port the server binds. */
   warmUpLoopback: WarmUpLoopbackService = HttpWarmUpLoopbackService(
@@ -160,9 +170,15 @@ fun dssDependencies(
   monolithHttpClient = monolithHttpClient,
   webhookMonolithHttpClient = webhookMonolithHttpClient,
   diagnosticsHandlers = DiagnosticsHandlers(config, readiness),
-  webhookSubscriptionHandlers = WebhookSubscriptionHandlers(config.dssBaseUrl, shopifyGraphqlServiceFactory),
+  shopifyStoreHandlers = ShopifyStoreHandlers(
+    config.dssBaseUrl,
+    shopifyGraphqlServiceFactory,
+    monolithService,
+    clock,
+  ),
   oauthHandlers = OAuthHandlers(
     config.dssBaseUrl,
+    config.portalBaseUrl + OutBoundMonolithPortalPaths.retailerPortalRoot,
     oauthClient,
     shopifyGraphqlServiceFactory,
     monolithService,
@@ -173,10 +189,11 @@ fun dssDependencies(
     shopifyGraphqlServiceFactory,
     webhookMonolithService,
     shopifyHmacVerifierService,
+    unknownProductStatusWarning,
     webhookMirrorBudget,
     webhookWriteGrace,
     webhookMirrorSlots,
-    webhookClock,
+    clock,
     webhookTimeSource,
   ),
   monolithWebhookHandlers = MonolithWebhookHandlers(
@@ -184,6 +201,8 @@ fun dssDependencies(
     monolithService,
     shopTokens,
     shopifyReadPause,
+    unknownProductStatusWarning,
+    clock,
     shipmentSyncTimeSource,
     shipmentSyncBudget,
   ),
@@ -191,12 +210,19 @@ fun dssDependencies(
   // The workflow keeps its own deadline and reports the steps it had to cut short or skip; the module's bound, a
   // second later, is the backstop for a step that ignores its cancellation. The monolith is asked through the
   // webhook service (one retry), so a monolith that is down costs the first step ~10.5 s and the rest still runs.
-  warmUp = WarmUp(budget = WARM_UP_BUDGET + 1.seconds) { serverBound ->
+  // A shared secret the other side refuses ends the process instead of opening the gate. The contract drift check
+  // decides nothing, so it runs once the gate is open, bounded by the client's timeout rather than by the budget.
+  warmUp = WarmUp(
+    budget = WARM_UP_BUDGET + 1.seconds,
+    refuseTraffic = ::exitRefusingTraffic,
+    afterReady = { traceId -> reportContractDrift(webhookMonolithService, traceId) },
+  ) { serverBound, traceId ->
     warmUpBeforeTakingTraffic(
       monolith = webhookMonolithService,
       loopback = warmUpLoopback,
       serverBound = serverBound,
+      traceId = traceId,
       budget = WARM_UP_BUDGET,
-    )
+    ).verdict
   },
 )

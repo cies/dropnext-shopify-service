@@ -81,7 +81,10 @@ fun mapOrderForMonolith(
       shopifyLineItemId = lineId,
       productVariantId = variantLegacy,
       quantity = li.quantity,
-      snapshotOfVariantTitle = li.name,
+      // For its sibling line item types, Shopify documents `variantTitle` as null
+      // for a product without distinct variants and for a custom line (which has no variant and is left out above).
+      // `name` is then the product title alone, and it stands in because the contract requires the field.
+      snapshotOfVariantTitle = li.variantTitle ?: li.name,
       snapshotOfProductTitle = li.title,
       snapshotOfPriceAsString = shopifyMoneyAmountForWire(li.originalUnitPriceSet.shopMoney.amount),
       // Absent for a product deleted since the order; the monolith then holds the line only if it knows the variant.

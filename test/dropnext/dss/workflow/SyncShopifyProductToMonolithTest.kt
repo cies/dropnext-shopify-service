@@ -2,6 +2,8 @@ package dropnext.dss.workflow
 
 import dev.forkhandles.result4k.Failure
 import dev.forkhandles.result4k.Success
+import dropnext.dss.boot.config.Config
+import dropnext.dss.contract.ProductStatus
 import dropnext.dss.lib.monolith.MonolithError
 import dropnext.dss.lib.monolith.MonolithErrorBody
 import dropnext.dss.lib.shopify.graphql.ShopProduct
@@ -13,6 +15,7 @@ import dropnext.dss.testutil.fixture.sampleProductPage
 import dropnext.dss.testutil.fixture.sampleProductVariant
 import dropnext.dss.testutil.helper.GLOBAL_LOG_REGISTRY
 import dropnext.dss.testutil.helper.capturingLogs
+import dropnext.graphql.generated.enums.ProductStatus as GraphqlProductStatus
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.parallel.ResourceLock
@@ -27,6 +30,25 @@ private const val PRODUCT_GID = "gid://shopify/Product/501"
  */
 class SyncShopifyProductToMonolithTest {
 
+  private val statusWarning = UnknownProductStatusWarning(Config.SHOPIFY_API_VERSION)
+
+  /** The mapper only says the status was unknown; the workflow is where the line is written, with the version. */
+  @Test
+  @ResourceLock(GLOBAL_LOG_REGISTRY)
+  fun `a product whose status this build does not know is mirrored as a draft and warned about`() {
+    val monolith = FakeMonolithService()
+    val product = sampleProduct(legacyResourceId = "501", variantId = "9001", status = GraphqlProductStatus.__UNKNOWN_VALUE)
+    val shopify = FakeShopifyGraphqlService().apply { productByIdResult = Success(ShopProduct(product, "EUR")) }
+
+    val lines = capturingLogs { runBlocking { syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID, statusWarning) } }
+
+    assert(lines.value == WebhookMirrorOutcome.Mirrored)
+    assert(monolith.upsertProductVariantsCalls.single().productVariants.single().productStatus == ProductStatus.DRAFT)
+    val line = lines.single { "Shopify product status unknown to this build" in it }
+    assert("product_id=501" in line)
+    assert("api_version=${Config.SHOPIFY_API_VERSION}" in line)
+  }
+
   @Test
   fun `loads the product by gid and upserts its variants under the shop's subdomain and currency`() = runBlocking {
     val monolith = FakeMonolithService()
@@ -34,7 +56,7 @@ class SyncShopifyProductToMonolithTest {
       productByIdResult = Success(ShopProduct(sampleProduct(legacyResourceId = "501", variantId = "9001"), "EUR"))
     }
 
-    val outcome = syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID)
+    val outcome = syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID, statusWarning)
 
     assert(outcome == WebhookMirrorOutcome.Mirrored)
     assert(shopify.productByIdCalls == listOf(PRODUCT_GID))
@@ -56,7 +78,7 @@ class SyncShopifyProductToMonolithTest {
     )
     val shopify = FakeShopifyGraphqlService().apply { productByIdResult = Success(ShopProduct(product, "EUR")) }
 
-    val outcome = syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID)
+    val outcome = syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID, statusWarning)
 
     assert(outcome == WebhookMirrorOutcome.Mirrored)
     val upsert = monolith.upsertProductVariantsCalls.single()
@@ -69,7 +91,7 @@ class SyncShopifyProductToMonolithTest {
     val monolith = FakeMonolithService()
     val shopify = FakeShopifyGraphqlService().apply { productByIdResult = Success(null) }
 
-    val outcome = syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID)
+    val outcome = syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID, statusWarning)
 
     assert(outcome == WebhookMirrorOutcome.Skipped(WebhookSkipReason.PRODUCT_GONE))
     assert(monolith.upsertProductVariantsCalls.isEmpty())
@@ -86,7 +108,7 @@ class SyncShopifyProductToMonolithTest {
       productByIdResult = Failure(ShopifyError.Truncated("product.variants", 100))
     }
 
-    val outcome = runBlocking { syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID) }
+    val outcome = runBlocking { syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID, statusWarning) }
 
     assert(monolith.upsertProductVariantsCalls.isEmpty())
     assert(outcome == WebhookMirrorOutcome.ShopifyFailed(ShopifyError.Truncated("product.variants", 100)))
@@ -101,7 +123,7 @@ class SyncShopifyProductToMonolithTest {
       productByIdResultQueue += Success(sampleProductPage((101L..150L).toList()))
     }
 
-    val outcome = syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID)
+    val outcome = syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID, statusWarning)
 
     assert(outcome == WebhookMirrorOutcome.Mirrored)
     assert(shopify.productByIdCursors == listOf(null, "c1"))
@@ -124,7 +146,7 @@ class SyncShopifyProductToMonolithTest {
       }
     }
 
-    val outcome = syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID)
+    val outcome = syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID, statusWarning)
 
     val truncated = ShopifyError.Truncated("product.variants", WEBHOOK_MAX_VARIANT_PAGES * 100)
     assert(outcome == WebhookMirrorOutcome.ShopifyFailed(truncated))
@@ -139,7 +161,7 @@ class SyncShopifyProductToMonolithTest {
     val monolith = FakeMonolithService()
     val shopify = FakeShopifyGraphqlService().apply { productByIdResult = Failure(ShopifyError.HttpError(429)) }
 
-    val lines = capturingLogs { runBlocking { syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID) } }
+    val lines = capturingLogs { runBlocking { syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID, statusWarning) } }
 
     assert(monolith.upsertProductVariantsCalls.isEmpty())
     // A throttled Shopify is worth a redelivery.
@@ -159,7 +181,7 @@ class SyncShopifyProductToMonolithTest {
       productByIdResult = Success(ShopProduct(sampleProduct(legacyResourceId = "501", variantId = null), "EUR"))
     }
 
-    val outcome = syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID)
+    val outcome = syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID, statusWarning)
 
     assert(outcome == WebhookMirrorOutcome.Skipped(WebhookSkipReason.NO_MAPPABLE_LINES))
     assert(shopify.productByIdCalls.size == 1)
@@ -174,10 +196,11 @@ class SyncShopifyProductToMonolithTest {
       productByIdResult = Success(ShopProduct(sampleProduct(legacyResourceId = "501", variantId = "9001"), "EUR"))
     }
 
-    val lines = capturingLogs { runBlocking { syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID) } }
+    val lines = capturingLogs { runBlocking { syncShopifyProductToMonolith(shopify, monolith, PRODUCT_GID, statusWarning) } }
 
     assert(monolith.upsertProductVariantsCalls.size == 1)
-    val rejection = MonolithError.Rejected(500, "forced fail", MonolithErrorBody("forced fail", "VariantError", "fake-upsert"))
+    val body = MonolithErrorBody("forced fail", "VariantError", "fake-upsert", isContractEnvelope = true)
+    val rejection = MonolithError.Rejected(500, "forced fail", body)
     assert(lines.value == WebhookMirrorOutcome.MonolithFailed(rejection))
     // A monolith that answers a 5xx may take the redelivery.
     assert(lines.value.isTransient)
